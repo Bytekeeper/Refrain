@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use audioeditor_engine::{
     Clip, Fade, Frames, MAX_DB, MIN_DB, Project, TrackId, clip_amp, edge_fades, overlap_after, overlap_before,
+    similarity,
 };
 use craft_audio::peaks::Peaks;
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -13,10 +14,11 @@ use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H};
 
 const RULER_H: f32 = 22.0;
 pub(crate) const SCROLLBAR_H: f32 = 12.0;
-/// Translucent orange over the frames where two clips crossfade.
-const OVERLAP_FILL: Color32 = Color32::from_rgba_unmultiplied_const(255, 140, 0, 120);
 pub(crate) const CURVE: Color32 = Color32::from_rgb(255, 200, 80);
 const LOOP: Color32 = Color32::from_rgb(90, 200, 120);
+const WAVE: Color32 = Color32::from_rgb(150, 200, 240);
+/// The later clip's waveform where two clips overlap.
+const WAVE_LATER: Color32 = Color32::from_rgb(245, 175, 110);
 
 /// How a clip is drawn.
 #[derive(Clone, Copy, PartialEq)]
@@ -291,30 +293,10 @@ impl Editor {
         // Playback uses the first two channels, so those are the ones shown: one band each.
         let shown = clip.source.channels.len().min(2);
         let band = (area.height() - 4.0) / shown.max(1) as f32;
-        let first = self.frame_at(lane_left, visible.left()) - start + clip.offset;
-        let cols = visible.width().max(0.0) as usize;
-        let wave = Stroke::new(1.0, Color32::from_rgb(150, 200, 240));
-        for (channel, samples) in clip.source.channels.iter().take(shown).enumerate() {
-            let mid = area.top() + 2.0 + band * (channel as f32 + 0.5);
-            let half = band / 2.0 - 2.0;
-            let key = (Arc::as_ptr(&clip.source) as usize, channel);
-            let (_, peaks) = self
-                .peaks
-                .entry(key)
-                .or_insert_with(|| (Arc::downgrade(&clip.source), Peaks::build(samples)));
-            for (col, span) in peaks
-                .spans(samples, first as f64, self.frames_per_px, 0.0, cols)
-                .into_iter()
-                .enumerate()
-            {
-                if let Some((lo, hi)) = span {
-                    let x = visible.left() + col as f32 + 0.5;
-                    painter.line_segment(
-                        [pos2(x, mid - hi * half), pos2(x, mid - lo.min(hi - 0.01) * half)],
-                        wave,
-                    );
-                }
-            }
+        for channel in 0..shown {
+            let top = area.top() + 2.0 + band * channel as f32;
+            let rows = Rect::from_x_y_ranges(visible.x_range(), top..=top + band);
+            self.draw_wave(painter, lane_left, clip, channel, rows, WAVE);
         }
         if shown == 2 {
             let y = area.top() + 2.0 + band;
@@ -384,10 +366,11 @@ impl Editor {
         );
     }
 
-    /// Tints each crossfade and draws both of its fade lines and volume points, which the clip on top would hide.
+    /// Shows each crossfade in its own way: both clips' waveforms channel by channel (left of both, then
+    /// right of both), so peaks can be lined up, both fade lines, and how alike the two sound.
     /// `wrapped` are the parts from past the loop end, which crossfade with the start of the track.
     fn draw_overlaps(
-        &self,
+        &mut self,
         painter: &egui::Painter,
         rect: Rect,
         row: usize,
@@ -396,6 +379,7 @@ impl Editor {
         wrapped: &[(Clip, (Fade, Fade))],
     ) {
         let lane_left = rect.left() + HEADER_W;
+        let view = painter.clip_rect();
         // Wrapped parts first, so at the same start they count as the earlier clip.
         let mut parts: Vec<(&Clip, (Fade, Fade), bool)> = wrapped.iter().map(|(c, f)| (c, *f, true)).collect();
         parts.extend(
@@ -407,28 +391,122 @@ impl Editor {
         parts.sort_by_key(|(c, ..)| c.start);
         for pair in parts.windows(2) {
             let [a, b] = pair else { continue };
-            if a.0.end() <= b.0.start {
+            let (from, to) = (b.0.start, a.0.end().min(b.0.end()));
+            if to <= from {
                 continue;
             }
             let area = self.clip_area(rect, row, a.0.start, a.0.len);
-            let x0 = self.x_of(lane_left, b.0.start);
-            let x1 = self.x_of(lane_left, a.0.end().min(b.0.end()));
-            let zone = Rect::from_min_max(pos2(x0, area.top()), pos2(x1, area.bottom()));
-            painter.rect_filled(zone, 0.0, OVERLAP_FILL);
+            let zone = Rect::from_x_y_ranges(self.x_of(lane_left, from)..=self.x_of(lane_left, to), area.y_range());
+            let shown = Rect::from_x_y_ranges(
+                zone.left().max(view.left())..=zone.right().min(view.right()),
+                zone.y_range(),
+            );
+            if shown.width() <= 0.0 {
+                continue;
+            }
+            painter.rect_filled(zone, 0.0, Color32::from_rgb(34, 44, 56));
+
+            let stereo = a.0.source.channels.len() >= 2 || b.0.source.channels.len() >= 2;
+            let names: &[&str] = if stereo { &["L1", "L2", "R1", "R2"] } else { &["1", "2"] };
+            let band = (zone.height() - 4.0) / names.len() as f32;
+            for (i, name) in names.iter().enumerate() {
+                let (clip, color) = if i % 2 == 0 { (a.0, WAVE) } else { (b.0, WAVE_LATER) };
+                let channel = (i / 2).min(clip.source.channels.len().saturating_sub(1));
+                let top = zone.top() + 2.0 + band * i as f32;
+                let rows = Rect::from_x_y_ranges(shown.x_range(), top..=top + band);
+                self.draw_wave(painter, lane_left, clip, channel, rows, color);
+                if i % 2 == 1 && i + 1 < names.len() {
+                    let y = top + band;
+                    painter.line_segment(
+                        [pos2(shown.left(), y), pos2(shown.right(), y)],
+                        Stroke::new(1.0, Color32::from_gray(90)),
+                    );
+                }
+                if zone.width() > 40.0 {
+                    painter.text(
+                        pos2(shown.left() + 3.0, top + 1.0),
+                        Align2::LEFT_TOP,
+                        *name,
+                        FontId::monospace(9.0),
+                        color,
+                    );
+                }
+            }
             painter.rect_stroke(zone, 0.0, Stroke::new(1.0, CURVE), StrokeKind::Inside);
+
             for &(clip, fades, is_wrapped) in [a, b] {
                 let mut line = vec![];
-                let mut x = zone.left().max(lane_left);
-                while x <= zone.right().min(painter.clip_rect().right()) {
+                let mut x = shown.left();
+                while x <= shown.right() {
                     let rel = (self.frame_at(lane_left, x) - clip.start).clamp(0, clip.len.saturating_sub(1));
                     line.push(pos2(x, y_of_amp(area, clip_amp(clip, fades, rel))));
                     x += 2.0;
                 }
                 painter.add(egui::Shape::line(line, Stroke::new(1.5, CURVE)));
                 if !is_wrapped {
-                    let zone_frames = b.0.start - clip.start..=a.0.end().min(b.0.end()) - clip.start;
-                    self.draw_points(painter, area, lane_left, clip, zone_frames);
+                    self.draw_points(painter, area, lane_left, clip, from - clip.start..=to - clip.start);
                 }
+            }
+
+            if let Some(alike) = similarity(a.0, b.0, from, to) {
+                let text = format!("alike {}%", (alike * 100.0).round() as i32);
+                let at = pos2(shown.center().x, zone.bottom() - 3.0);
+                let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
+                let label =
+                    Rect::from_min_size(at - vec2(galley.size().x / 2.0, galley.size().y), galley.size()).expand(2.0);
+                if label.width() < zone.width() {
+                    painter.rect_filled(label, 3.0, Color32::from_black_alpha(170));
+                    painter.galley(label.min + vec2(2.0, 2.0), galley, Color32::WHITE);
+                }
+            }
+        }
+    }
+
+    /// One channel of `clip` as seen in `rows`, which gives the x range and the height.
+    fn draw_wave(
+        &mut self,
+        painter: &egui::Painter,
+        lane_left: f32,
+        clip: &Clip,
+        channel: usize,
+        rows: Rect,
+        color: Color32,
+    ) {
+        let Some(samples) = clip.source.channels.get(channel) else {
+            return;
+        };
+        let mid = rows.center().y;
+        let half = rows.height() / 2.0 - 2.0;
+        let first = self.frame_at(lane_left, rows.left()) - clip.start + clip.offset;
+        let cols = rows.width().max(0.0) as usize;
+        let key = (Arc::as_ptr(&clip.source) as usize, channel);
+        let (_, peaks) = self
+            .peaks
+            .entry(key)
+            .or_insert_with(|| (Arc::downgrade(&clip.source), Peaks::build(samples)));
+        let spans = peaks.spans(samples, first as f64, self.frames_per_px, 0.0, cols);
+        let x_of_col = |col: usize| rows.left() + col as f32 + 0.5;
+        if self.frames_per_px < 4.0 {
+            // Zoomed in, a column holds one or two samples: one line through them shows the wave's shape.
+            let mut line = vec![];
+            for (col, span) in spans.into_iter().enumerate() {
+                match span {
+                    Some((lo, hi)) => line.push(pos2(x_of_col(col), mid - (lo + hi) / 2.0 * half)),
+                    None => {
+                        painter.add(egui::Shape::line(std::mem::take(&mut line), Stroke::new(1.0, color)));
+                    }
+                }
+            }
+            painter.add(egui::Shape::line(line, Stroke::new(1.0, color)));
+            return;
+        }
+        for (col, span) in spans.into_iter().enumerate() {
+            if let Some((lo, hi)) = span {
+                let x = x_of_col(col);
+                painter.line_segment(
+                    [pos2(x, mid - hi * half), pos2(x, mid - lo.min(hi - 0.01) * half)],
+                    Stroke::new(1.0, color),
+                );
             }
         }
     }

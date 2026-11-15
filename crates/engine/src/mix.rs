@@ -130,6 +130,35 @@ fn loop_shifts(clip: &Clip, from: Frames, to: Frames, loop_end: Option<Frames>) 
         .collect()
 }
 
+/// How alike two clips sound over timeline frames `from..to`, before fades and volume: 1 is the same
+/// waveform, 0 unrelated sound, -1 opposite waveforms that cancel out when mixed. `None` where either is silent.
+pub fn similarity(a: &Clip, b: &Clip, from: Frames, to: Frames) -> Option<f32> {
+    // A long overlap is sampled at most this often; enough for a stable number at screen speed.
+    const MAX_POINTS: Frames = 200_000;
+    let step = (to.saturating_sub(from) / MAX_POINTS).max(1);
+    let at = |clip: &Clip, channel: usize, pos: Frames| {
+        let channel = channel.min(clip.source.channels.len().saturating_sub(1));
+        f64::from(
+            clip.source
+                .sample(channel, clip.offset.saturating_add(pos - clip.start)),
+        )
+    };
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    let mut pos = from;
+    while pos < to {
+        // Mono counts as the same sound on both sides, as it is played.
+        for channel in 0..2 {
+            let (x, y) = (at(a, channel, pos), at(b, channel, pos));
+            ab += x * y;
+            aa += x * x;
+            bb += y * y;
+        }
+        pos = pos.saturating_add(step);
+    }
+    let norm = (aa * bb).sqrt();
+    (norm > 1e-12).then(|| (ab / norm) as f32)
+}
+
 /// Linear gain at `rel` frames into the clip: volume curve times the fades from [`edge_fades`].
 pub fn clip_amp(clip: &Clip, (fade_in, fade_out): (Fade, Fade), rel: Frames) -> f32 {
     let mut amp = db_to_amp(envelope_db(&clip.gain, rel));
@@ -265,6 +294,31 @@ mod tests {
         assert_eq!(edge_fades(&clips, 0, None).0.len, 10);
         assert_eq!(edge_fades(&clips, 0, None).1.len, 20);
         assert_eq!(edge_fades(&clips, 1, None).0.len, 20);
+    }
+
+    #[test]
+    fn similarity_of_same_opposite_and_unrelated_sound() {
+        let sine = |freq: f32, sign: f32| {
+            let wave = (0..8000).map(|i| sign * (i as f32 * freq * 0.001 * std::f32::consts::TAU).sin());
+            Arc::new(Source {
+                path: None,
+                name: "s".into(),
+                sample_rate: 1000,
+                channels: vec![wave.collect()],
+            })
+        };
+        let a = clip(1, sine(50.0, 1.0), 0, FadeShape::Linear);
+        // The same audio, but starting 100 frames later in the file: one whole period of 50 Hz at 1000 Hz is 20 frames.
+        let mut same = clip(2, sine(50.0, 1.0), 0, FadeShape::Linear);
+        same.offset = 100;
+        let opposite = clip(3, sine(50.0, -1.0), 0, FadeShape::Linear);
+        let unrelated = clip(4, sine(73.0, 1.0), 0, FadeShape::Linear);
+        let alike = |b: &Clip| similarity(&a, b, 0, 4000).unwrap();
+        assert!((alike(&same) - 1.0).abs() < 1e-4, "{}", alike(&same));
+        assert!((alike(&opposite) + 1.0).abs() < 1e-4);
+        assert!(alike(&unrelated).abs() < 0.05, "{}", alike(&unrelated));
+        let silent = clip(5, constant(0.0, 8000), 0, FadeShape::Linear);
+        assert_eq!(similarity(&a, &silent, 0, 4000), None);
     }
 
     #[test]
