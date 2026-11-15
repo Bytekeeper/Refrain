@@ -138,6 +138,23 @@ impl Editor {
                 self.draw_clip(&lanes, area, lane_left, clip, (fades, free), false);
             }
         }
+        if let Some(Drag::TrimStart { clip, .. } | Drag::TrimEnd { clip, .. }) = &self.drag
+            && let Some((track, c)) = project.clip(*clip)
+            && let Some(row) = project.tracks.iter().position(|t| t.id == track.id)
+        {
+            // How far the edges can go: the whole audio file.
+            let whole = self.clip_area(rect, row, c.start - c.offset, c.source.frames());
+            let r = whole.shrink(1.0);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            let dash = Stroke::new(1.0, Color32::from_gray(170));
+            lanes.extend(egui::Shape::dashed_line(&corners, dash, 6.0, 4.0));
+        }
         if let Some((area, clip, fades, free)) = on_top {
             self.draw_clip(&lanes, area, lane_left, &clip, (fades, free), true);
         }
@@ -186,6 +203,14 @@ impl Editor {
         let mut c = clip.clone();
         match &self.drag {
             Some(Drag::Move { clip, start, .. }) if *clip == c.id => c.start = *start,
+            Some(Drag::TrimStart { clip, start }) if *clip == c.id => {
+                let end = c.end();
+                let _ = c.trim(*start, end);
+            }
+            Some(Drag::TrimEnd { clip, end }) if *clip == c.id => {
+                let start = c.start;
+                let _ = c.trim(start, *end);
+            }
             Some(Drag::FadeIn { clip, len }) if *clip == c.id => c.fade_in.len = *len,
             Some(Drag::FadeOut { clip, len }) if *clip == c.id => c.fade_out.len = *len,
             Some(Drag::Point { clip, index, point }) if *clip == c.id => {
@@ -264,7 +289,7 @@ impl Editor {
         }
         painter.add(egui::Shape::line(line, Stroke::new(1.5, CURVE)));
 
-        for point in &clip.gain {
+        for point in clip.gain.iter().filter(|p| (0..=clip.len).contains(&p.at)) {
             let pos = pos2(
                 self.x_of(lane_left, start + point.at),
                 y_of_amp(area, db_to_amp(point.db)),
@@ -283,6 +308,23 @@ impl Editor {
         {
             let handle = Rect::from_center_size(pos2(x, area.top() + HANDLE), vec2(HANDLE * 1.5, HANDLE * 1.5));
             painter.rect_filled(handle, 1.0, Color32::from_gray(220));
+        }
+        // A dark strip with an arrow at each end that has hidden audio: dragging that edge outwards shows it again.
+        let (before, after) = clip.hidden();
+        let mid = area.center().y;
+        let shade = Color32::from_black_alpha(140);
+        let arrow = Color32::WHITE;
+        if before > 0 && area.left() >= lane_left {
+            let x = area.left();
+            painter.rect_filled(Rect::from_x_y_ranges(x..=x + 10.0, area.y_range()), 3.0, shade);
+            let tip = vec![pos2(x + 2.0, mid), pos2(x + 8.0, mid - 7.0), pos2(x + 8.0, mid + 7.0)];
+            painter.add(egui::Shape::convex_polygon(tip, arrow, Stroke::NONE));
+        }
+        if after > 0 {
+            let x = area.right();
+            painter.rect_filled(Rect::from_x_y_ranges(x - 10.0..=x, area.y_range()), 3.0, shade);
+            let tip = vec![pos2(x - 2.0, mid), pos2(x - 8.0, mid + 7.0), pos2(x - 8.0, mid - 7.0)];
+            painter.add(egui::Shape::convex_polygon(tip, arrow, Stroke::NONE));
         }
         painter.text(
             visible.left_top() + vec2(14.0, 2.0),

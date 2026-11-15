@@ -1,4 +1,4 @@
-//! Mouse editing on the timeline: selecting, moving clips, fades and volume points.
+//! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points.
 
 use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId};
 use egui::{Pos2, Rect, pos2};
@@ -14,6 +14,14 @@ pub(crate) enum Drag {
         grab: Frames,
         start: Frames,
         track: Option<TrackId>,
+    },
+    TrimStart {
+        clip: ClipId,
+        start: Frames,
+    },
+    TrimEnd {
+        clip: ClipId,
+        end: Frames,
     },
     FadeIn {
         clip: ClipId,
@@ -35,6 +43,8 @@ pub(crate) enum Hit {
     Point(ClipId, usize),
     FadeIn(ClipId),
     FadeOut(ClipId),
+    TrimStart(ClipId),
+    TrimEnd(ClipId),
     Clip(ClipId, TrackId, Frames),
 }
 
@@ -42,6 +52,8 @@ impl Drag {
     pub(crate) fn clip(&self) -> ClipId {
         match self {
             Drag::Move { clip, .. }
+            | Drag::TrimStart { clip, .. }
+            | Drag::TrimEnd { clip, .. }
             | Drag::FadeIn { clip, .. }
             | Drag::FadeOut { clip, .. }
             | Drag::Point { clip, .. } => *clip,
@@ -52,7 +64,12 @@ impl Drag {
 impl Hit {
     fn clip(&self) -> ClipId {
         match self {
-            Hit::Point(c, _) | Hit::FadeIn(c) | Hit::FadeOut(c) | Hit::Clip(c, ..) => *c,
+            Hit::Point(c, _)
+            | Hit::FadeIn(c)
+            | Hit::FadeOut(c)
+            | Hit::TrimStart(c)
+            | Hit::TrimEnd(c)
+            | Hit::Clip(c, ..) => *c,
         }
     }
 }
@@ -60,6 +77,11 @@ impl Hit {
 impl Editor {
     pub(crate) fn handle_mouse(&mut self, project: &Project, rect: Rect, response: &egui::Response) {
         let lane_left = rect.left() + HEADER_W;
+        let trimming = matches!(self.drag, Some(Drag::TrimStart { .. } | Drag::TrimEnd { .. }));
+        let on_edge = response.hover_pos().and_then(|p| self.hit(project, rect, p));
+        if trimming || matches!(on_edge, Some(Hit::TrimStart(_) | Hit::TrimEnd(_))) {
+            response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
         let Some(pos) = response.interact_pointer_pos() else {
             return;
         };
@@ -116,6 +138,10 @@ impl Editor {
                     clip,
                     len: c.fade_out.len,
                 }),
+                Some(Hit::TrimStart(clip)) => project
+                    .clip(clip)
+                    .map(|(_, c)| Drag::TrimStart { clip, start: c.start }),
+                Some(Hit::TrimEnd(clip)) => project.clip(clip).map(|(_, c)| Drag::TrimEnd { clip, end: c.end() }),
                 Some(Hit::Clip(clip, track, start)) => Some(Drag::Move {
                     clip,
                     grab: frame - start,
@@ -150,6 +176,18 @@ impl Editor {
                 *start = (frame - *grab).max(1 - len);
                 let row = ((pos.y - rect.top()) / TRACK_H).floor().max(0.0) as usize;
                 *track = project.tracks.get(row).map(|t| t.id);
+            }
+            // Up to the ends of the audio file, and at least one frame of the clip stays after 0.
+            Drag::TrimStart { clip, start } => {
+                if let Some((_, c)) = project.clip(*clip) {
+                    *start = frame.clamp(c.start - c.offset, c.end() - 1);
+                }
+            }
+            Drag::TrimEnd { clip, end } => {
+                if let Some((_, c)) = project.clip(*clip) {
+                    let audio_end = c.start - c.offset + c.source.frames();
+                    *end = frame.clamp((c.start + 1).max(1), audio_end.max(1));
+                }
             }
             Drag::FadeIn { clip, len } => {
                 if let Some((_, c)) = project.clip(*clip) {
@@ -189,6 +227,22 @@ impl Editor {
                 track: None,
                 ..
             } => Command::MoveClipToNewTrack { clip, start },
+            Drag::TrimStart { clip, start } => {
+                let Some((_, c)) = project.clip(clip) else { return };
+                Command::TrimClip {
+                    clip,
+                    start,
+                    end: c.end(),
+                }
+            }
+            Drag::TrimEnd { clip, end } => {
+                let Some((_, c)) = project.clip(clip) else { return };
+                Command::TrimClip {
+                    clip,
+                    start: c.start,
+                    end,
+                }
+            }
             Drag::FadeIn { clip, len } => {
                 let shape = project.clip(clip).map_or(FadeShape::Linear, |(_, c)| c.fade_in.shape);
                 Command::SetFadeIn {
@@ -225,11 +279,14 @@ impl Editor {
             let Some(clip) = track.clips.get(i) else { continue };
             let area = self.clip_area(rect, row, clip.start, clip.len);
             let free = free_ends(&track.clips, i);
+            // Points in a trimmed-off part still shape the curve but cannot be grabbed.
             for (index, point) in clip.gain.iter().enumerate() {
-                if near(pos2(
-                    self.x_of(lane_left, clip.start + point.at),
-                    y_of_amp(area, db_to_amp(point.db)),
-                )) {
+                if (0..=clip.len).contains(&point.at)
+                    && near(pos2(
+                        self.x_of(lane_left, clip.start + point.at),
+                        y_of_amp(area, db_to_amp(point.db)),
+                    ))
+                {
                     return Some(Hit::Point(clip.id, index));
                 }
             }
@@ -248,6 +305,15 @@ impl Editor {
                 ))
             {
                 return Some(Hit::FadeOut(clip.id));
+            }
+            // A narrow clip keeps room in the middle for moving it.
+            let grip = HANDLE.min(area.width() / 4.0);
+            let inside = (area.top()..=area.bottom()).contains(&pos.y);
+            if inside && (area.left() - 2.0..=area.left() + grip).contains(&pos.x) {
+                return Some(Hit::TrimStart(clip.id));
+            }
+            if inside && (area.right() - grip..=area.right() + 2.0).contains(&pos.x) {
+                return Some(Hit::TrimEnd(clip.id));
             }
         }
         let frame = self.frame_at(lane_left, pos.x);

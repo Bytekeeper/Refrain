@@ -330,3 +330,49 @@ fn save_and_open_track_unsaved_changes() {
     assert_eq!(other.state().session.project().tracks[0].name, "Tone");
     save(&mut other, "opened_project");
 }
+
+/// Trimming hides audio without deleting it: the edge can be dragged back out up to the file's end.
+#[test]
+fn trimmed_edges_can_be_dragged_back_out() {
+    let mut e = Editor::default();
+    e.run(Command::AddTrack { name: "Track".into() });
+    let track = e.session.project().tracks[0].id;
+    // 3 s at 1 s: x = 286..766 at 50 frames per pixel.
+    e.run(Command::AddClip {
+        track,
+        source: tone(220.0, 3.0),
+        start: RATE as i64,
+    });
+    e.frames_per_px = 50.0;
+    let mut h = harness(e);
+    let clip = || -> fn(&Editor) -> audioeditor_engine::Clip { |e| e.session.project().tracks[0].clips[0].clone() };
+
+    drag(&mut h, egui::pos2(764.0, 120.0), egui::pos2(616.0, 120.0));
+    drag(&mut h, egui::pos2(288.0, 120.0), egui::pos2(366.0, 120.0));
+    let c = clip()(h.state());
+    assert_eq!((c.start, c.end()), (12_000, 24_500));
+    assert_eq!(c.hidden(), (4_000, 7_500));
+    save(&mut h, "trim_hidden_both_ends");
+
+    // Hold the edge far past the file's end: the outline shows the whole file, the clip stops at its end.
+    let press = |pos, pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    let from = egui::pos2(614.0, 120.0);
+    h.hover_at(from);
+    h.run();
+    h.event(press(from, true));
+    for x in [640.0, 720.0, 820.0, 880.0] {
+        h.hover_at(egui::pos2(x, 120.0));
+        h.run();
+    }
+    save(&mut h, "trim_dragging_out");
+    h.event(press(egui::pos2(880.0, 120.0), false));
+    h.run();
+    let c = clip()(h.state());
+    assert_eq!(c.end(), 4 * RATE as i64);
+    assert_eq!(c.hidden(), (4_000, 0));
+}

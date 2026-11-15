@@ -80,6 +80,39 @@ impl Clip {
     pub fn end(&self) -> Frames {
         self.start.saturating_add(self.len)
     }
+
+    /// Shows timeline `start..end` of the clip's audio. The audio stays where it is on the timeline,
+    /// so a trimmed part can be shown again later. Volume points keep their place in the audio.
+    pub fn trim(&mut self, start: Frames, end: Frames) -> crate::Result<()> {
+        let len = end.saturating_sub(start);
+        let offset = self.offset.saturating_add(start.saturating_sub(self.start));
+        if len <= 0 {
+            return Err(crate::Error::Invalid("a clip cannot be trimmed to nothing".into()));
+        }
+        if end <= 0 {
+            return Err(crate::Error::Invalid("a clip must end after 0".into()));
+        }
+        if offset < 0 || offset.saturating_add(len) > self.source.frames() {
+            return Err(crate::Error::Invalid("the trim goes past the end of the audio".into()));
+        }
+        let shift = start - self.start;
+        for point in &mut self.gain {
+            point.at = point.at.saturating_sub(shift);
+        }
+        self.start = start;
+        self.offset = offset;
+        self.len = len;
+        Ok(())
+    }
+
+    /// Frames of audio hidden before the clip's start and after its end.
+    pub fn hidden(&self) -> (Frames, Frames) {
+        let after = self
+            .source
+            .frames()
+            .saturating_sub(self.offset.saturating_add(self.len));
+        (self.offset.max(0), after.max(0))
+    }
 }
 
 #[derive(Debug, Clone)]

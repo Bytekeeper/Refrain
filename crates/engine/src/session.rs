@@ -203,21 +203,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 clips: vec![moved],
             });
         }
-        Command::TrimClip { clip, start, end } => {
-            let c = clip_mut(p, clip)?;
-            let new_offset = c.offset.saturating_add(start.saturating_sub(c.start));
-            let len = end.saturating_sub(start);
-            if end <= 0 || len <= 0 || new_offset < 0 || new_offset.saturating_add(len) > c.source.frames() {
-                return Err(Error::Invalid("the trim goes past the end of the audio".into()));
-            }
-            let shift = start - c.start;
-            for point in &mut c.gain {
-                point.at = point.at.saturating_sub(shift);
-            }
-            c.start = start;
-            c.offset = new_offset;
-            c.len = len;
-        }
+        Command::TrimClip { clip, start, end } => clip_mut(p, clip)?.trim(start, end)?,
         Command::SplitClip { clip, at } => split(p, clip, at)?,
         Command::DeleteClip { clip } => {
             take_clip(p, clip)?;
@@ -440,6 +426,52 @@ mod tests {
             .find(|c| c.start == start)
             .unwrap()
             .id)
+    }
+
+    #[test]
+    fn a_trim_hides_audio_that_widening_brings_back() {
+        let (mut s, _, clip) = ramp_session();
+        let points = vec![GainPoint { at: 0, db: 0.0 }, GainPoint { at: 1000, db: -20.0 }];
+        s.execute(Command::SetGainCurve { clip, points }).unwrap();
+        let before = render(s.project(), 0, 1200);
+
+        s.execute(Command::TrimClip {
+            clip,
+            start: 300,
+            end: 700,
+        })
+        .unwrap();
+        let trimmed = render(s.project(), 0, 1200);
+        for (i, (t, b)) in trimmed[0].iter().zip(&before[0]).enumerate() {
+            let kept = (300..700).contains(&i);
+            assert_eq!(*t, if kept { *b } else { 0.0 }, "frame {i}");
+        }
+        assert_eq!(s.project().tracks[0].clips[0].hidden(), (200, 400));
+
+        s.execute(Command::TrimClip {
+            clip,
+            start: 100,
+            end: 1100,
+        })
+        .unwrap();
+        assert_eq!(render(s.project(), 0, 1200), before);
+        assert_eq!(s.project().tracks[0].clips[0].hidden(), (0, 0));
+        assert!(
+            s.execute(Command::TrimClip {
+                clip,
+                start: 99,
+                end: 1100
+            })
+            .is_err()
+        );
+        assert!(
+            s.execute(Command::TrimClip {
+                clip,
+                start: 100,
+                end: 1101
+            })
+            .is_err()
+        );
     }
 
     #[test]
