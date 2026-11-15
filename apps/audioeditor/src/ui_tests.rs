@@ -304,7 +304,7 @@ fn save_and_open_track_unsaved_changes() {
     std::fs::create_dir_all(&dir).unwrap();
     // Saved projects refer to audio files, so the test audio has to exist on disk.
     let wav = dir.join("tone.wav");
-    audioeditor_engine::export_wav(overlapping().session.project(), &wav).unwrap();
+    audioeditor_engine::export_wav(overlapping().session.project(), &wav, false).unwrap();
     let mut e = Editor::default();
     e.run(Command::AddTrack { name: "Tone".into() });
     let track = e.session.project().tracks[0].id;
@@ -526,4 +526,74 @@ fn the_trash_can_on_a_clip_deletes_it() {
     let clips = &h.state().session.project().tracks[0].clips;
     assert_eq!(clips.len(), 1);
     assert_eq!(clips[0].start, 2 * RATE as i64, "the first clip was deleted");
+}
+
+fn right_click(h: &mut Harness<'_, Editor>, x: f32, y: f32) {
+    let pos = egui::pos2(x, y);
+    h.hover_at(pos);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    h.run();
+}
+
+/// A clip's right-click menu picks its channels; the track header's menu sets them for all clips at once.
+#[test]
+fn channels_of_a_clip_and_of_a_whole_track() {
+    let stereo = |f: f32| {
+        let frames = 3 * RATE as usize;
+        let ch = |k: f32| {
+            (0..frames)
+                .map(|i| 0.6 * (i as f32 * f * k * std::f32::consts::TAU / RATE as f32).sin())
+                .collect()
+        };
+        Arc::new(Source {
+            path: None,
+            name: format!("{f} Hz"),
+            sample_rate: RATE,
+            channels: vec![ch(1.0), ch(3.0)],
+        })
+    };
+    let mut e = Editor::default();
+    e.run(Command::AddTrack { name: "Track".into() });
+    let track = e.session.project().tracks[0].id;
+    e.run(Command::AddClip {
+        track,
+        source: stereo(5.0),
+        start: 0,
+    });
+    e.run(Command::AddClip {
+        track,
+        source: stereo(7.0),
+        start: 2 * RATE as i64,
+    });
+    e.frames_per_px = 50.0;
+    let mut h = harness(e);
+    let modes = |h: &Harness<'_, Editor>| -> Vec<audioeditor_engine::ChannelMode> {
+        h.state().session.project().tracks[0]
+            .clips
+            .iter()
+            .map(|c| c.channels)
+            .collect()
+    };
+    use audioeditor_engine::ChannelMode::{Left, Mono, Stereo};
+
+    right_click(&mut h, 200.0, 110.0);
+    h.get_by_label("Left only").click();
+    h.run();
+    assert_eq!(modes(&h), [Left, Stereo]);
+    save(&mut h, "channels_left_only");
+
+    right_click(&mut h, 60.0, 135.0);
+    save(&mut h, "channels_track_menu");
+    h.get_by_label("Mono (mix of both)").click();
+    h.run();
+    assert_eq!(modes(&h), [Mono, Mono]);
+    h.state_mut().undo();
+    assert_eq!(modes(&h), [Left, Stereo], "all clips change in one undo step");
 }

@@ -3,14 +3,14 @@
 use std::sync::Arc;
 
 use audioeditor_engine::{
-    Clip, Fade, FadeShape, Frames, MAX_DB, MIN_DB, Project, TrackId, clip_amp, edge_fades, overlap_after,
-    overlap_before, similarity,
+    ChannelMode, Clip, Fade, FadeShape, Frames, MAX_DB, MIN_DB, Project, Source, TrackId, clip_amp, edge_fades,
+    overlap_after, overlap_before, similarity,
 };
 use craft_audio::peaks::Peaks;
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::mouse::Drag;
-use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H};
+use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H, Wave};
 
 const RULER_H: f32 = 22.0;
 pub(crate) const SCROLLBAR_H: f32 = 12.0;
@@ -61,10 +61,10 @@ impl Editor {
         if !self.resize_track(&project, rect, &response) {
             self.handle_mouse(&project, rect, &response);
         }
-        if let Some(menu) = self.fade_menu
-            && response.context_menu(|ui| self.fade_menu_ui(ui, menu)).is_none()
+        if let Some(menu) = self.menu
+            && response.context_menu(|ui| self.menu_ui(ui, menu)).is_none()
         {
-            self.fade_menu = None;
+            self.menu = None;
         }
 
         let painter = ui.painter_at(rect);
@@ -353,14 +353,14 @@ impl Editor {
         );
 
         // Playback uses the first two channels, so those are the ones shown: one band each.
-        let shown = clip.source.channels.len().min(2);
-        let band = (area.height() - 4.0) / shown.max(1) as f32;
-        for channel in 0..shown {
-            let top = area.top() + 2.0 + band * channel as f32;
+        let bands = shown_channels(clip);
+        let band = (area.height() - 4.0) / bands.len() as f32;
+        for (i, &channel) in bands.iter().enumerate() {
+            let top = area.top() + 2.0 + band * i as f32;
             let rows = Rect::from_x_y_ranges(visible.x_range(), top..=top + band);
             self.draw_wave(painter, lane_left, clip, channel, rows, WAVE);
         }
-        if shown == 2 {
+        if bands.len() == 2 {
             let y = area.top() + 2.0 + band;
             painter.line_segment(
                 [pos2(visible.left(), y), pos2(visible.right(), y)],
@@ -422,7 +422,7 @@ impl Editor {
         painter.text(
             visible.left_top() + vec2(14.0, 2.0),
             Align2::LEFT_TOP,
-            &clip.source.name,
+            channel_label(clip),
             FontId::proportional(11.0),
             Color32::WHITE,
         );
@@ -468,12 +468,19 @@ impl Editor {
             }
             painter.rect_filled(zone, 0.0, Color32::from_rgb(34, 44, 56));
 
-            let stereo = a.0.source.channels.len() >= 2 || b.0.source.channels.len() >= 2;
+            let (channels_a, channels_b) = (shown_channels(a.0), shown_channels(b.0));
+            let stereo = channels_a.len() == 2 || channels_b.len() == 2;
             let names: &[&str] = if stereo { &["L1", "L2", "R1", "R2"] } else { &["1", "2"] };
             let band = (zone.height() - 4.0) / names.len() as f32;
             for (i, name) in names.iter().enumerate() {
-                let (clip, color) = if i % 2 == 0 { (a.0, WAVE) } else { (b.0, WAVE_LATER) };
-                let channel = (i / 2).min(clip.source.channels.len().saturating_sub(1));
+                let (clip, color, channels) = if i % 2 == 0 {
+                    (a.0, WAVE, &channels_a)
+                } else {
+                    (b.0, WAVE_LATER, &channels_b)
+                };
+                // A clip shown in one band shows that band for both sides.
+                let index = (i / 2).min(channels.len().saturating_sub(1));
+                let channel = channels.get(index).copied().unwrap_or(Some(0));
                 let top = zone.top() + 2.0 + band * i as f32;
                 let rows = Rect::from_x_y_ranges(shown.x_range(), top..=top + band);
                 self.draw_wave(painter, lane_left, clip, channel, rows, color);
@@ -550,23 +557,31 @@ impl Editor {
         painter: &egui::Painter,
         lane_left: f32,
         clip: &Clip,
-        channel: usize,
+        channel: Option<usize>,
         rows: Rect,
         color: Color32,
     ) {
-        let Some(samples) = clip.source.channels.get(channel) else {
-            return;
-        };
         let mid = rows.center().y;
         let half = rows.height() / 2.0 - 2.0;
         let first = self.frame_at(lane_left, rows.left()) - clip.start + clip.offset;
         let cols = rows.width().max(0.0) as usize;
-        let key = (Arc::as_ptr(&clip.source) as usize, channel);
-        let (_, peaks) = self
+        let source = &clip.source;
+        let wave = self
             .peaks
-            .entry(key)
-            .or_insert_with(|| (Arc::downgrade(&clip.source), Peaks::build(samples)));
-        let spans = peaks.spans(samples, first as f64, self.frames_per_px, 0.0, cols);
+            .entry((Arc::as_ptr(source) as usize, channel.unwrap_or(usize::MAX)))
+            .or_insert_with(|| {
+                let mixed = if channel.is_none() { mixed(source) } else { vec![] };
+                let samples = channel.map_or(mixed.as_slice(), |c| source.channels.get(c).map_or(&[], Vec::as_slice));
+                Wave {
+                    source: Arc::downgrade(source),
+                    peaks: Peaks::build(samples),
+                    mixed,
+                }
+            });
+        let samples = channel.map_or(wave.mixed.as_slice(), |c| {
+            source.channels.get(c).map_or(&[], Vec::as_slice)
+        });
+        let spans = wave.peaks.spans(samples, first as f64, self.frames_per_px, 0.0, cols);
         let x_of_col = |col: usize| rows.left() + col as f32 + 0.5;
         if self.frames_per_px < 4.0 {
             // Zoomed in, a column holds one or two samples: one line through them shows the wave's shape.
@@ -585,10 +600,10 @@ impl Editor {
         for (col, span) in spans.into_iter().enumerate() {
             if let Some((lo, hi)) = span {
                 let x = x_of_col(col);
-                painter.line_segment(
-                    [pos2(x, mid - hi * half), pos2(x, mid - lo.min(hi - 0.01) * half)],
-                    Stroke::new(1.0, color),
-                );
+                // At least a pixel high: thinner segments are drawn so faint that a smooth wave falls apart into dots.
+                let top = mid - hi * half;
+                let bottom = (mid - lo * half).max(top + 1.0);
+                painter.line_segment([pos2(x, top), pos2(x, bottom)], Stroke::new(1.0, color));
             }
         }
     }
@@ -909,5 +924,40 @@ fn draw_trash_can(painter: &egui::Painter, r: Rect, stroke: Stroke) {
     for x in [0.4, 0.6] {
         let x = r.left() + r.width() * x;
         painter.line_segment([pos2(x, lid + 3.0), pos2(x, r.bottom() - 3.0)], groove);
+    }
+}
+
+/// The channels a clip shows, as it plays them; `None` is the mix of left and right.
+fn shown_channels(clip: &Clip) -> Vec<Option<usize>> {
+    if clip.source.channels.len() < 2 {
+        return vec![Some(0)];
+    }
+    match clip.channels {
+        ChannelMode::Stereo => vec![Some(0), Some(1)],
+        ChannelMode::Mono => vec![None],
+        ChannelMode::Left => vec![Some(0)],
+        ChannelMode::Right => vec![Some(1)],
+    }
+}
+
+fn mixed(source: &Source) -> Vec<f32> {
+    match source.channels.as_slice() {
+        [left, right, ..] => left.iter().zip(right).map(|(l, r)| (l + r) * 0.5).collect(),
+        [only] => only.clone(),
+        [] => vec![],
+    }
+}
+
+/// The clip's name, and which channels it plays when that is not simply stereo.
+fn channel_label(clip: &Clip) -> String {
+    let name = &clip.source.name;
+    if clip.source.channels.len() < 2 {
+        return name.clone();
+    }
+    match clip.channels {
+        ChannelMode::Stereo => name.clone(),
+        ChannelMode::Mono => format!("{name} · mono"),
+        ChannelMode::Left => format!("{name} · left only"),
+        ChannelMode::Right => format!("{name} · right only"),
     }
 }

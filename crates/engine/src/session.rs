@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::{
-    Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, MAX_DB, MIN_DB, Project, Result, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, MAX_DB, MIN_DB, Project, Result, Source,
+    Track, TrackId,
 };
 
 const MAX_UNDO: usize = 500;
@@ -83,6 +84,11 @@ pub enum Command {
     MatchCrossfade {
         clip: ClipId,
         range: Frames,
+    },
+    /// Which channels the clips play; several clips change in one undo step.
+    SetChannels {
+        clips: Vec<ClipId>,
+        mode: ChannelMode,
     },
     /// Converts all audio to `rate` and moves every position along, so everything stays at the same
     /// time. Audio from a file is converted again from the file, so changing the rate twice loses nothing.
@@ -210,6 +216,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 fade_out: Fade::default(),
                 crossfade_shape: FadeShape::EqualPower,
                 gain: vec![],
+                channels: ChannelMode::Stereo,
             };
             track_mut(p, track)?.clips.push(clip);
         }
@@ -276,6 +283,11 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::MatchCrossfade { clip, range } => match_crossfade(p, clip, range)?,
         Command::SetSampleRate { rate } => set_sample_rate(p, rate)?,
+        Command::SetChannels { clips, mode } => {
+            for clip in clips {
+                clip_mut(p, clip)?.channels = mode;
+            }
+        }
         Command::SetGainCurve { clip, mut points } => {
             for point in &mut points {
                 point.db = check_db(point.db)?;

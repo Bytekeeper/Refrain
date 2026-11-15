@@ -97,7 +97,6 @@ fn mix_into(project: &Project, out: &mut [Vec<f32>; 2], at: usize, from: Frames,
         let track_amp = db_to_amp(track.gain_db);
         for (index, clip) in track.clips.iter().enumerate() {
             let fades = edge_fades(&track.clips, index, project.loop_end);
-            let stereo = clip.source.channels.len() >= 2;
             for shift in loop_shifts(clip, from, to, project.loop_end) {
                 let clip_start = clip.start.saturating_sub(shift);
                 for pos in clip_start.max(from)..clip_start.saturating_add(clip.len).min(to) {
@@ -105,8 +104,7 @@ fn mix_into(project: &Project, out: &mut [Vec<f32>; 2], at: usize, from: Frames,
                     let rel = pos - clip_start;
                     let src = clip.offset.saturating_add(rel);
                     let amp = track_amp * clip_amp(clip, fades, rel);
-                    let l = clip.source.sample(0, src);
-                    let r = if stereo { clip.source.sample(1, src) } else { l };
+                    let (l, r) = clip.frame(src);
                     if let (Some(ol), Some(or)) = (left.get_mut(at + i), right.get_mut(at + i)) {
                         *ol += l * amp;
                         *or += r * amp;
@@ -148,11 +146,8 @@ pub(crate) fn similarity_sampled(
 ) -> Option<f32> {
     let step = (to.saturating_sub(from) / max_points.max(1)).max(1);
     let at = |clip: &Clip, channel: usize, pos: Frames| {
-        let channel = channel.min(clip.source.channels.len().saturating_sub(1));
-        f64::from(
-            clip.source
-                .sample(channel, clip.offset.saturating_add(pos - clip.start)),
-        )
+        let (left, right) = clip.frame(clip.offset.saturating_add(pos - clip.start));
+        f64::from(if channel == 0 { left } else { right })
     };
     let heard = |(clip, fades): (&Clip, (Fade, Fade)), pos: Frames| f64::from(clip_amp(clip, fades, pos - clip.start));
     let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
@@ -216,7 +211,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{ClipId, Source, Track, TrackId};
+    use crate::{ChannelMode, ClipId, Source, Track, TrackId};
 
     fn constant(value: f32, frames: usize) -> Arc<Source> {
         Arc::new(Source {
@@ -238,6 +233,7 @@ mod tests {
             fade_out: Fade::default(),
             crossfade_shape: shape,
             gain: vec![],
+            channels: ChannelMode::Stereo,
         }
     }
 
@@ -344,6 +340,27 @@ mod tests {
         later.start = 4000;
         let crossfade = similarity((&a, (fade(0), fade(4000))), (&later, (fade(4000), fade(0))), 4000, 8000).unwrap();
         assert!((crossfade - 1.0).abs() < 1e-4, "{crossfade}");
+    }
+
+    #[test]
+    fn channel_modes_pick_or_mix_the_sides() {
+        let source = Arc::new(Source {
+            path: None,
+            name: "lr".into(),
+            sample_rate: 1000,
+            channels: vec![vec![1.0; 10], vec![0.5; 10]],
+        });
+        for (mode, expected) in [
+            (ChannelMode::Stereo, (1.0, 0.5)),
+            (ChannelMode::Mono, (0.75, 0.75)),
+            (ChannelMode::Left, (1.0, 1.0)),
+            (ChannelMode::Right, (0.5, 0.5)),
+        ] {
+            let mut c = clip(1, source.clone(), 0, FadeShape::Linear);
+            c.channels = mode;
+            let [l, r] = render(&one_track(vec![c]), 0, 10);
+            assert_eq!((l[5], r[5]), expected, "{mode:?}");
+        }
     }
 
     #[test]

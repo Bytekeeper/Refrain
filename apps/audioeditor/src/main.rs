@@ -12,7 +12,7 @@ use std::sync::{Arc, Weak};
 use audioeditor_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
-use mouse::{Drag, FadeMenu};
+use mouse::{Drag, Menu};
 use playback::Player;
 use timeline::SCROLLBAR_H;
 
@@ -21,7 +21,7 @@ const TRACK_H: f32 = 110.0;
 const HANDLE: f32 = 6.0;
 const AUDIO_FILES: &[&str] = &["wav", "flac", "mp3", "ogg", "opus", "aif", "aiff", "m4a"];
 const HINTS: &str = "Space: play · middle-drag or scrollbar: move along · Ctrl+wheel: zoom · S: split · \
-    drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim · right-click a crossfade or fade: curve";
+    drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim · right-click: fade curves, channels";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -43,8 +43,8 @@ struct Editor {
     drag: Option<Drag>,
     /// Where the loop end flag is while it is dragged; the project only changes on release.
     loop_drag: Option<Frames>,
-    /// The fade whose right-click menu is open.
-    fade_menu: Option<FadeMenu>,
+    /// What the open right-click menu is about.
+    menu: Option<Menu>,
     /// Track heights the user dragged; other tracks have the default. A view setting, not part of the project.
     track_heights: HashMap<TrackId, f32>,
     /// The track whose height is being dragged.
@@ -53,7 +53,7 @@ struct Editor {
     gain_edit: Option<(TrackId, f32)>,
     /// Waveform overviews, keyed by source address and channel. The weak reference keeps the address
     /// from being reused by new audio while the entry exists.
-    peaks: HashMap<(usize, usize), (Weak<Source>, Peaks)>,
+    peaks: HashMap<(usize, usize), Wave>,
     /// The project file, once opened or saved.
     file: Option<PathBuf>,
     /// The project as last opened or saved; any other snapshot means unsaved changes.
@@ -61,6 +61,14 @@ struct Editor {
     title: String,
     /// Set after the user agreed to close, so the close request is not asked about again.
     closing: bool,
+}
+
+/// A waveform overview of one channel, or of the mix of left and right.
+struct Wave {
+    source: Weak<Source>,
+    peaks: Peaks,
+    /// The mixed samples; empty for a channel of the source, which holds its own samples.
+    mixed: Vec<f32>,
 }
 
 impl Default for Editor {
@@ -80,7 +88,7 @@ impl Default for Editor {
             scroll: 0.0,
             drag: None,
             loop_drag: None,
-            fade_menu: None,
+            menu: None,
             track_heights: HashMap::new(),
             resizing: None,
             gain_edit: None,
@@ -160,9 +168,18 @@ impl Editor {
         if ui.button("Import…").clicked() {
             self.import();
         }
-        if ui.button("Export WAV…").clicked() {
-            self.export();
-        }
+        ui.menu_button("Export", |ui| {
+            if ui.button("Stereo WAV…").clicked() {
+                self.export(false);
+            }
+            if ui
+                .button("Mono WAV…")
+                .on_hover_text("Left and right mixed into one channel, as game engines want for sounds placed in space")
+                .clicked()
+            {
+                self.export(true);
+            }
+        });
         self.rate_choice(ui);
         ui.separator();
         let label = if self.player.is_playing() { "Stop" } else { "Play" };

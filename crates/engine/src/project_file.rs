@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::io::write_atomic;
 use crate::session::check_db;
 use crate::{
-    Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, Project, Result, Session, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, Project, Result, Session, Source, Track,
+    TrackId,
 };
 
 pub const PROJECT_EXTENSION: &str = "audioedit";
@@ -56,6 +57,8 @@ struct ClipFile {
     fade_out: Fade,
     crossfade_shape: FadeShape,
     gain: Vec<GainPoint>,
+    #[serde(default)]
+    channels: ChannelMode,
 }
 
 /// `view` is stored with the project and handed back by [`open_project`] unchanged.
@@ -90,6 +93,7 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
                 fade_out: clip.fade_out,
                 crossfade_shape: clip.crossfade_shape,
                 gain: clip.gain.clone(),
+                channels: clip.channels,
             });
         }
         tracks.push(TrackFile {
@@ -202,6 +206,7 @@ fn clip_from_file(id: ClipId, c: ClipFile, sources: &[Arc<Source>]) -> Result<Cl
         fade_out: c.fade_out,
         crossfade_shape: c.crossfade_shape,
         gain,
+        channels: c.channels,
     })
 }
 

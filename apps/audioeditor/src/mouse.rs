@@ -1,6 +1,8 @@
 //! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points.
 
-use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before};
+use audioeditor_engine::{
+    ChannelMode, Clip, ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before,
+};
 use egui::{Pos2, Rect, pos2};
 
 use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, trash_button, y_of_amp};
@@ -36,6 +38,16 @@ pub(crate) enum Drag {
         index: usize,
         point: GainPoint,
     },
+}
+
+/// What a right-click menu is about.
+#[derive(Clone, Copy)]
+pub(crate) enum Menu {
+    Fade(FadeMenu),
+    /// The channels of one clip.
+    Clip(ClipId),
+    /// The channels of all clips on a track; opened from the track header.
+    Track(TrackId),
 }
 
 /// The fade whose curve the right-click menu changes.
@@ -122,11 +134,18 @@ impl Editor {
             self.run(Command::SetGainCurve { clip: id, points });
         }
         if response.secondary_clicked() {
-            self.fade_menu = match hit {
-                Some(Hit::FadeIn(clip)) => Some(FadeMenu::FadeIn(clip)),
-                Some(Hit::FadeOut(clip)) => Some(FadeMenu::FadeOut(clip)),
-                Some(Hit::Point(..)) => None,
-                _ => self.crossfade_at(project, rect, pos),
+            self.menu = if pos.x < lane_left {
+                project.tracks.get(self.row_at(rect, pos.y)).map(|t| Menu::Track(t.id))
+            } else {
+                match hit {
+                    Some(Hit::FadeIn(clip)) => Some(Menu::Fade(FadeMenu::FadeIn(clip))),
+                    Some(Hit::FadeOut(clip)) => Some(Menu::Fade(FadeMenu::FadeOut(clip))),
+                    Some(Hit::Point(..)) => None,
+                    _ => self
+                        .crossfade_at(project, rect, pos)
+                        .map(Menu::Fade)
+                        .or(hit.as_ref().map(|h| Menu::Clip(h.clip()))),
+                }
             };
             if let Some(Hit::Point(id, index)) = hit
                 && let Some((_, clip)) = project.clip(id)
@@ -324,8 +343,64 @@ impl Editor {
         })
     }
 
+    pub(crate) fn menu_ui(&mut self, ui: &mut egui::Ui, menu: Menu) {
+        match menu {
+            Menu::Fade(fade) => self.fade_menu_ui(ui, fade),
+            Menu::Clip(_) | Menu::Track(_) => self.channels_menu_ui(ui, menu),
+        }
+    }
+
+    /// Which channels a clip, or every clip on a track, plays.
+    fn channels_menu_ui(&mut self, ui: &mut egui::Ui, menu: Menu) {
+        let project = self.session.project().clone();
+        let (title, clips): (&str, Vec<&Clip>) = match menu {
+            Menu::Track(id) => (
+                "Channels of all clips",
+                project.track(id).map(|t| t.clips.iter().collect()).unwrap_or_default(),
+            ),
+            Menu::Clip(id) => ("Channels", project.clip(id).map(|(_, c)| vec![c]).unwrap_or_default()),
+            Menu::Fade(_) => return,
+        };
+        ui.label(title);
+        if clips.is_empty() {
+            ui.weak("No clips on this track");
+            return;
+        }
+        if clips.iter().all(|c| c.source.channels.len() < 2) {
+            ui.weak("Mono recording: it plays the same on both sides");
+            return;
+        }
+        let first = clips.first().map(|c| c.channels);
+        let current = first.filter(|m| clips.iter().all(|c| c.channels == *m));
+        let modes = [
+            (ChannelMode::Stereo, "Stereo", "Both channels as recorded"),
+            (
+                ChannelMode::Mono,
+                "Mono (mix of both)",
+                "Left and right mixed, on both sides",
+            ),
+            (
+                ChannelMode::Left,
+                "Left only",
+                "The left channel on both sides, for a broken right channel",
+            ),
+            (
+                ChannelMode::Right,
+                "Right only",
+                "The right channel on both sides, for a broken left channel",
+            ),
+        ];
+        for (mode, name, hint) in modes {
+            if ui.radio(current == Some(mode), name).on_hover_text(hint).clicked() {
+                let clips = clips.iter().map(|c| c.id).collect();
+                self.run(Command::SetChannels { clips, mode });
+                ui.close();
+            }
+        }
+    }
+
     /// The right-click menu for a fade's curve.
-    pub(crate) fn fade_menu_ui(&mut self, ui: &mut egui::Ui, menu: FadeMenu) {
+    fn fade_menu_ui(&mut self, ui: &mut egui::Ui, menu: FadeMenu) {
         let project = self.session.project().clone();
         let (title, current) = match menu {
             FadeMenu::Crossfade(id) => ("Crossfade curve", project.clip(id).map(|(_, c)| c.crossfade_shape)),
@@ -392,6 +467,10 @@ impl Editor {
     }
 
     fn hit(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<Hit> {
+        // The header column holds track controls, never clips, even where a clip starts before 0.
+        if pos.x < rect.left() + HEADER_W {
+            return None;
+        }
         let row = self.row_at(rect, pos.y);
         let track = project.tracks.get(row)?;
         let lane_left = rect.left() + HEADER_W;

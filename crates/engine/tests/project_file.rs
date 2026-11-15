@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use audioeditor_engine::{
-    Command, Fade, FadeShape, GainPoint, Session, Source, export_wav, load_source, open_project, render, save_project,
+    ChannelMode, Command, Fade, FadeShape, GainPoint, Session, Source, export_wav, load_source, open_project, render,
+    save_project,
 };
 
 const RATE: u32 = 8000;
@@ -41,7 +42,7 @@ fn write_wav(path: &Path, freq: f32, secs: f32) {
         start: 0,
     })
     .unwrap();
-    export_wav(s.project(), path).unwrap();
+    export_wav(s.project(), path, false).unwrap();
 }
 
 /// Two tracks with a crossfade, free fades, a volume curve, a clip before 0 and a muted, quieter track.
@@ -86,6 +87,11 @@ fn edited_project(dir: &Path) -> Session {
         },
     })
     .unwrap();
+    s.execute(Command::SetChannels {
+        clips: vec![clips[1]],
+        mode: ChannelMode::Left,
+    })
+    .unwrap();
     let points = vec![GainPoint { at: 0, db: -3.0 }, GainPoint { at: 8000, db: -12.5 }];
     s.execute(Command::SetGainCurve { clip: clips[0], points }).unwrap();
     s.execute(Command::SetTrackGain { track: t2, db: -6.0 }).unwrap();
@@ -119,6 +125,35 @@ fn saved_project_opens_with_the_same_sound() {
     assert!(
         text.contains("\"audio/a.wav\""),
         "audio inside the folder is stored relative: {text}"
+    );
+}
+
+#[test]
+fn mono_export_mixes_both_sides_into_one_channel() {
+    let dir = folder("mono");
+    let source = Arc::new(Source {
+        path: None,
+        name: "lr".into(),
+        sample_rate: RATE,
+        channels: vec![vec![0.5; 800], vec![0.25; 800]],
+    });
+    let mut s = Session::default();
+    s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+    let track = s.project().tracks[0].id;
+    s.execute(Command::AddClip {
+        track,
+        source,
+        start: 0,
+    })
+    .unwrap();
+    let file = dir.join("mono.wav");
+    export_wav(s.project(), &file, true).unwrap();
+    let back = load_source(&file).unwrap();
+    assert_eq!(back.channels.len(), 1);
+    assert!(
+        (back.channels[0][400] - 0.375).abs() < 1e-4,
+        "{}",
+        back.channels[0][400]
     );
 }
 

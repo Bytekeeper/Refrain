@@ -45,6 +45,20 @@ pub enum FadeShape {
     EqualPower,
 }
 
+/// Which channels of its audio a clip plays. A mono recording plays the same on both sides either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelMode {
+    #[default]
+    Stereo,
+    /// Both channels mixed, on both sides.
+    Mono,
+    /// Only the left channel, on both sides; for a recording with a broken right channel.
+    Left,
+    /// Only the right channel, on both sides.
+    Right,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Fade {
     pub len: Frames,
@@ -74,9 +88,28 @@ pub struct Clip {
     pub crossfade_shape: FadeShape,
     /// Sorted by `at`. Empty means 0 dB.
     pub gain: Vec<GainPoint>,
+    pub channels: ChannelMode,
 }
 
 impl Clip {
+    /// Left and right of source frame `frame`, as this clip plays them.
+    pub fn frame(&self, frame: Frames) -> (f32, f32) {
+        let left = self.source.sample(0, frame);
+        if self.source.channels.len() < 2 {
+            return (left, left);
+        }
+        let right = self.source.sample(1, frame);
+        match self.channels {
+            ChannelMode::Stereo => (left, right),
+            ChannelMode::Mono => {
+                let mixed = (left + right) * 0.5;
+                (mixed, mixed)
+            }
+            ChannelMode::Left => (left, left),
+            ChannelMode::Right => (right, right),
+        }
+    }
+
     pub fn end(&self) -> Frames {
         self.start.saturating_add(self.len)
     }

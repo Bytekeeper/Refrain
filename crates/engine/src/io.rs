@@ -75,12 +75,18 @@ pub fn resample(source: &Source, rate: u32) -> Result<Source> {
 }
 
 /// Writes the whole mix as a 24-bit stereo WAV file.
-pub fn export_wav(project: &Project, path: &Path) -> Result<()> {
+/// With `mono`, left and right are mixed into one channel, as game engines want for sounds placed in space.
+pub fn export_wav(project: &Project, path: &Path, mono: bool) -> Result<()> {
     if project.is_empty() {
         return Err(Error::Invalid("the project has no audio to export".into()));
     }
     let frames = usize::try_from(project.len()).map_err(|_| Error::Invalid("the project is too long".into()))?;
-    let channels = render(project, 0, frames).to_vec();
+    let [left, right] = render(project, 0, frames);
+    let channels = if mono {
+        vec![left.iter().zip(&right).map(|(l, r)| (l + r) * 0.5).collect()]
+    } else {
+        vec![left, right]
+    };
     let bytes = craft_audio::encode(
         &AudioBuffer {
             sample_rate: project.sample_rate,

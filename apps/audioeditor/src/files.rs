@@ -46,7 +46,7 @@ impl Editor {
                 self.scroll = 0.0;
                 self.track_heights.clear();
                 self.apply_view(view);
-                self.peaks.retain(|_, (source, _)| source.strong_count() > 0);
+                self.peaks.retain(|_, wave| wave.source.strong_count() > 0);
                 self.info(format!("Opened {}", path.display()));
             }
             Err(e) => self.fail(format!("{}: {e}", path.display())),
@@ -179,15 +179,15 @@ impl Editor {
         }
     }
 
-    pub(crate) fn export(&mut self) {
+    pub(crate) fn export(&mut self, mono: bool) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("WAV", &["wav"])
-            .set_file_name("mix.wav")
+            .set_file_name(if mono { "mix-mono.wav" } else { "mix.wav" })
             .save_file()
         else {
             return;
         };
-        match export_wav(self.session.project(), &path) {
+        match export_wav(self.session.project(), &path, mono) {
             Ok(()) => self.info(format!("Exported {}", path.display())),
             Err(e) => self.fail(format!("Not exported: {e}")),
         }
