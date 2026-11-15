@@ -356,6 +356,23 @@ impl Editor {
                 ui.close();
             }
         }
+        if let FadeMenu::Crossfade(clip) = menu {
+            ui.separator();
+            if ui
+                .button("Find best match")
+                .on_hover_text(
+                    "Moves the crossfade by up to 50 ms to where both waveforms match best, and picks the curve. \
+                     At the loop seam this moves the loop end.",
+                )
+                .clicked()
+            {
+                let range = Frames::from(project.sample_rate) * 50 / 1000;
+                if self.run(Command::MatchCrossfade { clip, range }) {
+                    self.info("Moved to the best waveform match within 50 ms.".into());
+                }
+                ui.close();
+            }
+        }
     }
 
     fn hit(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<Hit> {

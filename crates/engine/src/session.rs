@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before};
+use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::{
     Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, MAX_DB, MIN_DB, Project, Result, Source, Track, TrackId,
 };
@@ -75,6 +75,12 @@ pub enum Command {
     /// `None` ends looping. The loop end must be after 0.
     SetLoopEnd {
         at: Option<Frames>,
+    },
+    /// Shifts the crossfade into the start of `clip` by up to `range` frames to where the two waveforms
+    /// match best, and picks the curve that suits that match. At the loop seam the loop end moves.
+    MatchCrossfade {
+        clip: ClipId,
+        range: Frames,
     },
 }
 
@@ -253,6 +259,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
             }
             p.loop_end = at;
         }
+        Command::MatchCrossfade { clip, range } => match_crossfade(p, clip, range)?,
         Command::SetGainCurve { clip, mut points } => {
             for point in &mut points {
                 point.db = check_db(point.db)?;
@@ -321,6 +328,79 @@ fn tidy(track: &mut Track, loop_end: Option<Frames>) -> Result<()> {
         let in_len = before.max(c.fade_in.len);
         c.fade_out.len = c.fade_out.len.min(c.len - in_len).max(0);
     }
+    Ok(())
+}
+
+/// Above this waveform match, a linear crossfade keeps the level even; below it, equal power does.
+const LINEAR_FROM_MATCH: f32 = 0.5;
+
+/// Tries every shift of the later clip's audio against the earlier one within `range` and keeps the best.
+/// The earlier clip's end moves along, so the crossfade keeps its length where that clip has audio for it.
+fn match_crossfade(p: &mut Project, clip: ClipId, range: Frames) -> Result<()> {
+    let wrap = p.loop_end;
+    let (clips, i) = locate(p, clip)?;
+    let later = clips.get(i).ok_or(Error::NoClip(clip))?.clone();
+    // At the seam the earlier clip is the last one, a loop earlier.
+    let (earlier_index, loop_shift) = match (i.checked_sub(1), wrap) {
+        (Some(j), _) => (j, 0),
+        (None, Some(l)) => (clips.len() - 1, l),
+        (None, None) => return Err(Error::Invalid("no other clip overlaps the start of this clip".into())),
+    };
+    let mut earlier = clips.get(earlier_index).ok_or(Error::NoClip(clip))?.clone();
+    earlier.start = earlier.start.saturating_sub(loop_shift);
+    if earlier.end() <= later.start {
+        return Err(Error::Invalid("no other clip overlaps the start of this clip".into()));
+    }
+    let room = earlier.hidden().1;
+    let shape = later.crossfade_shape;
+    let score = |shift: Frames, max_points: Frames| {
+        let mut a = earlier.clone();
+        a.len = a.len.saturating_add(shift.min(room));
+        let mut b = later.clone();
+        b.start = b.start.saturating_add(shift);
+        let len = a.end().saturating_sub(b.start);
+        if a.len <= 0 || len <= 0 {
+            return None;
+        }
+        let fade = Fade { len, shape };
+        similarity_sampled(
+            (&a, (Fade::default(), fade)),
+            (&b, (fade, Fade::default())),
+            b.start,
+            a.end(),
+            max_points,
+        )
+    };
+    // A quick pass over every shift, then the few best measured in full.
+    let range = range.clamp(0, 1_000_000);
+    let mut rough: Vec<(f32, Frames)> = (-range..=range).filter_map(|s| Some((score(s, 2000)?, s))).collect();
+    rough.sort_by(|x, y| y.0.total_cmp(&x.0));
+    let best = rough
+        .iter()
+        .take(5)
+        .filter_map(|&(_, s)| Some((score(s, 200_000)?, s)))
+        .max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.abs().cmp(&x.1.abs())));
+    let Some((value, shift)) = best else {
+        return Err(Error::Invalid(
+            "the crossfade is silent, so there is nothing to match".into(),
+        ));
+    };
+
+    let earlier_id = earlier.id;
+    let c = clip_mut(p, earlier_id)?;
+    let (start, end) = (c.start, c.end().saturating_add(shift.min(room)));
+    c.trim(start, end)?;
+    if loop_shift > 0 {
+        p.loop_end = Some(loop_shift.saturating_add(shift));
+    } else {
+        let c = clip_mut(p, clip)?;
+        c.start = check_placement(c.start.saturating_add(shift), c.len)?;
+    }
+    clip_mut(p, clip)?.crossfade_shape = if value > LINEAR_FROM_MATCH {
+        FadeShape::Linear
+    } else {
+        FadeShape::EqualPower
+    };
     Ok(())
 }
 
@@ -507,6 +587,90 @@ mod tests {
         );
         s.execute(Command::SetLoopEnd { at: None }).unwrap();
         assert_eq!(s.project().len(), 1500);
+    }
+
+    #[test]
+    fn matching_a_crossfade_brings_the_waves_in_step_and_keeps_its_length() {
+        // Repeats every 20 frames, like the cycle of an engine.
+        let cycle = Arc::new(Source {
+            path: None,
+            name: "cycle".into(),
+            sample_rate: 1000,
+            channels: vec![
+                (0..1500)
+                    .map(|i| (i as f32 * std::f32::consts::TAU / 20.0).sin())
+                    .collect(),
+            ],
+        });
+        let in_step = |p: &Project| {
+            let clips = &p.tracks[0].clips;
+            let fades = |i| edge_fades(clips, i, p.loop_end);
+            let (a, b) = match p.loop_end {
+                Some(l) => {
+                    let mut a = clips[clips.len() - 1].clone();
+                    a.start -= l;
+                    (a, clips[0].clone())
+                }
+                None => (clips[0].clone(), clips[1].clone()),
+            };
+            let last = clips.len() - 1;
+            let (fa, fb) = if p.loop_end.is_some() {
+                (fades(last), fades(0))
+            } else {
+                (fades(0), fades(1))
+            };
+            crate::similarity((&a, fa), (&b, fb), b.start, a.end()).unwrap()
+        };
+
+        // The loop seam: 7 frames out of step.
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddClip {
+            track,
+            source: cycle.clone(),
+            start: 0,
+        })
+        .unwrap();
+        let clip = s.project().tracks[0].clips[0].id;
+        s.execute(Command::SetLoopEnd { at: Some(1007) }).unwrap();
+        assert!(in_step(s.project()) < 0.5);
+        s.execute(Command::MatchCrossfade { clip, range: 50 }).unwrap();
+        let l = s.project().loop_end.unwrap();
+        assert_eq!(l % 20, 0, "loop end {l}");
+        assert_eq!(overlap_before(&s.project().tracks[0].clips, 0, Some(l)), 1500 - 1007);
+        assert!(in_step(s.project()) > 0.999);
+        assert_eq!(s.project().tracks[0].clips[0].crossfade_shape, FadeShape::Linear);
+
+        // Two clips: the later one 13 frames out of step; the earlier one has hidden audio to grow into.
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddClip {
+            track,
+            source: cycle.clone(),
+            start: 0,
+        })
+        .unwrap();
+        let a = s.project().tracks[0].clips[0].id;
+        s.execute(Command::TrimClip {
+            clip: a,
+            start: 0,
+            end: 1000,
+        })
+        .unwrap();
+        s.execute(Command::AddClip {
+            track,
+            source: cycle,
+            start: 813,
+        })
+        .unwrap();
+        let b = s.project().tracks[0].clips[1].id;
+        s.execute(Command::MatchCrossfade { clip: b, range: 50 }).unwrap();
+        let clips = &s.project().tracks[0].clips;
+        assert_eq!(clips[1].start % 20, 0, "start {}", clips[1].start);
+        assert_eq!(clips[0].end() - clips[1].start, 1000 - 813);
+        assert!(in_step(s.project()) > 0.999);
     }
 
     #[test]

@@ -134,9 +134,19 @@ fn loop_shifts(clip: &Clip, from: Frames, to: Frames, loop_end: Option<Frames>) 
 /// 0 unrelated sound, -1 opposite waveforms that cancel out when mixed. Each moment counts as much as both
 /// clips are heard there (fades and volume), so in a crossfade the middle matters most. `None` where either is silent.
 pub fn similarity(a: (&Clip, (Fade, Fade)), b: (&Clip, (Fade, Fade)), from: Frames, to: Frames) -> Option<f32> {
-    // A long overlap is sampled at most this often; enough for a stable number at screen speed.
-    const MAX_POINTS: Frames = 200_000;
-    let step = (to.saturating_sub(from) / MAX_POINTS).max(1);
+    // Enough points for a stable number at screen speed.
+    similarity_sampled(a, b, from, to, 200_000)
+}
+
+/// [`similarity`] from at most about `max_points` evenly spread frames.
+pub(crate) fn similarity_sampled(
+    a: (&Clip, (Fade, Fade)),
+    b: (&Clip, (Fade, Fade)),
+    from: Frames,
+    to: Frames,
+    max_points: Frames,
+) -> Option<f32> {
+    let step = (to.saturating_sub(from) / max_points.max(1)).max(1);
     let at = |clip: &Clip, channel: usize, pos: Frames| {
         let channel = channel.min(clip.source.channels.len().saturating_sub(1));
         f64::from(
