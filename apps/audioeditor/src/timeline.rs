@@ -190,7 +190,7 @@ impl Editor {
             let parts = wrapped.get(row).map_or(&[][..], Vec::as_slice);
             self.draw_overlaps(&lanes, rect, row, clips, wrap, parts);
         }
-        for (row, track) in project.tracks.iter().enumerate().filter(|(_, t)| t.muted) {
+        for (row, _) in project.tracks.iter().enumerate().filter(|(_, t)| t.muted) {
             let lane = self.row_rect(rect, row).with_min_x(lane_left);
             lanes.rect_filled(lane, 0.0, Color32::from_black_alpha(130));
         }
