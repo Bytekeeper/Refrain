@@ -130,9 +130,10 @@ fn loop_shifts(clip: &Clip, from: Frames, to: Frames, loop_end: Option<Frames>) 
         .collect()
 }
 
-/// How alike two clips sound over timeline frames `from..to`, before fades and volume: 1 is the same
-/// waveform, 0 unrelated sound, -1 opposite waveforms that cancel out when mixed. `None` where either is silent.
-pub fn similarity(a: &Clip, b: &Clip, from: Frames, to: Frames) -> Option<f32> {
+/// How well the waveforms of two clips match over timeline frames `from..to`: 1 is the same waveform,
+/// 0 unrelated sound, -1 opposite waveforms that cancel out when mixed. Each moment counts as much as both
+/// clips are heard there (fades and volume), so in a crossfade the middle matters most. `None` where either is silent.
+pub fn similarity(a: (&Clip, (Fade, Fade)), b: (&Clip, (Fade, Fade)), from: Frames, to: Frames) -> Option<f32> {
     // A long overlap is sampled at most this often; enough for a stable number at screen speed.
     const MAX_POINTS: Frames = 200_000;
     let step = (to.saturating_sub(from) / MAX_POINTS).max(1);
@@ -143,15 +144,18 @@ pub fn similarity(a: &Clip, b: &Clip, from: Frames, to: Frames) -> Option<f32> {
                 .sample(channel, clip.offset.saturating_add(pos - clip.start)),
         )
     };
+    let heard = |(clip, fades): (&Clip, (Fade, Fade)), pos: Frames| f64::from(clip_amp(clip, fades, pos - clip.start));
     let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
     let mut pos = from;
     while pos < to {
+        // Weighting the moments, not the samples: fading each clip on its own would keep even identical waves below 1.
+        let weight = heard(a, pos) * heard(b, pos);
         // Mono counts as the same sound on both sides, as it is played.
         for channel in 0..2 {
-            let (x, y) = (at(a, channel, pos), at(b, channel, pos));
-            ab += x * y;
-            aa += x * x;
-            bb += y * y;
+            let (x, y) = (at(a.0, channel, pos), at(b.0, channel, pos));
+            ab += weight * x * y;
+            aa += weight * x * x;
+            bb += weight * y * y;
         }
         pos = pos.saturating_add(step);
     }
@@ -313,12 +317,23 @@ mod tests {
         same.offset = 100;
         let opposite = clip(3, sine(50.0, -1.0), 0, FadeShape::Linear);
         let unrelated = clip(4, sine(73.0, 1.0), 0, FadeShape::Linear);
-        let alike = |b: &Clip| similarity(&a, b, 0, 4000).unwrap();
+        let none = (Fade::default(), Fade::default());
+        let alike = |b: &Clip| similarity((&a, none), (b, none), 0, 4000).unwrap();
         assert!((alike(&same) - 1.0).abs() < 1e-4, "{}", alike(&same));
         assert!((alike(&opposite) + 1.0).abs() < 1e-4);
         assert!(alike(&unrelated).abs() < 0.05, "{}", alike(&unrelated));
         let silent = clip(5, constant(0.0, 8000), 0, FadeShape::Linear);
-        assert_eq!(similarity(&a, &silent, 0, 4000), None);
+        assert_eq!(similarity((&a, none), (&silent, none), 0, 4000), None);
+        // A crossfade changes which moments count, not the result for the same waveform.
+        let fade = |len| Fade {
+            len,
+            shape: FadeShape::Linear,
+        };
+        // Starting at 4000 and 100 frames into its file, `later` is 3900 frames behind `a`: still whole periods.
+        let mut later = same.clone();
+        later.start = 4000;
+        let crossfade = similarity((&a, (fade(0), fade(4000))), (&later, (fade(4000), fade(0))), 4000, 8000).unwrap();
+        assert!((crossfade - 1.0).abs() < 1e-4, "{crossfade}");
     }
 
     #[test]

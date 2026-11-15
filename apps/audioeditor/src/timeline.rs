@@ -448,13 +448,21 @@ impl Editor {
                 }
             }
 
-            if let Some(alike) = similarity(a.0, b.0, from, to) {
-                let text = format!("alike {}%", (alike * 100.0).round() as i32);
+            if let Some(alike) = similarity((a.0, a.1), (b.0, b.1), from, to) {
+                let percent = (alike * 100.0).round() as i32;
                 let at = pos2(shown.center().x, zone.bottom() - 3.0);
-                let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
-                let label =
-                    Rect::from_min_size(at - vec2(galley.size().x / 2.0, galley.size().y), galley.size()).expand(2.0);
-                if label.width() < zone.width() {
+                // The longest text that fits the overlap.
+                let fitting = ["waveform match ", "match ", ""].into_iter().find_map(|prefix| {
+                    let galley = painter.layout_no_wrap(
+                        format!("{prefix}{percent}%"),
+                        FontId::proportional(11.0),
+                        Color32::WHITE,
+                    );
+                    let size = galley.size();
+                    let label = Rect::from_min_size(at - vec2(size.x / 2.0, size.y), size).expand(2.0);
+                    (label.width() < zone.width()).then_some((label, galley))
+                });
+                if let Some((label, galley)) = fitting {
                     painter.rect_filled(label, 3.0, Color32::from_black_alpha(170));
                     painter.galley(label.min + vec2(2.0, 2.0), galley, Color32::WHITE);
                 }
