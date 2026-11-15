@@ -107,9 +107,9 @@ fn saved_project_opens_with_the_same_sound() {
     let dir = folder("roundtrip");
     let s = edited_project(&dir);
     let file = dir.join("song.audioedit");
-    save_project(s.project(), &file).unwrap();
+    save_project(s.project(), &file, None).unwrap();
 
-    let opened = open_project(&file).unwrap();
+    let (opened, _) = open_project(&file).unwrap();
     assert_same_sound(&s, &opened);
     let names: Vec<_> = opened.project().tracks.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["Music", "Quiet"]);
@@ -126,12 +126,12 @@ fn saved_project_opens_with_the_same_sound() {
 fn a_moved_project_folder_still_opens() {
     let dir = folder("moved");
     let s = edited_project(&dir);
-    save_project(s.project(), &dir.join("song.audioedit")).unwrap();
+    save_project(s.project(), &dir.join("song.audioedit"), None).unwrap();
     let moved = dir.with_file_name("moved-elsewhere");
     let _ = std::fs::remove_dir_all(&moved);
     std::fs::rename(&dir, &moved).unwrap();
 
-    let opened = open_project(&moved.join("song.audioedit")).unwrap();
+    let (opened, _) = open_project(&moved.join("song.audioedit")).unwrap();
     assert_eq!(opened.project().len(), s.project().len());
 }
 
@@ -140,7 +140,7 @@ fn a_missing_audio_file_is_named() {
     let dir = folder("missing");
     let s = edited_project(&dir);
     let file = dir.join("song.audioedit");
-    save_project(s.project(), &file).unwrap();
+    save_project(s.project(), &file, None).unwrap();
     std::fs::remove_file(dir.join("audio/b.wav")).unwrap();
 
     let err = open_project(&file).unwrap_err().to_string();
@@ -165,7 +165,7 @@ fn audio_made_in_memory_cannot_be_saved() {
         start: 0,
     })
     .unwrap();
-    let err = save_project(s.project(), &dir.join("x.audioedit"))
+    let err = save_project(s.project(), &dir.join("x.audioedit"), None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("beep"), "{err}");
@@ -180,7 +180,7 @@ fn damaged_files_are_refused() {
     let dir = folder("damaged");
     let s = edited_project(&dir);
     let file = dir.join("song.audioedit");
-    save_project(s.project(), &file).unwrap();
+    save_project(s.project(), &file, None).unwrap();
     let good: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
 
     let cases: Vec<(&str, Damage)> = vec![

@@ -32,6 +32,9 @@ struct ProjectFile {
     tracks: Vec<TrackFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loop_end: Option<Frames>,
+    /// Settings of the program that edits the project, such as zoom. Stored as they come, never read here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,7 +58,8 @@ struct ClipFile {
     gain: Vec<GainPoint>,
 }
 
-pub fn save_project(project: &Project, path: &Path) -> Result<()> {
+/// `view` is stored with the project and handed back by [`open_project`] unchanged.
+pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Value>) -> Result<()> {
     let path = std::path::absolute(path)?;
     let dir = path.parent().unwrap_or(Path::new("/"));
     let mut index: HashMap<usize, usize> = HashMap::new();
@@ -101,12 +105,14 @@ pub fn save_project(project: &Project, path: &Path) -> Result<()> {
         sources,
         tracks,
         loop_end: project.loop_end,
+        view: view.cloned(),
     };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|e| Error::ProjectFile(e.to_string()))?;
     write_atomic(&path, &bytes)
 }
 
-pub fn open_project(path: &Path) -> Result<Session> {
+/// The project and the `view` it was saved with.
+pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)> {
     if std::fs::metadata(path)?.len() > MAX_FILE_BYTES {
         return Err(Error::ProjectFile("the file is too large to be a project".into()));
     }
@@ -156,7 +162,7 @@ pub fn open_project(path: &Path) -> Result<Session> {
             clips,
         });
     }
-    Session::open(project)
+    Ok((Session::open(project)?, file.view))
 }
 
 fn clip_from_file(id: ClipId, c: ClipFile, sources: &[Arc<Source>]) -> Result<Clip> {

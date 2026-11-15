@@ -6,7 +6,17 @@ use std::sync::Arc;
 use audioeditor_engine::{Command, PROJECT_EXTENSION, export_wav, load_source, open_project, save_project};
 use rfd::{MessageButtons, MessageDialogResult};
 
+use crate::timeline::{MAX_TRACK_H, MIN_TRACK_H};
 use crate::{AUDIO_FILES, Editor};
+
+/// The window's settings saved with a project, so it opens looking as it was left.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct View {
+    frames_per_px: f64,
+    scroll: f64,
+    /// In track order.
+    track_heights: Vec<f32>,
+}
 
 impl Editor {
     pub(crate) fn has_unsaved_changes(&self) -> bool {
@@ -25,7 +35,7 @@ impl Editor {
 
     pub(crate) fn open_from(&mut self, path: &Path) {
         match open_project(path) {
-            Ok(session) => {
+            Ok((session, view)) => {
                 self.player.stop();
                 self.player.seek(0);
                 self.session = session;
@@ -34,6 +44,8 @@ impl Editor {
                 self.selected = None;
                 self.drag = None;
                 self.scroll = 0.0;
+                self.track_heights.clear();
+                self.apply_view(view);
                 self.peaks.retain(|_, (source, _)| source.strong_count() > 0);
                 self.info(format!("Opened {}", path.display()));
             }
@@ -63,7 +75,7 @@ impl Editor {
     }
 
     pub(crate) fn save_to(&mut self, path: &Path) -> bool {
-        match save_project(self.session.project(), path) {
+        match save_project(self.session.project(), path, Some(&self.view())) {
             Ok(()) => {
                 self.saved = self.session.project().clone();
                 self.file = Some(path.to_path_buf());
@@ -73,6 +85,38 @@ impl Editor {
             Err(e) => {
                 self.fail(format!("Not saved: {e}"));
                 false
+            }
+        }
+    }
+
+    fn view(&self) -> serde_json::Value {
+        let heights = self.session.project().tracks.iter();
+        let view = View {
+            frames_per_px: self.frames_per_px,
+            scroll: self.scroll,
+            track_heights: heights
+                .map(|t| self.track_heights.get(&t.id).copied().unwrap_or(crate::TRACK_H))
+                .collect(),
+        };
+        serde_json::to_value(view).unwrap_or_default()
+    }
+
+    /// A view from a file is checked like any other input; whatever does not fit is left as it is.
+    fn apply_view(&mut self, view: Option<serde_json::Value>) {
+        let Some(view) = view.and_then(|v| serde_json::from_value::<View>(v).ok()) else {
+            return;
+        };
+        if view.frames_per_px.is_finite() {
+            self.frames_per_px = view.frames_per_px.clamp(1.0, 200_000.0);
+        }
+        if view.scroll.is_finite() {
+            self.scroll = view.scroll.max(0.0);
+        }
+        let tracks = self.session.project().tracks.iter();
+        for (track, height) in tracks.zip(view.track_heights) {
+            if height.is_finite() {
+                self.track_heights
+                    .insert(track.id, height.clamp(MIN_TRACK_H, MAX_TRACK_H));
             }
         }
     }

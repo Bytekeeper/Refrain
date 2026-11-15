@@ -15,8 +15,8 @@ use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H};
 const RULER_H: f32 = 22.0;
 pub(crate) const SCROLLBAR_H: f32 = 12.0;
 /// Room for the name, the mute and volume controls and the delete button.
-const MIN_TRACK_H: f32 = 80.0;
-const MAX_TRACK_H: f32 = 800.0;
+pub(crate) const MIN_TRACK_H: f32 = 80.0;
+pub(crate) const MAX_TRACK_H: f32 = 800.0;
 pub(crate) const CURVE: Color32 = Color32::from_rgb(255, 200, 80);
 const LOOP: Color32 = Color32::from_rgb(90, 200, 120);
 const WAVE: Color32 = Color32::from_rgb(150, 200, 240);

@@ -318,6 +318,8 @@ fn save_and_open_track_unsaved_changes() {
     assert!(h.state().title.starts_with("• Untitled"), "{}", h.state().title);
 
     let project = dir.join("song.audioedit");
+    h.state_mut().track_heights.insert(track, 250.0);
+    h.state_mut().frames_per_px = 77.0;
     assert!(h.state_mut().save_to(&project));
     h.run();
     assert_eq!(h.state().title, "song – Audio editor");
@@ -340,6 +342,9 @@ fn save_and_open_track_unsaved_changes() {
     other.run();
     assert_eq!(other.state().title, "song – Audio editor");
     assert_eq!(other.state().session.project().tracks[0].name, "Tone");
+    let opened = other.state().session.project().tracks[0].id;
+    assert_eq!(other.state().track_heights.get(&opened), Some(&250.0));
+    assert_eq!(other.state().frames_per_px, 77.0);
     save(&mut other, "opened_project");
 }
 
