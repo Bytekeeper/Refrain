@@ -200,6 +200,8 @@ fn damaged_files_are_refused() {
             v["tracks"][0]["clips"].as_array_mut().unwrap().push(clip);
         }),
         ("newer version", |v| v["version"] = 2.into()),
+        ("loop end before 0", |v| v["loop_end"] = (-1).into()),
+        ("clip after the loop end", |v| v["loop_end"] = 100.into()),
         ("wrong type", |v| v["tracks"] = "none".into()),
     ];
     for (name, damage) in cases {

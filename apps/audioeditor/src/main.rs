@@ -39,6 +39,8 @@ struct Editor {
     frames_per_px: f64,
     scroll: f64,
     drag: Option<Drag>,
+    /// Where the loop end flag is while it is dragged; the project only changes on release.
+    loop_drag: Option<Frames>,
     /// Waveform overviews, keyed by source address and channel. The weak reference keeps the address
     /// from being reused by new audio while the entry exists.
     peaks: HashMap<(usize, usize), (Weak<Source>, Peaks)>,
@@ -66,6 +68,7 @@ impl Default for Editor {
             frames_per_px: 400.0,
             scroll: 0.0,
             drag: None,
+            loop_drag: None,
             peaks: HashMap::new(),
         }
     }
@@ -144,6 +147,24 @@ impl Editor {
             self.toggle_play();
         }
         ui.label(self.time_text(self.player.position()));
+        let looping = self.session.project().loop_end.is_some();
+        if ui
+            .selectable_label(looping, "Loop")
+            .on_hover_text("Play and export the project as a loop: audio past the loop end fades into the start")
+            .clicked()
+        {
+            let end = self.session.project().clips_end();
+            self.run(Command::SetLoopEnd {
+                at: if looping { None } else { Some(end) },
+            });
+        }
+        if ui
+            .add_enabled(looping, egui::Button::new("Play seam"))
+            .on_hover_text("Play from 2 seconds before the loop end, through the join")
+            .clicked()
+        {
+            self.play_seam();
+        }
         ui.separator();
         if ui
             .add_enabled(self.session.can_undo(), egui::Button::new("Undo"))
@@ -207,6 +228,16 @@ impl Editor {
             self.player.stop();
         } else if let Err(e) = self.player.play(self.session.project()) {
             self.status = e;
+        }
+    }
+
+    fn play_seam(&mut self) {
+        let project = self.session.project();
+        let Some(end) = project.loop_end else { return };
+        self.player
+            .seek(end.saturating_sub(2 * Frames::from(project.sample_rate)).max(0));
+        if !self.player.is_playing() {
+            self.toggle_play();
         }
     }
 

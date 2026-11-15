@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use audioeditor_engine::{Clip, Fade, Frames, MAX_DB, MIN_DB, Project, TrackId, clip_amp, edge_fades};
+use audioeditor_engine::{
+    Clip, Fade, Frames, MAX_DB, MIN_DB, Project, TrackId, clip_amp, edge_fades, overlap_after, overlap_before,
+};
 use craft_audio::peaks::Peaks;
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
@@ -14,6 +16,16 @@ pub(crate) const SCROLLBAR_H: f32 = 12.0;
 /// Translucent orange over the frames where two clips crossfade.
 const OVERLAP_FILL: Color32 = Color32::from_rgba_unmultiplied_const(255, 140, 0, 120);
 pub(crate) const CURVE: Color32 = Color32::from_rgb(255, 200, 80);
+const LOOP: Color32 = Color32::from_rgb(90, 200, 120);
+
+/// How a clip is drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum Look {
+    Normal,
+    Selected,
+    /// The part of a clip past the loop end, shown again at the start where it plays.
+    Wrapped,
+}
 
 impl Editor {
     pub(crate) fn timeline(&mut self, ui: &mut Ui) {
@@ -120,12 +132,14 @@ impl Editor {
         let mut ids: Vec<Option<TrackId>> = project.tracks.iter().map(|t| Some(t.id)).collect();
         ids.push(None);
         let tracks: Vec<Vec<Clip>> = ids.into_iter().map(|t| self.preview_track(&project, t)).collect();
+        let wrap = self.loop_end(&project);
+        let wrapped: Vec<Vec<(Clip, (Fade, Fade))>> = tracks.iter().map(|clips| wrapped_parts(clips, wrap)).collect();
         let mut on_top = None;
         for (row, clips) in tracks.iter().enumerate() {
             for index in self.stacking(clips).into_iter().rev() {
                 let Some(clip) = clips.get(index) else { continue };
-                let fades = edge_fades(clips, index);
-                let free = free_ends(clips, index);
+                let fades = edge_fades(clips, index, wrap);
+                let free = free_ends(clips, index, wrap);
                 let area = self.clip_area(rect, row, clip.start, clip.len);
                 if area.right() <= lane_left {
                     continue;
@@ -135,7 +149,13 @@ impl Editor {
                     on_top = Some((area, clip.clone(), fades, free));
                     continue;
                 }
-                self.draw_clip(&lanes, area, lane_left, clip, (fades, free), false);
+                self.draw_clip(&lanes, area, lane_left, clip, (fades, free), Look::Normal);
+            }
+        }
+        for (row, parts) in wrapped.iter().enumerate() {
+            for (part, fades) in parts {
+                let area = self.clip_area(rect, row, part.start, part.len);
+                self.draw_clip(&lanes, area, lane_left, part, (*fades, (false, false)), Look::Wrapped);
             }
         }
         if let Some(Drag::TrimStart { clip, .. } | Drag::TrimEnd { clip, .. }) = &self.drag
@@ -144,7 +164,7 @@ impl Editor {
         {
             // How far the edges can go: the whole audio file.
             let whole = self.clip_area(rect, row, c.start - c.offset, c.source.frames());
-            let r = whole.shrink(1.0);
+            let r = whole.shrink(1.0).intersect(lanes.clip_rect().expand(2.0));
             let corners = [
                 r.left_top(),
                 r.right_top(),
@@ -156,10 +176,18 @@ impl Editor {
             lanes.extend(egui::Shape::dashed_line(&corners, dash, 6.0, 4.0));
         }
         if let Some((area, clip, fades, free)) = on_top {
-            self.draw_clip(&lanes, area, lane_left, &clip, (fades, free), true);
+            self.draw_clip(&lanes, area, lane_left, &clip, (fades, free), Look::Selected);
+        }
+        if let Some(l) = wrap {
+            // Past the loop end nothing plays there: that audio is heard at the start.
+            let x = self.x_of(lane_left, l);
+            let past = Rect::from_x_y_ranges(x.max(lane_left)..=rect.right().max(x), rect.y_range());
+            lanes.rect_filled(past, 0.0, Color32::from_black_alpha(110));
+            lanes.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(2.0, LOOP));
         }
         for (row, clips) in tracks.iter().enumerate() {
-            self.draw_overlaps(&lanes, rect, row, clips);
+            let parts = wrapped.get(row).map_or(&[][..], Vec::as_slice);
+            self.draw_overlaps(&lanes, rect, row, clips, wrap, parts);
         }
         let x = self.x_of(lane_left, self.player.position());
         if x >= lane_left {
@@ -231,17 +259,34 @@ impl Editor {
         lane_left: f32,
         clip: &Clip,
         (fades, free): ((Fade, Fade), (bool, bool)),
-        selected: bool,
+        look: Look,
     ) {
         let start = clip.start;
-        let fill = if selected {
-            Color32::from_rgb(52, 92, 140)
-        } else {
-            Color32::from_rgb(44, 66, 92)
+        let fill = match look {
+            Look::Normal => Color32::from_rgb(44, 66, 92),
+            Look::Selected => Color32::from_rgb(52, 92, 140),
+            Look::Wrapped => Color32::from_rgb(40, 70, 58),
         };
         painter.rect_filled(area, 3.0, fill);
-        painter.rect_stroke(area, 3.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Inside);
-        let visible = Rect::from_min_max(pos2(area.left().max(lane_left), area.top()), area.max);
+        if look == Look::Wrapped {
+            let r = area.shrink(0.5).intersect(painter.clip_rect().expand(2.0));
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            painter.extend(egui::Shape::dashed_line(&corners, Stroke::new(1.0, LOOP), 6.0, 4.0));
+        } else {
+            painter.rect_stroke(area, 3.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Inside);
+        }
+        // Only the part on screen: deep in, a clip can be millions of pixels wide.
+        let view = painter.clip_rect();
+        let visible = Rect::from_x_y_ranges(
+            area.left().max(view.left())..=area.right().min(view.right()),
+            area.y_range(),
+        );
 
         // Playback uses the first two channels, so those are the ones shown: one band each.
         let shown = clip.source.channels.len().min(2);
@@ -289,13 +334,17 @@ impl Editor {
         }
         painter.add(egui::Shape::line(line, Stroke::new(1.5, CURVE)));
 
-        for point in clip.gain.iter().filter(|p| (0..=clip.len).contains(&p.at)) {
-            let pos = pos2(
-                self.x_of(lane_left, start + point.at),
-                y_of_amp(area, db_to_amp(point.db)),
+        if look == Look::Wrapped {
+            painter.with_clip_rect(visible.intersect(painter.clip_rect())).text(
+                visible.left_top() + vec2(14.0, 2.0),
+                Align2::LEFT_TOP,
+                format!("from loop end: {}", clip.source.name),
+                FontId::proportional(11.0),
+                LOOP,
             );
-            painter.circle(pos, 4.0, Color32::from_gray(30), Stroke::new(1.5, CURVE));
+            return;
         }
+        self.draw_points(painter, area, lane_left, clip, 0..=clip.len);
         // Crossfaded ends have no handle: the overlap is changed by moving the clip.
         let handles = [
             (free.0, start + clip.fade_in.len),
@@ -335,31 +384,75 @@ impl Editor {
         );
     }
 
-    /// Tints each crossfade and draws both of its fade lines, which the clip on top would hide.
-    fn draw_overlaps(&self, painter: &egui::Painter, rect: Rect, row: usize, clips: &[Clip]) {
+    /// Tints each crossfade and draws both of its fade lines and volume points, which the clip on top would hide.
+    /// `wrapped` are the parts from past the loop end, which crossfade with the start of the track.
+    fn draw_overlaps(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        row: usize,
+        clips: &[Clip],
+        wrap: Option<Frames>,
+        wrapped: &[(Clip, (Fade, Fade))],
+    ) {
         let lane_left = rect.left() + HEADER_W;
-        for (i, pair) in clips.windows(2).enumerate() {
+        // Wrapped parts first, so at the same start they count as the earlier clip.
+        let mut parts: Vec<(&Clip, (Fade, Fade), bool)> = wrapped.iter().map(|(c, f)| (c, *f, true)).collect();
+        parts.extend(
+            clips
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c, edge_fades(clips, i, wrap), false)),
+        );
+        parts.sort_by_key(|(c, ..)| c.start);
+        for pair in parts.windows(2) {
             let [a, b] = pair else { continue };
-            if a.end() <= b.start {
+            if a.0.end() <= b.0.start {
                 continue;
             }
-            let area = self.clip_area(rect, row, a.start, a.len);
-            let x0 = self.x_of(lane_left, b.start);
-            let x1 = self.x_of(lane_left, a.end().min(b.end()));
+            let area = self.clip_area(rect, row, a.0.start, a.0.len);
+            let x0 = self.x_of(lane_left, b.0.start);
+            let x1 = self.x_of(lane_left, a.0.end().min(b.0.end()));
             let zone = Rect::from_min_max(pos2(x0, area.top()), pos2(x1, area.bottom()));
             painter.rect_filled(zone, 0.0, OVERLAP_FILL);
             painter.rect_stroke(zone, 0.0, Stroke::new(1.0, CURVE), StrokeKind::Inside);
-            for (index, clip) in [(i, a), (i + 1, b)] {
-                let fades = edge_fades(clips, index);
+            for &(clip, fades, is_wrapped) in [a, b] {
                 let mut line = vec![];
                 let mut x = zone.left().max(lane_left);
-                while x <= zone.right() {
+                while x <= zone.right().min(painter.clip_rect().right()) {
                     let rel = (self.frame_at(lane_left, x) - clip.start).clamp(0, clip.len.saturating_sub(1));
                     line.push(pos2(x, y_of_amp(area, clip_amp(clip, fades, rel))));
                     x += 2.0;
                 }
                 painter.add(egui::Shape::line(line, Stroke::new(1.5, CURVE)));
+                if !is_wrapped {
+                    let zone_frames = b.0.start - clip.start..=a.0.end().min(b.0.end()) - clip.start;
+                    self.draw_points(painter, area, lane_left, clip, zone_frames);
+                }
             }
+        }
+    }
+
+    /// The volume points of `clip` that lie in `range` (frames from the clip's start).
+    fn draw_points(
+        &self,
+        painter: &egui::Painter,
+        area: Rect,
+        lane_left: f32,
+        clip: &Clip,
+        range: std::ops::RangeInclusive<Frames>,
+    ) {
+        let visible = 0..=clip.len;
+        for point in clip
+            .gain
+            .iter()
+            .filter(|p| range.contains(&p.at) && visible.contains(&p.at))
+        {
+            let pos = pos2(
+                self.x_of(lane_left, clip.start + point.at),
+                y_of_amp(area, db_to_amp(point.db)),
+            );
+            painter.circle(pos, 4.0, Color32::from_gray(30), Stroke::new(1.5, CURVE));
         }
     }
 
@@ -373,14 +466,36 @@ impl Editor {
         order
     }
 
-    /// Time labels above the tracks; clicking moves the play position.
+    /// Time labels above the tracks; clicking moves the play position, dragging the flag moves the loop end.
     pub(crate) fn ruler(&mut self, ui: &mut Ui) {
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), RULER_H), Sense::click_and_drag());
         let lane_left = rect.left() + HEADER_W;
-        if let Some(pos) = response.interact_pointer_pos()
-            && pos.x >= lane_left
+        let project = self.session.project().clone();
+        let loop_x = self.loop_end(&project).map(|l| self.x_of(lane_left, l));
+        let origin = ui.input(|i| i.pointer.press_origin());
+        let on_flag = loop_x.zip(origin).is_some_and(|(x, o)| (o.x - x).abs() <= HANDLE + 2.0);
+        if loop_x
+            .zip(response.hover_pos())
+            .is_some_and(|(x, p)| (p.x - x).abs() <= HANDLE + 2.0)
+            || self.loop_drag.is_some()
         {
-            self.player.seek(self.frame_at(lane_left, pos.x));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if response.drag_started() && on_flag {
+            self.loop_drag = project.loop_end;
+        }
+        if let Some(pos) = response.interact_pointer_pos() {
+            let frame = self.frame_at(lane_left, pos.x);
+            if self.loop_drag.is_some() {
+                self.loop_drag = Some(frame.max(1));
+            } else if pos.x >= lane_left && !on_flag {
+                self.player.seek(frame);
+            }
+        }
+        if response.drag_stopped()
+            && let Some(at) = self.loop_drag.take()
+        {
+            self.run(Command::SetLoopEnd { at: Some(at) });
         }
         let rate = self.session.project().sample_rate.max(1);
         let painter = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
@@ -422,11 +537,20 @@ impl Editor {
                 color,
             );
         }
+        if let Some(x) = self.loop_end(&project).map(|l| self.x_of(lane_left, l)) {
+            let flag = vec![pos2(x, rect.top()), pos2(x, rect.bottom()), pos2(x - 12.0, rect.top())];
+            painter.add(egui::Shape::convex_polygon(flag, LOOP, Stroke::NONE));
+        }
         let x = self.x_of(lane_left, self.player.position());
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(1.5, Color32::from_rgb(230, 70, 70)),
         );
+    }
+
+    /// The loop end as shown: while its flag is dragged, where the flag is.
+    pub(crate) fn loop_end(&self, project: &Project) -> Option<Frames> {
+        self.loop_drag.or(project.loop_end)
     }
 
     /// Shows which part of the project is visible; drag the handle or click the bar to move.
@@ -460,7 +584,9 @@ impl Editor {
     /// The scrollable length: the project plus half a screen, so the end is never stuck at the edge.
     fn scroll_total(&self, lane_w: f32) -> f64 {
         let visible = f64::from(lane_w.max(1.0)) * self.frames_per_px;
-        (self.session.project().len() as f64 + visible / 2.0).max(visible)
+        let project = self.session.project();
+        let end = project.len().max(project.clips_end());
+        (end as f64 + visible / 2.0).max(visible)
     }
 
     pub(crate) fn clamp_scroll(&mut self, lane_w: f32) {
@@ -511,8 +637,24 @@ pub(crate) fn db_to_amp(db: f32) -> f32 {
 }
 
 /// Whether the start and the end of clip `i` are free of neighbours (and so may have their own fade).
-pub(crate) fn free_ends(clips: &[Clip], i: usize) -> (bool, bool) {
-    let overlaps = |a: Option<&Clip>, b: Option<&Clip>| matches!((a, b), (Some(a), Some(b)) if a.end() > b.start);
-    let prev = i.checked_sub(1).and_then(|j| clips.get(j));
-    (!overlaps(prev, clips.get(i)), !overlaps(clips.get(i), clips.get(i + 1)))
+pub(crate) fn free_ends(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> (bool, bool) {
+    (
+        overlap_before(clips, i, loop_end) == 0,
+        overlap_after(clips, i, loop_end) == 0,
+    )
+}
+
+/// The parts of clips past the loop end, moved to where they play: the start of the loop.
+/// Each keeps the fade-out of its clip, which is the crossfade into the start.
+fn wrapped_parts(clips: &[Clip], wrap: Option<Frames>) -> Vec<(Clip, (Fade, Fade))> {
+    let Some(l) = wrap else { return vec![] };
+    let mut parts = vec![];
+    for (i, clip) in clips.iter().enumerate().filter(|(_, c)| c.end() > l) {
+        let mut part = clip.clone();
+        if part.trim(l.max(clip.start), clip.end()).is_ok() {
+            part.start -= l;
+            parts.push((part, (Fade::default(), edge_fades(clips, i, wrap).1)));
+        }
+    }
+    parts
 }

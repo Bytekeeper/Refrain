@@ -131,6 +131,9 @@ pub struct Project {
     /// 0 until the first clip is added; that clip sets it.
     pub sample_rate: u32,
     pub tracks: Vec<Track>,
+    /// When set, the project is a loop of this many frames: audio past it plays again from 0,
+    /// crossfaded with what is there. Clips then start in `0..loop_end`.
+    pub loop_end: Option<Frames>,
     pub(crate) next_id: u64,
 }
 
@@ -150,8 +153,13 @@ impl Project {
             .find_map(|t| t.clips.iter().find(|c| c.id == id).map(|c| (t, c)))
     }
 
-    /// End of the last clip.
+    /// The length that is played and exported: the loop, or up to the end of the last clip.
     pub fn len(&self) -> Frames {
+        self.loop_end.unwrap_or_else(|| self.clips_end())
+    }
+
+    /// End of the last clip. With a loop, this can be past the loop end.
+    pub fn clips_end(&self) -> Frames {
         self.tracks
             .iter()
             .flat_map(|t| &t.clips)

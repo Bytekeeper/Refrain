@@ -13,12 +13,13 @@ pub fn fade_gain(shape: FadeShape, t: f32) -> f32 {
 
 /// The fade-in and fade-out clip `i` of a track really uses: where a neighbour overlaps, the
 /// overlap is the fade, so both sides of a crossfade always cover the same frames.
-pub fn edge_fades(clips: &[Clip], i: usize) -> (Fade, Fade) {
+/// With a loop end, the track is a circle: the last clip comes before the first, one loop earlier.
+pub fn edge_fades(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> (Fade, Fade) {
     let Some(clip) = clips.get(i) else {
         return (Fade::default(), Fade::default());
     };
-    let before = overlap_before(clips, i);
-    let after = overlap_after(clips, i);
+    let before = overlap_before(clips, i, loop_end);
+    let after = overlap_after(clips, i, loop_end);
     let fade_in = if before > 0 {
         Fade {
             len: before,
@@ -27,7 +28,7 @@ pub fn edge_fades(clips: &[Clip], i: usize) -> (Fade, Fade) {
     } else {
         clip.fade_in
     };
-    let fade_out = match clips.get(i + 1) {
+    let fade_out = match next_index(clips, i, loop_end).and_then(|n| clips.get(n)) {
         Some(next) if after > 0 => Fade {
             len: after,
             shape: next.crossfade_shape,
@@ -37,42 +38,96 @@ pub fn edge_fades(clips: &[Clip], i: usize) -> (Fade, Fade) {
     (fade_in, fade_out)
 }
 
-pub(crate) fn overlap_before(clips: &[Clip], i: usize) -> Frames {
-    match (i.checked_sub(1).and_then(|j| clips.get(j)), clips.get(i)) {
-        (Some(prev), Some(clip)) => prev.end().saturating_sub(clip.start).max(0),
+/// Start and end of the clip before `i`; before the first clip of a loop, the last one a loop earlier.
+pub(crate) fn previous_span(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Option<(Frames, Frames)> {
+    match i.checked_sub(1) {
+        Some(j) => clips.get(j).map(|c| (c.start, c.end())),
+        None => {
+            let l = loop_end?;
+            let last = clips.last()?;
+            Some((last.start.saturating_sub(l), last.end().saturating_sub(l)))
+        }
+    }
+}
+
+fn next_index(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Option<usize> {
+    if i + 1 < clips.len() {
+        Some(i + 1)
+    } else if loop_end.is_some() && i < clips.len() {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+pub fn overlap_before(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Frames {
+    match (previous_span(clips, i, loop_end), clips.get(i)) {
+        (Some((_, end)), Some(clip)) => end.saturating_sub(clip.start).max(0),
         _ => 0,
     }
 }
 
-pub(crate) fn overlap_after(clips: &[Clip], i: usize) -> Frames {
-    overlap_before(clips, i + 1)
+pub fn overlap_after(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Frames {
+    next_index(clips, i, loop_end).map_or(0, |n| overlap_before(clips, n, loop_end))
 }
 
-/// Mixes `frames` stereo frames from timeline position `start`.
+/// Mixes `frames` stereo frames from timeline position `start`. With a loop end, positions repeat
+/// every loop and audio past the loop end plays again from 0.
 pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] {
-    let mut left = vec![0.0; frames];
-    let mut right = vec![0.0; frames];
-    let end = start.saturating_add(Frames::try_from(frames).unwrap_or(Frames::MAX));
+    let mut out = [vec![0.0; frames], vec![0.0; frames]];
+    let Some(l) = project.loop_end.filter(|l| *l > 0) else {
+        mix_into(project, &mut out, 0, start, frames);
+        return out;
+    };
+    let mut done = 0;
+    while done < frames {
+        let at = start.saturating_add(done as Frames).rem_euclid(l);
+        let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(frames - done);
+        mix_into(project, &mut out, done, at, n);
+        done += n;
+    }
+    out
+}
+
+/// Adds timeline frames `from..from + n` to `out` from index `at`. With a loop end, this range must lie in one loop.
+fn mix_into(project: &Project, out: &mut [Vec<f32>; 2], at: usize, from: Frames, n: usize) {
+    let to = from.saturating_add(Frames::try_from(n).unwrap_or(Frames::MAX));
+    let [left, right] = out;
     for track in project.tracks.iter().filter(|t| !t.muted) {
         let track_amp = db_to_amp(track.gain_db);
         for (index, clip) in track.clips.iter().enumerate() {
-            let fades = edge_fades(&track.clips, index);
+            let fades = edge_fades(&track.clips, index, project.loop_end);
             let stereo = clip.source.channels.len() >= 2;
-            for pos in clip.start.max(start)..clip.end().min(end) {
-                let Ok(i) = usize::try_from(pos - start) else { continue };
-                let rel = pos - clip.start;
-                let src = clip.offset.saturating_add(rel);
-                let amp = track_amp * clip_amp(clip, fades, rel);
-                let l = clip.source.sample(0, src);
-                let r = if stereo { clip.source.sample(1, src) } else { l };
-                if let (Some(ol), Some(or)) = (left.get_mut(i), right.get_mut(i)) {
-                    *ol += l * amp;
-                    *or += r * amp;
+            for shift in loop_shifts(clip, from, to, project.loop_end) {
+                let clip_start = clip.start.saturating_sub(shift);
+                for pos in clip_start.max(from)..clip_start.saturating_add(clip.len).min(to) {
+                    let Ok(i) = usize::try_from(pos - from) else { continue };
+                    let rel = pos - clip_start;
+                    let src = clip.offset.saturating_add(rel);
+                    let amp = track_amp * clip_amp(clip, fades, rel);
+                    let l = clip.source.sample(0, src);
+                    let r = if stereo { clip.source.sample(1, src) } else { l };
+                    if let (Some(ol), Some(or)) = (left.get_mut(at + i), right.get_mut(at + i)) {
+                        *ol += l * amp;
+                        *or += r * amp;
+                    }
                 }
             }
         }
     }
-    [left, right]
+}
+
+/// How far back the clip is moved to reach `from..to`: 0, and with a loop each whole number of loops
+/// that brings a part of it into the range. The overlap rules keep a clip shorter than two loops.
+fn loop_shifts(clip: &Clip, from: Frames, to: Frames, loop_end: Option<Frames>) -> Vec<Frames> {
+    let Some(l) = loop_end.filter(|l| *l > 0) else {
+        return vec![0];
+    };
+    let first = clip.start.saturating_sub(to).div_euclid(l).saturating_add(1);
+    let last = clip.end().saturating_sub(from).saturating_sub(1).div_euclid(l);
+    (first..=last.min(first.saturating_add(3)))
+        .map(|k| k.saturating_mul(l))
+        .collect()
 }
 
 /// Linear gain at `rel` frames into the clip: volume curve times the fades from [`edge_fades`].
@@ -155,6 +210,7 @@ mod tests {
             sample_rate: 1000,
             tracks: vec![track],
             next_id: 10,
+            loop_end: None,
         }
     }
 
@@ -206,9 +262,9 @@ mod tests {
         };
         let b = clip(2, constant(1.0, 100), 80, FadeShape::Linear);
         let clips = vec![a, b];
-        assert_eq!(edge_fades(&clips, 0).0.len, 10);
-        assert_eq!(edge_fades(&clips, 0).1.len, 20);
-        assert_eq!(edge_fades(&clips, 1).0.len, 20);
+        assert_eq!(edge_fades(&clips, 0, None).0.len, 10);
+        assert_eq!(edge_fades(&clips, 0, None).1.len, 20);
+        assert_eq!(edge_fades(&clips, 1, None).0.len, 20);
     }
 
     #[test]

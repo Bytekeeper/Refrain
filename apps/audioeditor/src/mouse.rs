@@ -174,13 +174,23 @@ impl Editor {
                 // Moving past 0 hides the clip's start; at least one frame stays after 0.
                 let len = project.clip(*clip).map_or(1, |(_, c)| c.len);
                 *start = (frame - *grab).max(1 - len);
+                if let Some(l) = project.loop_end {
+                    // In a loop every clip starts inside it.
+                    *start = (*start).clamp(0, l - 1);
+                }
                 let row = ((pos.y - rect.top()) / TRACK_H).floor().max(0.0) as usize;
                 *track = project.tracks.get(row).map(|t| t.id);
             }
             // Up to the ends of the audio file, and at least one frame of the clip stays after 0.
             Drag::TrimStart { clip, start } => {
                 if let Some((_, c)) = project.clip(*clip) {
-                    *start = frame.clamp(c.start - c.offset, c.end() - 1);
+                    let first = c.start - c.offset;
+                    let first = if project.loop_end.is_some() {
+                        first.max(0)
+                    } else {
+                        first
+                    };
+                    *start = frame.clamp(first, c.end() - 1);
                 }
             }
             Drag::TrimEnd { clip, end } => {
@@ -278,7 +288,7 @@ impl Editor {
         for &i in &order {
             let Some(clip) = track.clips.get(i) else { continue };
             let area = self.clip_area(rect, row, clip.start, clip.len);
-            let free = free_ends(&track.clips, i);
+            let free = free_ends(&track.clips, i, project.loop_end);
             // Points in a trimmed-off part still shape the curve but cannot be grabbed.
             for (index, point) in clip.gain.iter().enumerate() {
                 if (0..=clip.len).contains(&point.at)

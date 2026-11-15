@@ -376,3 +376,66 @@ fn trimmed_edges_can_be_dragged_back_out() {
     assert_eq!(c.end(), 4 * RATE as i64);
     assert_eq!(c.hidden(), (4_000, 0));
 }
+
+/// Regression: with the right clip selected, the left clip's volume points in the overlap were hidden under it.
+#[test]
+fn volume_points_in_an_overlap_stay_visible() {
+    let mut e = overlapping();
+    let a = e.session.project().tracks[0].clips[0].id;
+    let b = e.session.project().tracks[0].clips[1].id;
+    let points = vec![
+        audioeditor_engine::GainPoint { at: 8000, db: 0.0 },
+        audioeditor_engine::GainPoint { at: 22000, db: -6.0 },
+    ];
+    e.run(Command::SetGainCurve { clip: a, points });
+    e.run(Command::SetGainCurve {
+        clip: b,
+        points: vec![audioeditor_engine::GainPoint { at: 12000, db: -12.0 }],
+    });
+    e.selected = Some(b);
+    let mut h = harness(e);
+    save(&mut h, "overlap_points_right_selected");
+}
+
+/// Regression: at the deepest zoom a long clip is millions of pixels wide, and drawing all of it
+/// made a buffer bigger than the graphics card allows, which crashed the window.
+#[test]
+fn deep_zoom_on_a_long_clip_does_not_crash() {
+    let mut e = Editor::default();
+    e.run(Command::AddTrack { name: "Track".into() });
+    let track = e.session.project().tracks[0].id;
+    e.run(Command::AddClip {
+        track,
+        source: tone(220.0, 1500.0),
+        start: 0,
+    });
+    let clip = e.session.project().tracks[0].clips[0].id;
+    let points = vec![audioeditor_engine::GainPoint { at: 0, db: 0.0 }];
+    e.run(Command::SetGainCurve { clip, points });
+    e.selected = Some(clip);
+    e.frames_per_px = 1.0;
+    let mut h = harness(e);
+    save(&mut h, "deep_zoom");
+}
+
+/// The loop end flag on the ruler moves the loop end; audio past it shows again at the start.
+#[test]
+fn dragging_the_loop_flag_wraps_the_end_onto_the_start() {
+    let mut e = Editor::default();
+    e.run(Command::AddTrack { name: "Track".into() });
+    let track = e.session.project().tracks[0].id;
+    // 3 s at 0: x = 126..606 at 50 frames per pixel.
+    e.run(Command::AddClip {
+        track,
+        source: tone(220.0, 3.0),
+        start: 0,
+    });
+    e.run(Command::SetLoopEnd {
+        at: Some(3 * RATE as i64),
+    });
+    e.frames_per_px = 50.0;
+    let mut h = harness(e);
+    drag(&mut h, egui::pos2(604.0, 50.0), egui::pos2(526.0, 50.0));
+    assert_eq!(h.state().session.project().loop_end, Some(20_000));
+    save(&mut h, "loop_wrapped");
+}

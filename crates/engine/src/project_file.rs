@@ -30,6 +30,8 @@ struct ProjectFile {
     /// Relative to the project file's folder when the audio is inside it, so the folder can move.
     sources: Vec<PathBuf>,
     tracks: Vec<TrackFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loop_end: Option<Frames>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,6 +100,7 @@ pub fn save_project(project: &Project, path: &Path) -> Result<()> {
         sample_rate: project.sample_rate,
         sources,
         tracks,
+        loop_end: project.loop_end,
     };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|e| Error::ProjectFile(e.to_string()))?;
     write_atomic(&path, &bytes)
@@ -135,6 +138,7 @@ pub fn open_project(path: &Path) -> Result<Session> {
 
     let mut project = Project {
         sample_rate: file.sample_rate,
+        loop_end: file.loop_end,
         ..Project::default()
     };
     for track in file.tracks {

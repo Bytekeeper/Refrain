@@ -72,6 +72,10 @@ pub enum Command {
         clip: ClipId,
         points: Vec<GainPoint>,
     },
+    /// `None` ends looping. The loop end must be after 0.
+    SetLoopEnd {
+        at: Option<Frames>,
+    },
 }
 
 /// The open project with its undo history. Snapshots share sample data, so they are cheap.
@@ -85,8 +89,11 @@ pub struct Session {
 impl Session {
     /// A session for a project read from a file. Refuses tracks that break the overlap rules.
     pub fn open(mut project: Project) -> Result<Session> {
+        if project.loop_end.is_some_and(|l| l <= 0) {
+            return Err(Error::Invalid("the loop end must be after 0".into()));
+        }
         for track in &mut project.tracks {
-            tidy(track)?;
+            tidy(track, project.loop_end)?;
         }
         Ok(Session {
             project: Arc::new(project),
@@ -104,7 +111,7 @@ impl Session {
         let mut next = Project::clone(&self.project);
         apply(&mut next, command)?;
         for track in &mut next.tracks {
-            tidy(track)?;
+            tidy(track, next.loop_end)?;
         }
         let previous = std::mem::replace(&mut self.project, Arc::new(next));
         self.undo.push(previous);
@@ -137,6 +144,7 @@ impl Session {
 }
 
 fn apply(p: &mut Project, command: Command) -> Result<()> {
+    let wrap = p.loop_end;
     match command {
         Command::AddTrack { name } => {
             let id = TrackId(p.new_id());
@@ -210,34 +218,40 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::SetFadeIn { clip, fade } => {
             let (clips, i) = locate(p, clip)?;
-            if overlap_before(clips, i) > 0 {
+            if overlap_before(clips, i, wrap) > 0 {
                 return Err(Error::Invalid(
                     "the start of this clip is a crossfade; move the clip to change it".into(),
                 ));
             }
-            let out_len = edge_fades(clips, i).1.len;
+            let out_len = edge_fades(clips, i, wrap).1.len;
             let c = clip_mut(p, clip)?;
             check_fades(c.len, fade.len, out_len)?;
             c.fade_in = fade;
         }
         Command::SetFadeOut { clip, fade } => {
             let (clips, i) = locate(p, clip)?;
-            if overlap_after(clips, i) > 0 {
+            if overlap_after(clips, i, wrap) > 0 {
                 return Err(Error::Invalid(
                     "the end of this clip is a crossfade; move the clip to change it".into(),
                 ));
             }
-            let in_len = edge_fades(clips, i).0.len;
+            let in_len = edge_fades(clips, i, wrap).0.len;
             let c = clip_mut(p, clip)?;
             check_fades(c.len, in_len, fade.len)?;
             c.fade_out = fade;
         }
         Command::SetCrossfadeShape { clip, shape } => {
             let (clips, i) = locate(p, clip)?;
-            if overlap_before(clips, i) == 0 {
+            if overlap_before(clips, i, wrap) == 0 {
                 return Err(Error::Invalid("no other clip overlaps the start of this clip".into()));
             }
             clip_mut(p, clip)?.crossfade_shape = shape;
+        }
+        Command::SetLoopEnd { at } => {
+            if at.is_some_and(|l| l <= 0) {
+                return Err(Error::Invalid("the loop end must be after 0".into()));
+            }
+            p.loop_end = at;
         }
         Command::SetGainCurve { clip, mut points } => {
             for point in &mut points {
@@ -251,21 +265,34 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
 }
 
 /// Sorts a track's clips, refuses layouts where an overlap is not a clear crossfade, and drops or
-/// shortens free fades that no longer fit.
-fn tidy(track: &mut Track) -> Result<()> {
+/// shortens free fades that no longer fit. With a loop, the checks go round the seam too.
+fn tidy(track: &mut Track, loop_end: Option<Frames>) -> Result<()> {
     track.clips.sort_by_key(|c| c.start);
-    for pair in track.clips.windows(2) {
+    // The clips in order round the circle: the last one a loop earlier, all, the first one a loop later.
+    let mut ring: Vec<(Frames, Frames)> = track.clips.iter().map(|c| (c.start, c.end())).collect();
+    if let Some(l) = loop_end
+        && let (Some(&(first_start, first_end)), Some(&(last_start, last_end))) = (ring.first(), ring.last())
+    {
+        if first_start < 0 || last_start >= l {
+            return Err(Error::Invalid(
+                "with a loop, every clip must start between 0 and the loop end".into(),
+            ));
+        }
+        ring.insert(0, (last_start - l, last_end.saturating_sub(l)));
+        ring.push((first_start + l, first_end.saturating_add(l)));
+    }
+    for pair in ring.windows(2) {
         if let [a, b] = pair
-            && (b.start == a.start || b.end() <= a.end())
+            && (b.0 == a.0 || b.1 <= a.1)
         {
             return Err(Error::Invalid(
                 "a clip cannot lie completely inside another clip on the same track".into(),
             ));
         }
     }
-    for triple in track.clips.windows(3) {
+    for triple in ring.windows(3) {
         if let [a, _, c] = triple
-            && c.start < a.end()
+            && c.0 < a.1
         {
             return Err(Error::Invalid(
                 "at most two clips can overlap at any point of a track".into(),
@@ -273,8 +300,8 @@ fn tidy(track: &mut Track) -> Result<()> {
         }
     }
     for i in 0..track.clips.len() {
-        let before = overlap_before(&track.clips, i);
-        let after = overlap_after(&track.clips, i);
+        let before = overlap_before(&track.clips, i, loop_end);
+        let after = overlap_after(&track.clips, i, loop_end);
         let Some(c) = track.clips.get_mut(i) else { continue };
         if before > 0 {
             c.fade_in.len = 0;
@@ -292,8 +319,9 @@ fn tidy(track: &mut Track) -> Result<()> {
 
 fn split(p: &mut Project, clip: ClipId, at: Frames) -> Result<()> {
     let id = ClipId(p.new_id());
+    let wrap = p.loop_end;
     let (clips, i) = locate(p, clip)?;
-    let (fade_in, fade_out) = edge_fades(clips, i);
+    let (fade_in, fade_out) = edge_fades(clips, i, wrap);
     let c = clips.get(i).ok_or(Error::NoClip(clip))?.clone();
     let cut = at.saturating_sub(c.start);
     if cut <= 0 || cut >= c.len {
@@ -429,6 +457,52 @@ mod tests {
     }
 
     #[test]
+    fn audio_past_the_loop_end_crossfades_into_the_start() {
+        let steady = Arc::new(Source {
+            path: None,
+            name: "steady".into(),
+            sample_rate: 1000,
+            channels: vec![vec![1.0; 1500]],
+        });
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddClip {
+            track,
+            source: steady,
+            start: 0,
+        })
+        .unwrap();
+        let clip = s.project().tracks[0].clips[0].id;
+        s.execute(Command::SetLoopEnd { at: Some(1000) }).unwrap();
+        s.execute(Command::SetCrossfadeShape {
+            clip,
+            shape: FadeShape::Linear,
+        })
+        .unwrap();
+
+        assert_eq!(s.project().len(), 1000);
+        let [left, _] = render(s.project(), 0, 2000);
+        for (i, v) in left.iter().enumerate() {
+            assert!((v - 1.0).abs() < 1e-6, "frame {i}: {v}");
+        }
+        assert_eq!(render(s.project(), 0, 1000), render(s.project(), 1000, 1000));
+
+        // A clip longer than two loops would cover the seam three times; a clip after the loop end never plays.
+        assert!(s.execute(Command::SetLoopEnd { at: Some(700) }).is_err());
+        assert!(
+            s.execute(Command::MoveClip {
+                clip,
+                track,
+                start: 1000
+            })
+            .is_err()
+        );
+        s.execute(Command::SetLoopEnd { at: None }).unwrap();
+        assert_eq!(s.project().len(), 1500);
+    }
+
+    #[test]
     fn a_trim_hides_audio_that_widening_brings_back() {
         let (mut s, _, clip) = ramp_session();
         let points = vec![GainPoint { at: 0, db: 0.0 }, GainPoint { at: 1000, db: -20.0 }];
@@ -549,14 +623,14 @@ mod tests {
         let clips = &s.project().tracks[0].clips;
         assert_eq!((clips[0].fade_out.len, clips[1].fade_in.len), (0, 0));
         assert_eq!(
-            edge_fades(clips, 0).1,
+            edge_fades(clips, 0, None).1,
             Fade {
                 len: 200,
                 shape: FadeShape::EqualPower
             }
         );
         assert_eq!(
-            edge_fades(clips, 1).0,
+            edge_fades(clips, 1, None).0,
             Fade {
                 len: 200,
                 shape: FadeShape::EqualPower

@@ -122,8 +122,10 @@ fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
     // A seek from the window during rendering wins over advancing.
     if s.pos == pos {
         s.pos = pos.saturating_add(Frames::try_from(frames).unwrap_or(0));
-        if s.pos >= project.len() {
-            s.playing = false;
+        match project.loop_end {
+            Some(l) if l > 0 => s.pos = s.pos.rem_euclid(l),
+            _ if s.pos >= project.len() => s.playing = false,
+            _ => {}
         }
     }
 }
