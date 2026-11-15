@@ -597,3 +597,54 @@ fn channels_of_a_clip_and_of_a_whole_track() {
     h.state_mut().undo();
     assert_eq!(modes(&h), [Left, Stereo], "all clips change in one undo step");
 }
+
+/// A dragged clip snaps to the edge of a clip on another track, with a guide line; without snap it stays put.
+#[test]
+fn a_dragged_clip_snaps_to_other_clip_edges() {
+    let setup = || {
+        let mut e = Editor::default();
+        e.run(Command::AddTrack { name: "A".into() });
+        e.run(Command::AddTrack { name: "B".into() });
+        let (a, b) = (e.session.project().tracks[0].id, e.session.project().tracks[1].id);
+        // A ends at 3 s (x 606); B starts at 3.5 s (x 686).
+        e.run(Command::AddClip {
+            track: a,
+            source: tone(220.0, 3.0),
+            start: 0,
+        });
+        e.run(Command::AddClip {
+            track: b,
+            source: tone(330.0, 1.0),
+            start: 28_000,
+        });
+        e.frames_per_px = 50.0;
+        harness_sized(e, 450.0)
+    };
+    let b_start = |h: &Harness<'_, Editor>| h.state().session.project().tracks[1].clips[0].start;
+    let press = |pos, pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+
+    // Dropped 75 px to the left, B would start 250 frames (5 px) after A's end: close enough to snap.
+    let mut h = setup();
+    let (from, to) = (egui::pos2(760.0, 230.0), egui::pos2(685.0, 230.0));
+    h.hover_at(from);
+    h.run();
+    h.event(press(from, true));
+    for step in 1..=10 {
+        h.hover_at(from + (to - from) * (step as f32 / 10.0));
+        h.run();
+    }
+    save(&mut h, "snap_guide");
+    h.event(press(to, false));
+    h.run();
+    assert_eq!(b_start(&h), 24_000);
+
+    let mut h = setup();
+    h.state_mut().snap = false;
+    drag(&mut h, from, to);
+    assert_eq!(b_start(&h), 24_250);
+}

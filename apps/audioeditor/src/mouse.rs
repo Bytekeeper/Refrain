@@ -59,6 +59,37 @@ pub(crate) enum FadeMenu {
     FadeOut(ClipId),
 }
 
+/// How close, on screen, an edge must come to a target to snap to it.
+const SNAP_PX: f64 = 8.0;
+
+/// The positions dragged edges snap to, and how far they reach.
+pub(crate) struct Snap {
+    targets: Vec<Frames>,
+    reach: Frames,
+}
+
+impl Snap {
+    /// The shift that lands the nearest of `edges` on a target, and that target.
+    fn shift(&self, edges: &[Frames]) -> Option<(Frames, Frames)> {
+        edges
+            .iter()
+            .flat_map(|&edge| self.targets.iter().map(move |&target| (target - edge, target)))
+            .filter(|(shift, _)| shift.abs() <= self.reach)
+            .min_by_key(|(shift, _)| shift.abs())
+    }
+
+    /// `frame`, or the target it snaps to, which then goes to `guide`.
+    pub(crate) fn apply(&self, frame: Frames, guide: &mut Option<Frames>) -> Frames {
+        match self.shift(&[frame]) {
+            Some((shift, target)) => {
+                *guide = Some(target);
+                frame + shift
+            }
+            None => frame,
+        }
+    }
+}
+
 /// What is under the mouse, most specific first.
 pub(crate) enum Hit {
     /// The delete button on the selected clip.
@@ -197,7 +228,9 @@ impl Editor {
                 self.selected = Some(clip);
             }
         }
-        self.update_drag(project, rect, pos, frame);
+        let shift = response.ctx.input(|i| i.modifiers.shift);
+        let snap = self.snap_targets(project, self.drag.as_ref().map(Drag::clip), shift);
+        self.update_drag(project, rect, pos, frame, &snap);
         if response.drag_stopped_by(egui::PointerButton::Primary)
             && let Some(drag) = self.drag.take()
         {
@@ -205,7 +238,29 @@ impl Editor {
         }
     }
 
-    fn update_drag(&mut self, project: &Project, rect: Rect, pos: Pos2, frame: Frames) {
+    /// Where dragged edges snap to: clip starts and ends on all tracks except `skip`'s, 0, the loop end and the
+    /// play position. Off when snapping is switched off or Shift is held.
+    pub(crate) fn snap_targets(&self, project: &Project, skip: Option<ClipId>, shift: bool) -> Snap {
+        let mut targets = vec![];
+        if self.snap && !shift {
+            targets.extend([0, self.player.position()]);
+            targets.extend(project.loop_end);
+            for clip in project
+                .tracks
+                .iter()
+                .flat_map(|t| &t.clips)
+                .filter(|c| Some(c.id) != skip)
+            {
+                targets.extend([clip.start, clip.end()]);
+            }
+        }
+        Snap {
+            targets,
+            reach: (SNAP_PX * self.frames_per_px).round() as Frames,
+        }
+    }
+
+    fn update_drag(&mut self, project: &Project, rect: Rect, pos: Pos2, frame: Frames, snap: &Snap) {
         // Row geometry first: it reads the editor, which the drag below borrows.
         let rows: Vec<Rect> = (0..=project.tracks.len()).map(|r| self.row_rect(rect, r)).collect();
         let row_under = self.row_at(rect, pos.y);
@@ -219,7 +274,12 @@ impl Editor {
             } => {
                 // Moving past 0 hides the clip's start; at least one frame stays after 0.
                 let len = project.clip(*clip).map_or(1, |(_, c)| c.len);
-                *start = (frame - *grab).max(1 - len);
+                *start = frame - *grab;
+                if let Some((shift, target)) = snap.shift(&[*start, *start + len]) {
+                    *start += shift;
+                    self.snap_guide = Some(target);
+                }
+                *start = (*start).max(1 - len);
                 if let Some(l) = project.loop_end {
                     // In a loop every clip starts inside it.
                     *start = (*start).clamp(0, l - 1);
@@ -235,13 +295,15 @@ impl Editor {
                     } else {
                         first
                     };
-                    *start = frame.clamp(first, c.end() - 1);
+                    *start = snap.apply(frame, &mut self.snap_guide).clamp(first, c.end() - 1);
                 }
             }
             Drag::TrimEnd { clip, end } => {
                 if let Some((_, c)) = project.clip(*clip) {
                     let audio_end = c.start - c.offset + c.source.frames();
-                    *end = frame.clamp((c.start + 1).max(1), audio_end.max(1));
+                    *end = snap
+                        .apply(frame, &mut self.snap_guide)
+                        .clamp((c.start + 1).max(1), audio_end.max(1));
                 }
             }
             Drag::FadeIn { clip, len } => {

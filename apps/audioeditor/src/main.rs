@@ -43,6 +43,10 @@ struct Editor {
     drag: Option<Drag>,
     /// Where the loop end flag is while it is dragged; the project only changes on release.
     loop_drag: Option<Frames>,
+    /// Whether dragged edges snap to clip edges and markers.
+    snap: bool,
+    /// The snap target a dragged edge sits on, shown as a guide line.
+    snap_guide: Option<Frames>,
     /// What the open right-click menu is about.
     menu: Option<Menu>,
     /// Track heights the user dragged; other tracks have the default. A view setting, not part of the project.
@@ -89,6 +93,8 @@ impl Default for Editor {
             drag: None,
             loop_drag: None,
             menu: None,
+            snap: true,
+            snap_guide: None,
             track_heights: HashMap::new(),
             resizing: None,
             gain_edit: None,
@@ -124,6 +130,7 @@ impl Editor {
             }
         });
         egui::CentralPanel::default().show(ui, |ui| {
+            self.snap_guide = None;
             self.ruler(ui);
             let max_height = (ui.available_height() - SCROLLBAR_H - ui.spacing().item_spacing.y).max(0.0);
             egui::ScrollArea::vertical()
@@ -187,6 +194,13 @@ impl Editor {
             self.toggle_play();
         }
         ui.label(self.time_text(self.player.position()));
+        if ui
+            .selectable_label(self.snap, "Snap")
+            .on_hover_text("Dragged clips and edges snap to other clips' edges, 0, the loop end and the play position. Hold Shift while dragging to place freely.")
+            .clicked()
+        {
+            self.snap = !self.snap;
+        }
         let looping = self.session.project().loop_end.is_some();
         if ui
             .selectable_label(looping, "Loop")

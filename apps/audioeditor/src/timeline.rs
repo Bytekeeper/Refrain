@@ -19,6 +19,8 @@ pub(crate) const MIN_TRACK_H: f32 = 80.0;
 pub(crate) const MAX_TRACK_H: f32 = 800.0;
 pub(crate) const CURVE: Color32 = Color32::from_rgb(255, 200, 80);
 const LOOP: Color32 = Color32::from_rgb(90, 200, 120);
+/// The guide line while a dragged edge sits on a snap target.
+const SNAP: Color32 = Color32::from_rgb(120, 220, 255);
 const WAVE: Color32 = Color32::from_rgb(150, 200, 240);
 /// The later clip's waveform where two clips overlap.
 const WAVE_LATER: Color32 = Color32::from_rgb(245, 175, 110);
@@ -193,6 +195,10 @@ impl Editor {
         for (row, _) in project.tracks.iter().enumerate().filter(|(_, t)| t.muted) {
             let lane = self.row_rect(rect, row).with_min_x(lane_left);
             lanes.rect_filled(lane, 0.0, Color32::from_black_alpha(130));
+        }
+        if let Some(target) = self.snap_guide {
+            let x = self.x_of(lane_left, target);
+            lanes.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5, SNAP));
         }
         // Last, so no crossfade view covers it.
         if let Some(button) = selected_area.and_then(|area| trash_button(area, lanes.clip_rect().right())) {
@@ -662,7 +668,11 @@ impl Editor {
         if let Some(pos) = response.interact_pointer_pos() {
             let frame = self.frame_at(lane_left, pos.x);
             if self.loop_drag.is_some() {
-                self.loop_drag = Some(frame.max(1));
+                let shift = ui.input(|i| i.modifiers.shift);
+                let snapped = self
+                    .snap_targets(&project, None, shift)
+                    .apply(frame, &mut self.snap_guide);
+                self.loop_drag = Some(snapped.max(1));
             } else if pos.x >= lane_left && !on_flag {
                 self.player.seek(frame);
             }
