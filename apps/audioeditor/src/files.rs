@@ -35,9 +35,9 @@ impl Editor {
                 self.drag = None;
                 self.scroll = 0.0;
                 self.peaks.retain(|_, (source, _)| source.strong_count() > 0);
-                self.status = format!("Opened {}", path.display());
+                self.info(format!("Opened {}", path.display()));
             }
-            Err(e) => self.status = format!("{}: {e}", path.display()),
+            Err(e) => self.fail(format!("{}: {e}", path.display())),
         }
     }
 
@@ -67,11 +67,11 @@ impl Editor {
             Ok(()) => {
                 self.saved = self.session.project().clone();
                 self.file = Some(path.to_path_buf());
-                self.status = format!("Saved {}", path.display());
+                self.info(format!("Saved {}", path.display()));
                 true
             }
             Err(e) => {
-                self.status = format!("Not saved: {e}");
+                self.fail(format!("Not saved: {e}"));
                 false
             }
         }
@@ -106,7 +106,7 @@ impl Editor {
             let source = match load_source(&path) {
                 Ok(source) => Arc::new(source),
                 Err(e) => {
-                    self.status = format!("{}: {e}", path.display());
+                    self.fail(format!("{}: {e}", path.display()));
                     continue;
                 }
             };
@@ -125,7 +125,7 @@ impl Editor {
             }) {
                 let error = std::mem::take(&mut self.status);
                 self.undo();
-                self.status = format!("{}: {error}", path.display());
+                self.fail(format!("{}: {error}", path.display()));
             }
         }
     }
@@ -138,9 +138,9 @@ impl Editor {
         else {
             return;
         };
-        self.status = match export_wav(self.session.project(), &path) {
-            Ok(()) => format!("Exported {}", path.display()),
-            Err(e) => e.to_string(),
-        };
+        match export_wav(self.session.project(), &path) {
+            Ok(()) => self.info(format!("Exported {}", path.display())),
+            Err(e) => self.fail(format!("Not exported: {e}")),
+        }
     }
 }

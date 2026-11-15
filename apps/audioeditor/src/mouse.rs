@@ -218,6 +218,7 @@ impl Editor {
                     point.at = (frame - c.start).clamp(0, c.len);
                     point.db = db_of_y(area, pos.y);
                     self.status = format!("{:.1} dB", point.db);
+                    self.status_error = false;
                 }
             }
         }

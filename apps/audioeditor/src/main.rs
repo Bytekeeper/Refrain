@@ -36,6 +36,8 @@ struct Editor {
     player: Player,
     selected: Option<ClipId>,
     status: String,
+    /// The status is an error message and is shown in red.
+    status_error: bool,
     frames_per_px: f64,
     scroll: f64,
     drag: Option<Drag>,
@@ -65,6 +67,7 @@ impl Default for Editor {
             player: Player::default(),
             selected: None,
             status: "Import audio files to start.".into(),
+            status_error: false,
             frames_per_px: 400.0,
             scroll: 0.0,
             drag: None,
@@ -92,8 +95,13 @@ impl Editor {
         self.shortcuts(ui);
         egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal(|ui| self.toolbar(ui)));
         egui::Panel::bottom("status").show(ui, |ui| {
-            let text = if self.status.is_empty() { HINTS } else { &self.status };
-            ui.label(text);
+            if self.status.is_empty() {
+                ui.label(HINTS);
+            } else if self.status_error {
+                ui.colored_label(ui.visuals().error_fg_color, &self.status);
+            } else {
+                ui.label(&self.status);
+            }
         });
         egui::CentralPanel::default().show(ui, |ui| {
             self.ruler(ui);
@@ -114,11 +122,11 @@ impl Editor {
     fn run(&mut self, command: Command) -> bool {
         match self.session.execute(command) {
             Ok(()) => {
-                self.status.clear();
+                self.info(String::new());
                 true
             }
             Err(e) => {
-                self.status = e.to_string();
+                self.fail(e.to_string());
                 false
             }
         }
@@ -227,7 +235,7 @@ impl Editor {
         if self.player.is_playing() {
             self.player.stop();
         } else if let Err(e) = self.player.play(self.session.project()) {
-            self.status = e;
+            self.fail(e);
         }
     }
 
@@ -251,15 +259,25 @@ impl Editor {
         format!("{}:{:06.3}", (secs / 60.0).floor(), secs % 60.0)
     }
 
+    fn info(&mut self, text: String) {
+        self.status = text;
+        self.status_error = false;
+    }
+
+    fn fail(&mut self, text: String) {
+        self.status = text;
+        self.status_error = true;
+    }
+
     fn undo(&mut self) {
         if let Err(e) = self.session.undo() {
-            self.status = e.to_string();
+            self.fail(e.to_string());
         }
     }
 
     fn redo(&mut self) {
         if let Err(e) = self.session.redo() {
-            self.status = e.to_string();
+            self.fail(e.to_string());
         }
     }
 

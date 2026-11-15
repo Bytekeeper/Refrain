@@ -275,7 +275,14 @@ fn tidy(track: &mut Track, loop_end: Option<Frames>) -> Result<()> {
     {
         if first_start < 0 || last_start >= l {
             return Err(Error::Invalid(
-                "with a loop, every clip must start between 0 and the loop end".into(),
+                "with the loop on, every clip must start between 0 and the loop end".into(),
+            ));
+        }
+        if track.clips.iter().any(|c| c.len > l.saturating_mul(2)) {
+            return Err(Error::Invalid(
+                "with the loop on, a clip can be at most two loops long, or its end would play over itself; \
+                 turn the loop off or move the loop end first"
+                    .into(),
             ));
         }
         ring.insert(0, (last_start - l, last_end.saturating_sub(l)));
