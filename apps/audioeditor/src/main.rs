@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
-use audioeditor_engine::{ClipId, Command, Frames, Project, Session, Source};
+use audioeditor_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
 use mouse::{Drag, FadeMenu};
@@ -45,6 +45,10 @@ struct Editor {
     loop_drag: Option<Frames>,
     /// The fade whose right-click menu is open.
     fade_menu: Option<FadeMenu>,
+    /// Track heights the user dragged; other tracks have the default. A view setting, not part of the project.
+    track_heights: HashMap<TrackId, f32>,
+    /// The track whose height is being dragged.
+    resizing: Option<TrackId>,
     /// Waveform overviews, keyed by source address and channel. The weak reference keeps the address
     /// from being reused by new audio while the entry exists.
     peaks: HashMap<(usize, usize), (Weak<Source>, Peaks)>,
@@ -75,6 +79,8 @@ impl Default for Editor {
             drag: None,
             loop_drag: None,
             fade_menu: None,
+            track_heights: HashMap::new(),
+            resizing: None,
             peaks: HashMap::new(),
         }
     }

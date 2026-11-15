@@ -464,3 +464,23 @@ fn right_click_on_a_crossfade_sets_its_curve() {
     assert_eq!(shape, Some(audioeditor_engine::FadeShape::Linear));
     save(&mut h, "crossfade_linear");
 }
+
+/// Dragging the line below a track makes it taller, and the crossfade bands with it; no clip moves.
+#[test]
+fn dragging_the_line_below_a_track_changes_its_height() {
+    let mut h = harness_sized(overlapping(), 600.0);
+    let starts = |h: &Harness<'_, Editor>| -> Vec<i64> {
+        h.state().session.project().tracks[0]
+            .clips
+            .iter()
+            .map(|c| c.start)
+            .collect()
+    };
+    let before = starts(&h);
+    drag(&mut h, egui::pos2(500.0, 176.0), egui::pos2(500.0, 386.0));
+    let track = h.state().session.project().tracks[0].id;
+    let height = h.state().track_heights.get(&track).copied().unwrap_or(0.0);
+    assert!((300.0..=330.0).contains(&height), "height {height}");
+    assert_eq!(starts(&h), before);
+    save(&mut h, "tall_track");
+}

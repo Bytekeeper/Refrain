@@ -1,6 +1,6 @@
 //! Opening, saving, importing and exporting, and asking before unsaved changes are lost.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use audioeditor_engine::{Command, PROJECT_EXTENSION, export_wav, load_source, open_project, save_project};
@@ -102,8 +102,13 @@ impl Editor {
         let Some(paths) = rfd::FileDialog::new().add_filter("Audio", AUDIO_FILES).pick_files() else {
             return;
         };
+        self.import_files(&paths);
+    }
+
+    /// Each file goes onto a new track at 0.
+    pub(crate) fn import_files(&mut self, paths: &[PathBuf]) {
         for path in paths {
-            let source = match load_source(&path) {
+            let source = match load_source(path) {
                 Ok(source) => Arc::new(source),
                 Err(e) => {
                     self.fail(format!("{}: {e}", path.display()));

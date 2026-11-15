@@ -14,6 +14,8 @@ use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H};
 
 const RULER_H: f32 = 22.0;
 pub(crate) const SCROLLBAR_H: f32 = 12.0;
+const MIN_TRACK_H: f32 = 50.0;
+const MAX_TRACK_H: f32 = 800.0;
 pub(crate) const CURVE: Color32 = Color32::from_rgb(255, 200, 80);
 const LOOP: Color32 = Color32::from_rgb(90, 200, 120);
 const WAVE: Color32 = Color32::from_rgb(150, 200, 240);
@@ -33,9 +35,8 @@ impl Editor {
     pub(crate) fn timeline(&mut self, ui: &mut Ui) {
         let project = self.session.project().clone();
         // One row more than there are tracks: it holds the Add track button and takes dropped clips.
-        let rows = (project.tracks.len() + 1) as f32;
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), rows * TRACK_H), Sense::click_and_drag());
+        let height: f32 = (0..=project.tracks.len()).map(|row| self.row_height(row)).sum();
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         let lane_left = rect.left() + HEADER_W;
 
         if let Some(pos) = response.hover_pos() {
@@ -56,7 +57,9 @@ impl Editor {
                 });
             }
         }
-        self.handle_mouse(&project, rect, &response);
+        if !self.resize_track(&project, rect, &response) {
+            self.handle_mouse(&project, rect, &response);
+        }
         if let Some(menu) = self.fade_menu
             && response.context_menu(|ui| self.fade_menu_ui(ui, menu)).is_none()
         {
@@ -66,10 +69,7 @@ impl Editor {
         let painter = ui.painter_at(rect);
         let text = ui.visuals().text_color();
         for (i, track) in project.tracks.iter().enumerate() {
-            let row = Rect::from_min_size(
-                pos2(rect.left(), rect.top() + i as f32 * TRACK_H),
-                vec2(rect.width(), TRACK_H),
-            );
+            let row = self.row_rect(rect, i);
             painter.rect_filled(
                 Rect::from_min_max(row.min, pos2(lane_left, row.bottom())),
                 0.0,
@@ -97,20 +97,16 @@ impl Editor {
         }
         let lanes = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
         let new_row = project.tracks.len();
-        let row_rect = |i: usize| {
-            Rect::from_min_size(
-                pos2(rect.left(), rect.top() + i as f32 * TRACK_H),
-                vec2(rect.width(), TRACK_H),
-            )
-        };
+        let last_row = self.row_rect(rect, new_row);
+        let first_row = self.row_rect(rect, 0);
         let dropping_new = matches!(self.drag, Some(Drag::Move { track: None, .. }));
-        let add = Rect::from_min_size(row_rect(new_row).min + vec2(6.0, 8.0), vec2(80.0, 20.0));
+        let add = Rect::from_min_size(last_row.min + vec2(6.0, 8.0), vec2(80.0, 20.0));
         if !dropping_new && ui.put(add, egui::Button::new("Add track").small()).clicked() {
             let name = format!("Track {}", project.tracks.len() + 1);
             self.run(Command::AddTrack { name });
         }
         if dropping_new {
-            let row = row_rect(new_row).shrink(2.0);
+            let row = last_row.shrink(2.0);
             let dash = Stroke::new(1.0, ui.visuals().weak_text_color());
             let corners = [
                 row.left_top(),
@@ -129,7 +125,7 @@ impl Editor {
             );
         } else if project.tracks.is_empty() {
             painter.text(
-                row_rect(0).center(),
+                first_row.center(),
                 Align2::CENTER_CENTER,
                 "Import audio or add a track",
                 FontId::proportional(14.0),
@@ -699,7 +695,62 @@ impl Editor {
     }
 
     pub(crate) fn clip_area(&self, rect: Rect, row: usize, start: Frames, len: Frames) -> Rect {
-        clip_area(rect, row, start, len, self.scroll, self.frames_per_px)
+        clip_area(
+            self.row_rect(rect, row),
+            rect.left() + HEADER_W,
+            (start, len),
+            self.scroll,
+            self.frames_per_px,
+        )
+    }
+
+    /// Each track keeps the height it was dragged to; the row below all tracks has the default.
+    fn row_height(&self, row: usize) -> f32 {
+        let track = self.session.project().tracks.get(row).map(|t| t.id);
+        track
+            .and_then(|t| self.track_heights.get(&t))
+            .copied()
+            .unwrap_or(TRACK_H)
+    }
+
+    pub(crate) fn row_rect(&self, rect: Rect, row: usize) -> Rect {
+        let top = rect.top() + (0..row).map(|r| self.row_height(r)).sum::<f32>();
+        Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), self.row_height(row)))
+    }
+
+    /// The row at height `y`: above the first row counts as the first, below the last as the row after all tracks.
+    pub(crate) fn row_at(&self, rect: Rect, y: f32) -> usize {
+        let rows = self.session.project().tracks.len() + 1;
+        (0..rows)
+            .find(|&r| y < self.row_rect(rect, r).bottom())
+            .unwrap_or(rows - 1)
+    }
+
+    /// Dragging the line below a track changes its height. Returns whether the mouse is busy with that.
+    fn resize_track(&mut self, project: &Project, rect: Rect, response: &egui::Response) -> bool {
+        let near_line =
+            |e: &Editor, y: f32| (0..project.tracks.len()).find(|&r| (e.row_rect(rect, r).bottom() - y).abs() <= 3.0);
+        if response.hover_pos().is_some_and(|p| near_line(self, p.y).is_some()) || self.resizing.is_some() {
+            response.ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(origin) = response.ctx.input(|i| i.pointer.press_origin())
+            && let Some(row) = near_line(self, origin.y)
+        {
+            self.resizing = project.tracks.get(row).map(|t| t.id);
+        }
+        let Some(track) = self.resizing else { return false };
+        if let Some(pos) = response.interact_pointer_pos()
+            && let Some(row) = project.tracks.iter().position(|t| t.id == track)
+        {
+            let top = self.row_rect(rect, row).top();
+            self.track_heights
+                .insert(track, (pos.y - top).clamp(MIN_TRACK_H, MAX_TRACK_H));
+        }
+        if response.drag_stopped() {
+            self.resizing = None;
+        }
+        true
     }
 
     pub(crate) fn x_of(&self, lane_left: f32, frame: Frames) -> f32 {
@@ -711,13 +762,18 @@ impl Editor {
     }
 }
 
-pub(crate) fn clip_area(rect: Rect, row: usize, start: Frames, len: Frames, scroll: f64, frames_per_px: f64) -> Rect {
-    let lane_left = rect.left() + HEADER_W;
+/// Where a clip of `(start, len)` frames is drawn in the track row `row`.
+pub(crate) fn clip_area(
+    row: Rect,
+    lane_left: f32,
+    (start, len): (Frames, Frames),
+    scroll: f64,
+    frames_per_px: f64,
+) -> Rect {
     let x = |f: Frames| lane_left + ((f as f64 - scroll) / frames_per_px) as f32;
-    let top = rect.top() + row as f32 * TRACK_H + 2.0;
-    Rect::from_min_max(
-        pos2(x(start), top),
-        pos2(x(start.saturating_add(len)), top + TRACK_H - 4.0),
+    Rect::from_x_y_ranges(
+        x(start)..=x(start.saturating_add(len)),
+        row.top() + 2.0..=row.bottom() - 2.0,
     )
 }
 

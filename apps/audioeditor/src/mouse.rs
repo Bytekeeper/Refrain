@@ -4,7 +4,7 @@ use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Pr
 use egui::{Pos2, Rect, pos2};
 
 use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, y_of_amp};
-use crate::{Editor, HANDLE, HEADER_W, TRACK_H};
+use crate::{Editor, HANDLE, HEADER_W};
 
 /// What the mouse is dragging. The project only changes when the drag ends, so one drag is one undo step.
 pub(crate) enum Drag {
@@ -179,6 +179,9 @@ impl Editor {
     }
 
     fn update_drag(&mut self, project: &Project, rect: Rect, pos: Pos2, frame: Frames) {
+        // Row geometry first: it reads the editor, which the drag below borrows.
+        let rows: Vec<Rect> = (0..=project.tracks.len()).map(|r| self.row_rect(rect, r)).collect();
+        let row_under = self.row_at(rect, pos.y);
         let Some(drag) = &mut self.drag else { return };
         match drag {
             Drag::Move {
@@ -194,8 +197,7 @@ impl Editor {
                     // In a loop every clip starts inside it.
                     *start = (*start).clamp(0, l - 1);
                 }
-                let row = ((pos.y - rect.top()) / TRACK_H).floor().max(0.0) as usize;
-                *track = project.tracks.get(row).map(|t| t.id);
+                *track = project.tracks.get(row_under).map(|t| t.id);
             }
             // Up to the ends of the audio file, and at least one frame of the clip stays after 0.
             Drag::TrimStart { clip, start } => {
@@ -230,7 +232,13 @@ impl Editor {
                     .clip(*clip)
                     .and_then(|(t, c)| Some((project.tracks.iter().position(|x| x.id == t.id)?, c)));
                 if let Some((row, c)) = found {
-                    let area = clip_area(rect, row, c.start, c.len, self.scroll, self.frames_per_px);
+                    let area = clip_area(
+                        rows.get(row).copied().unwrap_or(rect),
+                        rect.left() + HEADER_W,
+                        (c.start, c.len),
+                        self.scroll,
+                        self.frames_per_px,
+                    );
                     point.at = (frame - c.start).clamp(0, c.len);
                     point.db = db_of_y(area, pos.y);
                     self.status = format!("{:.1} dB", point.db);
@@ -298,7 +306,7 @@ impl Editor {
 
     /// The crossfade under `pos`, named by the clip it fades into; with a loop also the seam at the start.
     fn crossfade_at(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<FadeMenu> {
-        let row = usize::try_from(((pos.y - rect.top()) / TRACK_H).floor() as i64).ok()?;
+        let row = self.row_at(rect, pos.y);
         let clips = &project.tracks.get(row)?.clips;
         let frame = self.frame_at(rect.left() + HEADER_W, pos.x);
         (0..clips.len()).find_map(|i| {
@@ -376,7 +384,7 @@ impl Editor {
     }
 
     fn hit(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<Hit> {
-        let row = usize::try_from(((pos.y - rect.top()) / TRACK_H).floor() as i64).ok()?;
+        let row = self.row_at(rect, pos.y);
         let track = project.tracks.get(row)?;
         let lane_left = rect.left() + HEADER_W;
         let near = |p: Pos2| p.distance(pos) <= HANDLE + 2.0;
