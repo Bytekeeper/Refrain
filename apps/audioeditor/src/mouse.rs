@@ -1,6 +1,6 @@
 //! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points.
 
-use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId};
+use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before};
 use egui::{Pos2, Rect, pos2};
 
 use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, y_of_amp};
@@ -36,6 +36,15 @@ pub(crate) enum Drag {
         index: usize,
         point: GainPoint,
     },
+}
+
+/// The fade whose curve the right-click menu changes.
+#[derive(Clone, Copy)]
+pub(crate) enum FadeMenu {
+    /// The crossfade into the start of this clip.
+    Crossfade(ClipId),
+    FadeIn(ClipId),
+    FadeOut(ClipId),
 }
 
 /// What is under the mouse, most specific first.
@@ -105,15 +114,22 @@ impl Editor {
             });
             self.run(Command::SetGainCurve { clip: id, points });
         }
-        if response.secondary_clicked()
-            && let Some(Hit::Point(id, index)) = hit
-            && let Some((_, clip)) = project.clip(id)
-        {
-            let mut points = clip.gain.clone();
-            if index < points.len() {
-                points.remove(index);
+        if response.secondary_clicked() {
+            self.fade_menu = match hit {
+                Some(Hit::FadeIn(clip)) => Some(FadeMenu::FadeIn(clip)),
+                Some(Hit::FadeOut(clip)) => Some(FadeMenu::FadeOut(clip)),
+                Some(Hit::Point(..)) => None,
+                _ => self.crossfade_at(project, rect, pos),
+            };
+            if let Some(Hit::Point(id, index)) = hit
+                && let Some((_, clip)) = project.clip(id)
+            {
+                let mut points = clip.gain.clone();
+                if index < points.len() {
+                    points.remove(index);
+                }
+                self.run(Command::SetGainCurve { clip: id, points });
             }
-            self.run(Command::SetGainCurve { clip: id, points });
         }
 
         if response.dragged_by(egui::PointerButton::Middle) {
@@ -278,6 +294,68 @@ impl Editor {
             }
         };
         self.run(command);
+    }
+
+    /// The crossfade under `pos`, named by the clip it fades into; with a loop also the seam at the start.
+    fn crossfade_at(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<FadeMenu> {
+        let row = usize::try_from(((pos.y - rect.top()) / TRACK_H).floor() as i64).ok()?;
+        let clips = &project.tracks.get(row)?.clips;
+        let frame = self.frame_at(rect.left() + HEADER_W, pos.x);
+        (0..clips.len()).find_map(|i| {
+            let clip = clips.get(i)?;
+            let len = overlap_before(clips, i, project.loop_end);
+            (clip.start <= frame && frame < clip.start.saturating_add(len)).then_some(FadeMenu::Crossfade(clip.id))
+        })
+    }
+
+    /// The right-click menu for a fade's curve.
+    pub(crate) fn fade_menu_ui(&mut self, ui: &mut egui::Ui, menu: FadeMenu) {
+        let project = self.session.project().clone();
+        let (title, current) = match menu {
+            FadeMenu::Crossfade(id) => ("Crossfade curve", project.clip(id).map(|(_, c)| c.crossfade_shape)),
+            FadeMenu::FadeIn(id) => ("Fade-in curve", project.clip(id).map(|(_, c)| c.fade_in.shape)),
+            FadeMenu::FadeOut(id) => ("Fade-out curve", project.clip(id).map(|(_, c)| c.fade_out.shape)),
+        };
+        let Some(current) = current else {
+            ui.close();
+            return;
+        };
+        ui.label(title);
+        let shapes = [
+            (
+                FadeShape::Linear,
+                "Linear",
+                "Straight. In a crossfade: best where both parts have a high waveform match",
+            ),
+            (
+                FadeShape::EqualPower,
+                "Equal power",
+                "Keeps the loudness even. In a crossfade: best for unrelated sound such as rain or noise",
+            ),
+        ];
+        for (shape, name, hint) in shapes {
+            if ui.radio(current == shape, name).on_hover_text(hint).clicked() {
+                let command = match menu {
+                    FadeMenu::Crossfade(clip) => Command::SetCrossfadeShape { clip, shape },
+                    FadeMenu::FadeIn(clip) => Command::SetFadeIn {
+                        clip,
+                        fade: Fade {
+                            len: project.clip(clip).map_or(0, |(_, c)| c.fade_in.len),
+                            shape,
+                        },
+                    },
+                    FadeMenu::FadeOut(clip) => Command::SetFadeOut {
+                        clip,
+                        fade: Fade {
+                            len: project.clip(clip).map_or(0, |(_, c)| c.fade_out.len),
+                            shape,
+                        },
+                    },
+                };
+                self.run(command);
+                ui.close();
+            }
+        }
     }
 
     fn hit(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<Hit> {

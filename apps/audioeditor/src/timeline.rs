@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use audioeditor_engine::{
-    Clip, Fade, Frames, MAX_DB, MIN_DB, Project, TrackId, clip_amp, edge_fades, overlap_after, overlap_before,
-    similarity,
+    Clip, Fade, FadeShape, Frames, MAX_DB, MIN_DB, Project, TrackId, clip_amp, edge_fades, overlap_after,
+    overlap_before, similarity,
 };
 use craft_audio::peaks::Peaks;
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -57,6 +57,11 @@ impl Editor {
             }
         }
         self.handle_mouse(&project, rect, &response);
+        if let Some(menu) = self.fade_menu
+            && response.context_menu(|ui| self.fade_menu_ui(ui, menu)).is_none()
+        {
+            self.fade_menu = None;
+        }
 
         let painter = ui.painter_at(rect);
         let text = ui.visuals().text_color();
@@ -433,6 +438,18 @@ impl Editor {
                 }
             }
             painter.rect_stroke(zone, 0.0, Stroke::new(1.0, CURVE), StrokeKind::Inside);
+            let curve = match b.0.crossfade_shape {
+                FadeShape::Linear => "linear",
+                FadeShape::EqualPower => "equal power",
+            };
+            let galley = painter.layout_no_wrap(curve.into(), FontId::proportional(10.0), CURVE);
+            if galley.size().x + 40.0 < zone.width() {
+                painter.galley(
+                    pos2(shown.center().x - galley.size().x / 2.0, zone.top() + 2.0),
+                    galley,
+                    CURVE,
+                );
+            }
 
             for &(clip, fades, is_wrapped) in [a, b] {
                 let mut line = vec![];

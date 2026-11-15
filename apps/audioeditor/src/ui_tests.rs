@@ -6,6 +6,7 @@ use std::sync::Arc;
 use audioeditor_engine::{Command, Source};
 use egui::{Event, Modifiers, MouseWheelSource, MouseWheelUnit, TouchPhase, vec2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 
 use super::Editor;
 
@@ -438,4 +439,28 @@ fn dragging_the_loop_flag_wraps_the_end_onto_the_start() {
     drag(&mut h, egui::pos2(604.0, 50.0), egui::pos2(526.0, 50.0));
     assert_eq!(h.state().session.project().loop_end, Some(20_000));
     save(&mut h, "loop_wrapped");
+}
+
+/// Right-clicking a crossfade opens a menu that sets its curve.
+#[test]
+fn right_click_on_a_crossfade_sets_its_curve() {
+    let mut h = harness(overlapping());
+    let b = h.state().session.project().tracks[0].clips[1].id;
+    let pos = egui::pos2(520.0, 110.0);
+    h.hover_at(pos);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    h.run();
+    save(&mut h, "crossfade_menu");
+    h.get_by_label("Linear").click();
+    h.run();
+    let shape = h.state().session.project().clip(b).map(|(_, c)| c.crossfade_shape);
+    assert_eq!(shape, Some(audioeditor_engine::FadeShape::Linear));
+    save(&mut h, "crossfade_linear");
 }

@@ -12,7 +12,7 @@ use std::sync::{Arc, Weak};
 use audioeditor_engine::{ClipId, Command, Frames, Project, Session, Source};
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
-use mouse::Drag;
+use mouse::{Drag, FadeMenu};
 use playback::Player;
 use timeline::SCROLLBAR_H;
 
@@ -21,7 +21,7 @@ const TRACK_H: f32 = 110.0;
 const HANDLE: f32 = 6.0;
 const AUDIO_FILES: &[&str] = &["wav", "flac", "mp3", "ogg", "opus", "aif", "aiff", "m4a"];
 const HINTS: &str = "Space: play · middle-drag or scrollbar: move along · Ctrl+wheel: zoom · S: split · \
-    drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim";
+    drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim · right-click a crossfade or fade: curve";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -43,6 +43,8 @@ struct Editor {
     drag: Option<Drag>,
     /// Where the loop end flag is while it is dragged; the project only changes on release.
     loop_drag: Option<Frames>,
+    /// The fade whose right-click menu is open.
+    fade_menu: Option<FadeMenu>,
     /// Waveform overviews, keyed by source address and channel. The weak reference keeps the address
     /// from being reused by new audio while the entry exists.
     peaks: HashMap<(usize, usize), (Weak<Source>, Peaks)>,
@@ -72,6 +74,7 @@ impl Default for Editor {
             scroll: 0.0,
             drag: None,
             loop_drag: None,
+            fade_menu: None,
             peaks: HashMap::new(),
         }
     }
