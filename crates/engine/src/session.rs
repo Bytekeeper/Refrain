@@ -176,7 +176,14 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
             if len <= 0 {
                 return Err(Error::EmptySource);
             }
-            if p.sample_rate == 0 {
+            if p.is_empty() && p.sample_rate != source.sample_rate {
+                // A project without audio takes the rate of its first clip, also after all clips were deleted.
+                if let Some(l) = p.loop_end
+                    && p.sample_rate > 0
+                {
+                    let seconds = l as f64 / f64::from(p.sample_rate);
+                    p.loop_end = Some(((seconds * f64::from(source.sample_rate)).round() as Frames).max(1));
+                }
                 p.sample_rate = source.sample_rate;
             } else if p.sample_rate != source.sample_rate {
                 return Err(Error::SampleRateMismatch {
@@ -671,6 +678,28 @@ mod tests {
         assert_eq!(clips[1].start % 20, 0, "start {}", clips[1].start);
         assert_eq!(clips[0].end() - clips[1].start, 1000 - 813);
         assert!(in_step(s.project()) > 0.999);
+    }
+
+    /// Regression: deleting all audio kept the old sample rate, so audio at another rate was refused.
+    #[test]
+    fn an_emptied_project_takes_the_rate_of_new_audio() {
+        let (mut s, track, clip) = ramp_session();
+        s.execute(Command::SetLoopEnd { at: Some(500) }).unwrap();
+        s.execute(Command::DeleteClip { clip }).unwrap();
+        let faster = Arc::new(Source {
+            path: None,
+            name: "faster".into(),
+            sample_rate: 2000,
+            channels: vec![vec![0.1; 1500]],
+        });
+        s.execute(Command::AddClip {
+            track,
+            source: faster,
+            start: 0,
+        })
+        .unwrap();
+        assert_eq!(s.project().sample_rate, 2000);
+        assert_eq!(s.project().loop_end, Some(1000), "the loop keeps its length in seconds");
     }
 
     #[test]
