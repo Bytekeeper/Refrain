@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::{
     Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, MAX_DB, MIN_DB, Project, Result, Source, Track, TrackId,
@@ -81,6 +83,11 @@ pub enum Command {
     MatchCrossfade {
         clip: ClipId,
         range: Frames,
+    },
+    /// Converts all audio to `rate` and moves every position along, so everything stays at the same
+    /// time. Audio from a file is converted again from the file, so changing the rate twice loses nothing.
+    SetSampleRate {
+        rate: u32,
     },
 }
 
@@ -185,12 +192,13 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                     p.loop_end = Some(((seconds * f64::from(source.sample_rate)).round() as Frames).max(1));
                 }
                 p.sample_rate = source.sample_rate;
-            } else if p.sample_rate != source.sample_rate {
-                return Err(Error::SampleRateMismatch {
-                    project: p.sample_rate,
-                    found: source.sample_rate,
-                });
             }
+            let source = if source.sample_rate == p.sample_rate {
+                source
+            } else {
+                Arc::new(resample(&source, p.sample_rate)?)
+            };
+            let len = source.frames();
             let id = ClipId(p.new_id());
             let clip = Clip {
                 id,
@@ -267,6 +275,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
             p.loop_end = at;
         }
         Command::MatchCrossfade { clip, range } => match_crossfade(p, clip, range)?,
+        Command::SetSampleRate { rate } => set_sample_rate(p, rate)?,
         Command::SetGainCurve { clip, mut points } => {
             for point in &mut points {
                 point.db = check_db(point.db)?;
@@ -335,6 +344,61 @@ fn tidy(track: &mut Track, loop_end: Option<Frames>) -> Result<()> {
         let in_len = before.max(c.fade_in.len);
         c.fade_out.len = c.fade_out.len.min(c.len - in_len).max(0);
     }
+    Ok(())
+}
+
+fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
+    if !(8000..=384_000).contains(&rate) {
+        return Err(Error::Invalid(
+            "the sample rate must be between 8000 and 384000 Hz".into(),
+        ));
+    }
+    let old = p.sample_rate;
+    if old == rate {
+        return Ok(());
+    }
+    let scale = |f: Frames| {
+        if old == 0 {
+            f
+        } else {
+            (f as f64 * f64::from(rate) / f64::from(old)).round() as Frames
+        }
+    };
+    // Keyed by the old source, which the map keeps alive so its address is not reused meanwhile.
+    let mut converted: HashMap<usize, (Arc<Source>, Arc<Source>)> = HashMap::new();
+    for clip in p.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+        let key = Arc::as_ptr(&clip.source) as usize;
+        let source = match converted.get(&key) {
+            Some((_, new)) => new.clone(),
+            None => {
+                let original = match &clip.source.path {
+                    Some(path) => Arc::new(
+                        load_source(path)
+                            .map_err(|e| Error::Invalid(format!("cannot read {} again: {e}", path.display())))?,
+                    ),
+                    None => clip.source.clone(),
+                };
+                let new = Arc::new(resample(&original, rate)?);
+                converted.insert(key, (clip.source.clone(), new.clone()));
+                new
+            }
+        };
+        let frames = source.frames();
+        if frames <= 0 {
+            return Err(Error::EmptySource);
+        }
+        clip.offset = scale(clip.offset).clamp(0, frames - 1);
+        clip.len = scale(clip.len).clamp(1, frames - clip.offset);
+        clip.start = scale(clip.start);
+        clip.fade_in.len = scale(clip.fade_in.len);
+        clip.fade_out.len = scale(clip.fade_out.len);
+        for point in &mut clip.gain {
+            point.at = scale(point.at);
+        }
+        clip.source = source;
+    }
+    p.loop_end = p.loop_end.map(|l| scale(l).max(1));
+    p.sample_rate = rate;
     Ok(())
 }
 
@@ -700,6 +764,46 @@ mod tests {
         .unwrap();
         assert_eq!(s.project().sample_rate, 2000);
         assert_eq!(s.project().loop_end, Some(1000), "the loop keeps its length in seconds");
+    }
+
+    #[test]
+    fn audio_at_another_rate_is_converted_and_the_rate_can_change() {
+        let at = |rate: u32, frames: usize| {
+            Arc::new(Source {
+                path: None,
+                name: format!("{rate}"),
+                sample_rate: rate,
+                channels: vec![vec![0.25; frames]],
+            })
+        };
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddClip {
+            track,
+            source: at(8000, 8000),
+            start: 0,
+        })
+        .unwrap();
+        // One second at 16 kHz becomes one second at the project's 8 kHz.
+        s.execute(Command::AddClip {
+            track,
+            source: at(16_000, 16_000),
+            start: 8000,
+        })
+        .unwrap();
+        let second = &s.project().tracks[0].clips[1];
+        assert_eq!((second.source.sample_rate, second.len), (8000, 8000));
+
+        s.execute(Command::SetLoopEnd { at: Some(12_000) }).unwrap();
+        s.execute(Command::SetSampleRate { rate: 16_000 }).unwrap();
+        let p = s.project();
+        assert_eq!(p.sample_rate, 16_000);
+        let spans: Vec<_> = p.tracks[0].clips.iter().map(|c| (c.start, c.len)).collect();
+        assert_eq!(spans, [(0, 16_000), (16_000, 16_000)]);
+        assert_eq!(p.loop_end, Some(24_000));
+        s.undo().unwrap();
+        assert_eq!(s.project().sample_rate, 8000);
     }
 
     #[test]

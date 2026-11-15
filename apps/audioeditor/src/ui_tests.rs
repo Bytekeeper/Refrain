@@ -484,3 +484,19 @@ fn dragging_the_line_below_a_track_changes_its_height() {
     assert_eq!(starts(&h), before);
     save(&mut h, "tall_track");
 }
+
+/// Regression: after a sample rate change the view was zoomed in by the rate ratio, because zoom is in samples.
+#[test]
+fn changing_the_sample_rate_keeps_the_view() {
+    let mut h = harness(overlapping());
+    click(&mut h, 460.0, 20.0);
+    h.get_by_label("48 kHz").click();
+    h.run();
+    let p = h.state().session.project();
+    assert_eq!(p.sample_rate, 48_000);
+    assert_eq!(p.tracks[0].clips[1].start, 12 * 8000);
+    assert_eq!(h.state().frames_per_px, 300.0);
+    save(&mut h, "rate_48k");
+    h.state_mut().undo();
+    assert_eq!(h.state().frames_per_px, 50.0);
+}

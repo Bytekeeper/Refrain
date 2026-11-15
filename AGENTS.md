@@ -46,6 +46,10 @@ error message, never a crash and never lost work.
 All edit math uses whole sample frames (`i64`) at the project sample rate. No `f64` seconds in the
 model; seconds are only for display.
 
+A project has one working sample rate. Audio at another rate is converted to it when it is added
+(`engine::resample`); the files on disk are never changed. Changing the project rate converts again
+from the files, not from already converted audio.
+
 ## 4. Tests
 
 Test the mixing maths and commands with a few concrete samples. Every crash fix gets a regression

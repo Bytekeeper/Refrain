@@ -6,7 +6,7 @@ mod model;
 mod project_file;
 mod session;
 
-pub use io::{export_wav, load_source};
+pub use io::{export_wav, load_source, resample};
 pub use mix::{clip_amp, edge_fades, fade_gain, overlap_after, overlap_before, render, similarity};
 pub use model::{Clip, ClipId, Fade, FadeShape, Frames, GainPoint, Project, Source, Track, TrackId};
 pub use project_file::{PROJECT_EXTENSION, open_project, save_project};
@@ -23,8 +23,8 @@ pub enum Error {
     NoClip(ClipId),
     #[error("the file has no audio")]
     EmptySource,
-    #[error("the file has {found} Hz, the project has {project} Hz; resampling is not supported yet")]
-    SampleRateMismatch { project: u32, found: u32 },
+    #[error("cannot convert the sample rate: {0}")]
+    Resample(String),
     #[error("{0}")]
     Invalid(String),
     #[error("project file: {0}")]

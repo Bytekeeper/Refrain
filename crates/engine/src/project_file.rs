@@ -127,12 +127,11 @@ pub fn open_project(path: &Path) -> Result<Session> {
         let full = dir.join(stored);
         let source = crate::load_source(&full)
             .map_err(|e| Error::ProjectFile(format!("cannot read {}: {e}", full.display())))?;
-        if source.sample_rate != file.sample_rate {
-            return Err(Error::SampleRateMismatch {
-                project: file.sample_rate,
-                found: source.sample_rate,
-            });
-        }
+        let source = if source.sample_rate == file.sample_rate {
+            source
+        } else {
+            crate::resample(&source, file.sample_rate)?
+        };
         sources.push(Arc::new(source));
     }
 

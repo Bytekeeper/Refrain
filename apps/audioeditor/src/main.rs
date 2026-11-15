@@ -158,6 +158,7 @@ impl Editor {
         if ui.button("Export WAV…").clicked() {
             self.export();
         }
+        self.rate_choice(ui);
         ui.separator();
         let label = if self.player.is_playing() { "Stop" } else { "Play" };
         if ui.button(label).clicked() {
@@ -248,6 +249,51 @@ impl Editor {
         }
     }
 
+    /// The project's working rate. Files at other rates are converted to it on import.
+    fn rate_choice(&mut self, ui: &mut Ui) {
+        const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+        let project = self.session.project();
+        let current = project.sample_rate;
+        let khz = |rate: u32| format!("{} kHz", f64::from(rate) / 1000.0);
+        let mut chosen = None;
+        ui.add_enabled_ui(!project.is_empty(), |ui| {
+            egui::ComboBox::from_id_salt("sample rate")
+                .selected_text(if current == 0 { "– kHz".into() } else { khz(current) })
+                .show_ui(ui, |ui| {
+                    for rate in RATES {
+                        if ui.selectable_label(rate == current, khz(rate)).clicked() {
+                            chosen = Some(rate);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "The project's sample rate. Audio files at other rates are converted to it; the files stay unchanged.",
+                )
+                .on_disabled_hover_text("Set by the first audio file");
+        });
+        if let Some(rate) = chosen
+            && rate != current
+            && self.run(Command::SetSampleRate { rate })
+        {
+            self.follow_rate(current);
+            self.info(format!("The project now runs at {}.", khz(rate)));
+        }
+    }
+
+    /// The view and the play position are in samples too: after a rate change they keep the same seconds.
+    fn follow_rate(&mut self, before: u32) {
+        let now = self.session.project().sample_rate;
+        if before == 0 || now == 0 || before == now {
+            return;
+        }
+        let ratio = f64::from(now) / f64::from(before);
+        self.frames_per_px *= ratio;
+        self.scroll *= ratio;
+        self.player
+            .seek((self.player.position() as f64 * ratio).round() as Frames);
+    }
+
     fn play_seam(&mut self) {
         let project = self.session.project();
         let Some(end) = project.loop_end else { return };
@@ -279,15 +325,19 @@ impl Editor {
     }
 
     fn undo(&mut self) {
+        let rate = self.session.project().sample_rate;
         if let Err(e) = self.session.undo() {
             self.fail(e.to_string());
         }
+        self.follow_rate(rate);
     }
 
     fn redo(&mut self) {
+        let rate = self.session.project().sample_rate;
         if let Err(e) = self.session.redo() {
             self.fail(e.to_string());
         }
+        self.follow_rate(rate);
     }
 
     /// The window shows the file name and a dot while there are unsaved changes.
