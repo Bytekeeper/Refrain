@@ -3,7 +3,7 @@
 use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before};
 use egui::{Pos2, Rect, pos2};
 
-use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, y_of_amp};
+use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, trash_button, y_of_amp};
 use crate::{Editor, HANDLE, HEADER_W};
 
 /// What the mouse is dragging. The project only changes when the drag ends, so one drag is one undo step.
@@ -49,6 +49,8 @@ pub(crate) enum FadeMenu {
 
 /// What is under the mouse, most specific first.
 pub(crate) enum Hit {
+    /// The delete button on the selected clip.
+    Trash(ClipId),
     Point(ClipId, usize),
     FadeIn(ClipId),
     FadeOut(ClipId),
@@ -73,7 +75,8 @@ impl Drag {
 impl Hit {
     fn clip(&self) -> ClipId {
         match self {
-            Hit::Point(c, _)
+            Hit::Trash(c)
+            | Hit::Point(c, _)
             | Hit::FadeIn(c)
             | Hit::FadeOut(c)
             | Hit::TrimStart(c)
@@ -98,6 +101,10 @@ impl Editor {
         let hit = self.hit(project, rect, pos);
 
         if response.clicked() {
+            if let Some(Hit::Trash(clip)) = hit {
+                self.run(Command::DeleteClip { clip });
+                return;
+            }
             self.selected = hit.as_ref().map(Hit::clip);
             self.player.seek(frame);
         }
@@ -158,6 +165,7 @@ impl Editor {
                     .clip(clip)
                     .map(|(_, c)| Drag::TrimStart { clip, start: c.start }),
                 Some(Hit::TrimEnd(clip)) => project.clip(clip).map(|(_, c)| Drag::TrimEnd { clip, end: c.end() }),
+                Some(Hit::Trash(_)) => None,
                 Some(Hit::Clip(clip, track, start)) => Some(Drag::Move {
                     clip,
                     grab: frame - start,
@@ -392,6 +400,9 @@ impl Editor {
         for &i in &order {
             let Some(clip) = track.clips.get(i) else { continue };
             let area = self.clip_area(rect, row, clip.start, clip.len);
+            if Some(clip.id) == self.selected && trash_button(area, rect.right()).is_some_and(|b| b.contains(pos)) {
+                return Some(Hit::Trash(clip.id));
+            }
             let free = free_ends(&track.clips, i, project.loop_end);
             // Points in a trimmed-off part still shape the curve but cannot be grabbed.
             for (index, point) in clip.gain.iter().enumerate() {

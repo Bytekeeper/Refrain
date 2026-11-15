@@ -49,6 +49,8 @@ struct Editor {
     track_heights: HashMap<TrackId, f32>,
     /// The track whose height is being dragged.
     resizing: Option<TrackId>,
+    /// A track volume being dragged, not yet in the project.
+    gain_edit: Option<(TrackId, f32)>,
     /// Waveform overviews, keyed by source address and channel. The weak reference keeps the address
     /// from being reused by new audio while the entry exists.
     peaks: HashMap<(usize, usize), (Weak<Source>, Peaks)>,
@@ -81,6 +83,7 @@ impl Default for Editor {
             fade_menu: None,
             track_heights: HashMap::new(),
             resizing: None,
+            gain_edit: None,
             peaks: HashMap::new(),
         }
     }
@@ -197,12 +200,6 @@ impl Editor {
             .clicked()
         {
             self.redo();
-        }
-        ui.separator();
-        if let Some(clip) = self.selected
-            && ui.button("Delete").clicked()
-        {
-            self.run(Command::DeleteClip { clip });
         }
     }
 

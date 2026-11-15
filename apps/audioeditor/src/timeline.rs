@@ -14,7 +14,8 @@ use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H};
 
 const RULER_H: f32 = 22.0;
 pub(crate) const SCROLLBAR_H: f32 = 12.0;
-const MIN_TRACK_H: f32 = 50.0;
+/// Room for the name, the mute and volume controls and the delete button.
+const MIN_TRACK_H: f32 = 80.0;
 const MAX_TRACK_H: f32 = 800.0;
 pub(crate) const CURVE: Color32 = Color32::from_rgb(255, 200, 80);
 const LOOP: Color32 = Color32::from_rgb(90, 200, 120);
@@ -86,14 +87,7 @@ impl Editor {
                 [row.left_bottom(), row.right_bottom()],
                 Stroke::new(1.0, ui.visuals().weak_text_color()),
             );
-            let delete = Rect::from_min_size(pos2(row.left() + 6.0, row.bottom() - 26.0), vec2(56.0, 20.0));
-            if ui
-                .put(delete, egui::Button::new("Delete").small())
-                .on_hover_text("Delete this track")
-                .clicked()
-            {
-                self.run(Command::RemoveTrack { track: track.id });
-            }
+            self.track_controls(ui, row, track);
         }
         let lanes = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
         let new_row = project.tracks.len();
@@ -178,6 +172,10 @@ impl Editor {
             let dash = Stroke::new(1.0, Color32::from_gray(170));
             lanes.extend(egui::Shape::dashed_line(&corners, dash, 6.0, 4.0));
         }
+        let selected_area = on_top
+            .as_ref()
+            .filter(|(_, clip, ..)| Some(clip.id) == self.selected)
+            .map(|(area, ..)| *area);
         if let Some((area, clip, fades, free)) = on_top {
             self.draw_clip(&lanes, area, lane_left, &clip, (fades, free), Look::Selected);
         }
@@ -192,12 +190,75 @@ impl Editor {
             let parts = wrapped.get(row).map_or(&[][..], Vec::as_slice);
             self.draw_overlaps(&lanes, rect, row, clips, wrap, parts);
         }
+        for (row, track) in project.tracks.iter().enumerate().filter(|(_, t)| t.muted) {
+            let lane = self.row_rect(rect, row).with_min_x(lane_left);
+            lanes.rect_filled(lane, 0.0, Color32::from_black_alpha(130));
+        }
+        // Last, so no crossfade view covers it.
+        if let Some(button) = selected_area.and_then(|area| trash_button(area, lanes.clip_rect().right())) {
+            lanes.rect_filled(button, 3.0, Color32::from_black_alpha(160));
+            draw_trash_can(&lanes, button.shrink(5.0), Stroke::new(1.5, Color32::WHITE));
+        }
         let x = self.x_of(lane_left, self.player.position());
         if x >= lane_left {
             painter.line_segment(
                 [pos2(x, rect.top()), pos2(x, rect.bottom())],
                 Stroke::new(1.5, Color32::from_rgb(230, 70, 70)),
             );
+        }
+    }
+
+    /// Mute, volume and delete in the track's header.
+    fn track_controls(&mut self, ui: &mut Ui, row: Rect, track: &audioeditor_engine::Track) {
+        let mute = Rect::from_min_size(row.min + vec2(6.0, 30.0), vec2(24.0, 20.0));
+        if ui
+            .put(mute, egui::Button::selectable(track.muted, "M"))
+            .on_hover_text(if track.muted {
+                "Muted: click to hear this track"
+            } else {
+                "Mute this track"
+            })
+            .clicked()
+        {
+            self.run(Command::SetTrackMute {
+                track: track.id,
+                muted: !track.muted,
+            });
+        }
+
+        // While dragging, the value lives here; the project only changes on release, as one undo step.
+        let mut db = match self.gain_edit {
+            Some((t, db)) if t == track.id => db,
+            _ => track.gain_db,
+        };
+        let gain = Rect::from_min_size(row.min + vec2(34.0, 30.0), vec2(68.0, 20.0));
+        let response = ui
+            .put(
+                gain,
+                egui::DragValue::new(&mut db)
+                    .range(-60.0..=12.0)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" dB"),
+            )
+            .on_hover_text("Track volume: drag sideways or click to type");
+        if response.changed() {
+            self.gain_edit = Some((track.id, db));
+        }
+        let done = response.drag_stopped() || (response.changed() && !response.dragged());
+        if done && let Some((track, db)) = self.gain_edit.take() {
+            self.run(Command::SetTrackGain { track, db });
+        }
+
+        let delete = Rect::from_min_size(pos2(row.left() + 6.0, row.bottom() - 28.0), vec2(24.0, 24.0));
+        let response = ui.put(delete, egui::Button::new("")).on_hover_text("Delete this track");
+        draw_trash_can(
+            ui.painter(),
+            delete.shrink(6.0),
+            Stroke::new(1.5, ui.visuals().text_color()),
+        );
+        if response.clicked() {
+            self.run(Command::RemoveTrack { track: track.id });
         }
     }
 
@@ -816,4 +877,37 @@ fn wrapped_parts(clips: &[Clip], wrap: Option<Frames>) -> Vec<(Clip, (Fade, Fade
         }
     }
     parts
+}
+
+/// The delete button in the bottom right corner of the selected clip, kept on screen; none on a narrow clip.
+pub(crate) fn trash_button(area: Rect, view_right: f32) -> Option<Rect> {
+    let right = area.right().min(view_right) - 4.0;
+    let button = Rect::from_min_size(pos2(right - 22.0, area.bottom() - 26.0), vec2(22.0, 22.0));
+    (button.left() > area.left() + 30.0).then_some(button)
+}
+
+/// A trash can drawn from lines: lid with a handle, and a slightly narrowing bin with grooves.
+fn draw_trash_can(painter: &egui::Painter, r: Rect, stroke: Stroke) {
+    let lid = r.top() + r.height() * 0.2;
+    painter.line_segment([pos2(r.left(), lid), pos2(r.right(), lid)], stroke);
+    let handle = vec![
+        pos2(r.center().x - r.width() * 0.2, lid),
+        pos2(r.center().x - r.width() * 0.2, r.top()),
+        pos2(r.center().x + r.width() * 0.2, r.top()),
+        pos2(r.center().x + r.width() * 0.2, lid),
+    ];
+    painter.add(egui::Shape::line(handle, stroke));
+    let inset = r.width() * 0.12;
+    let bin = vec![
+        pos2(r.left() + inset, lid),
+        pos2(r.left() + inset * 2.0, r.bottom()),
+        pos2(r.right() - inset * 2.0, r.bottom()),
+        pos2(r.right() - inset, lid),
+    ];
+    painter.add(egui::Shape::line(bin, stroke));
+    let groove = Stroke::new(1.0, stroke.color);
+    for x in [0.4, 0.6] {
+        let x = r.left() + r.width() * x;
+        painter.line_segment([pos2(x, lid + 3.0), pos2(x, r.bottom() - 3.0)], groove);
+    }
 }

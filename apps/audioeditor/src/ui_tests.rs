@@ -236,11 +236,22 @@ fn clip_can_be_dragged_past_the_start() {
     save(&mut h, "dragged_past_start");
 }
 
+/// The header's mute button, volume (one drag is one undo step) and trash can.
 #[test]
-fn track_delete_button() {
+fn track_header_controls() {
     let mut h = harness(overlapping());
+    let track = |h: &Harness<'_, Editor>| h.state().session.project().tracks.first().map(|t| (t.muted, t.gain_db));
+    click(&mut h, 34.0, 107.0);
+    assert_eq!(track(&h), Some((true, 0.0)));
+
+    drag(&mut h, egui::pos2(84.0, 107.0), egui::pos2(124.0, 107.0));
+    let (_, db) = track(&h).unwrap();
+    assert!((3.0..=5.0).contains(&db), "{db} dB");
     save(&mut h, "track_header");
-    click(&mut h, 40.0, 156.0);
+    h.state_mut().undo();
+    assert_eq!(track(&h), Some((true, 0.0)), "the whole drag is one undo step");
+
+    click(&mut h, 40.0, 160.0);
     assert!(h.state().session.project().tracks.is_empty());
     assert_eq!(h.state().selected, None);
 }
@@ -499,4 +510,15 @@ fn changing_the_sample_rate_keeps_the_view() {
     save(&mut h, "rate_48k");
     h.state_mut().undo();
     assert_eq!(h.state().frames_per_px, 50.0);
+}
+
+/// The selected clip has a trash can in its bottom right corner that deletes it.
+#[test]
+fn the_trash_can_on_a_clip_deletes_it() {
+    let mut h = harness(overlapping());
+    save(&mut h, "trash_on_selected");
+    click(&mut h, 591.0, 160.0);
+    let clips = &h.state().session.project().tracks[0].clips;
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].start, 2 * RATE as i64, "the first clip was deleted");
 }
