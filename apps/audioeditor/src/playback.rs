@@ -35,11 +35,25 @@ impl Player {
         lock(&self.shared).playing = false;
     }
 
-    pub fn set_project(&self, project: &Arc<Project>) {
-        let mut shared = lock(&self.shared);
-        if !Arc::ptr_eq(&shared.project, project) {
-            shared.project = project.clone();
+    /// Swaps in the latest project. A stream opened at another rate would play it at the wrong speed and
+    /// pitch, so after a sample rate change the stream is opened again at the new rate.
+    pub fn set_project(&mut self, project: &Arc<Project>) -> Result<(), String> {
+        let rate = project.sample_rate;
+        let stale = self.stream.as_ref().is_some_and(|(_, r)| *r != rate);
+        if stale {
+            self.stream = None;
         }
+        lock(&self.shared).project = project.clone();
+        if stale && self.is_playing() {
+            match open(rate, self.shared.clone()) {
+                Ok(stream) => self.stream = Some((stream, rate)),
+                Err(e) => {
+                    self.stop();
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn play(&mut self, project: &Arc<Project>) -> Result<(), String> {

@@ -120,7 +120,9 @@ impl Editor {
                 .show(ui, |ui| self.timeline(ui));
             self.scrollbar(ui);
         });
-        self.player.set_project(self.session.project());
+        if let Err(e) = self.player.set_project(self.session.project()) {
+            self.fail(e);
+        }
         if self.player.is_playing() {
             ui.ctx().request_repaint();
         }
