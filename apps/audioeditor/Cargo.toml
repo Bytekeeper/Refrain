@@ -1,0 +1,19 @@
+[package]
+name = "audioeditor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+audioeditor-engine = { workspace = true }
+craft-audio = { workspace = true, features = ["peaks"] }
+eframe = { workspace = true }
+egui = { workspace = true }
+rfd = { workspace = true }
+cpal = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }

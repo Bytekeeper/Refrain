@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[workspace.dependencies]
+audioeditor-engine = { path = "crates/engine" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pinned to one commit: craft-libs has no crates.io releases, and all craft-* pins move together.
+craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "c376774f15ae7cd3b06a7ac664f01a8645af4b83", default-features = false, features = ["decode", "pcm-encode"] }
+
+eframe = "0.37"
+egui = "0.37"
+rfd = "0.18"
+cpal = "0.18"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Never crash: errors are returned, not panicked. clippy.toml allows these in tests.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# craft-libs: symphonia's FLAC decoder overflows i32 in debug builds on valid 32-bit streams.
+[profile.dev.package.symphonia-bundle-flac]
+overflow-checks = false
+
+[profile.release]
+lto = "thin"

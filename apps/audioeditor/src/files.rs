@@ -1,0 +1,146 @@
+//! Opening, saving, importing and exporting, and asking before unsaved changes are lost.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use audioeditor_engine::{Command, PROJECT_EXTENSION, export_wav, load_source, open_project, save_project};
+use rfd::{MessageButtons, MessageDialogResult};
+
+use crate::{AUDIO_FILES, Editor};
+
+impl Editor {
+    pub(crate) fn has_unsaved_changes(&self) -> bool {
+        !Arc::ptr_eq(&self.saved, self.session.project())
+    }
+
+    pub(crate) fn open(&mut self) {
+        if !self.may_discard_changes() {
+            return;
+        }
+        let dialog = rfd::FileDialog::new().add_filter("Project", &[PROJECT_EXTENSION]);
+        if let Some(path) = dialog.pick_file() {
+            self.open_from(&path);
+        }
+    }
+
+    pub(crate) fn open_from(&mut self, path: &Path) {
+        match open_project(path) {
+            Ok(session) => {
+                self.player.stop();
+                self.player.seek(0);
+                self.session = session;
+                self.saved = self.session.project().clone();
+                self.file = Some(path.to_path_buf());
+                self.selected = None;
+                self.drag = None;
+                self.scroll = 0.0;
+                self.peaks.retain(|_, (source, _)| source.strong_count() > 0);
+                self.status = format!("Opened {}", path.display());
+            }
+            Err(e) => self.status = format!("{}: {e}", path.display()),
+        }
+    }
+
+    /// Returns whether the project is saved afterwards.
+    pub(crate) fn save(&mut self) -> bool {
+        match self.file.clone() {
+            Some(path) => self.save_to(&path),
+            None => self.save_as(),
+        }
+    }
+
+    pub(crate) fn save_as(&mut self) -> bool {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Project", &[PROJECT_EXTENSION])
+            .set_file_name(format!("project.{PROJECT_EXTENSION}"));
+        let Some(mut path) = dialog.save_file() else {
+            return false;
+        };
+        if path.extension().is_none() {
+            path.set_extension(PROJECT_EXTENSION);
+        }
+        self.save_to(&path)
+    }
+
+    pub(crate) fn save_to(&mut self, path: &Path) -> bool {
+        match save_project(self.session.project(), path) {
+            Ok(()) => {
+                self.saved = self.session.project().clone();
+                self.file = Some(path.to_path_buf());
+                self.status = format!("Saved {}", path.display());
+                true
+            }
+            Err(e) => {
+                self.status = format!("Not saved: {e}");
+                false
+            }
+        }
+    }
+
+    /// Asks before unsaved changes are lost. Returns whether it is fine to go on.
+    pub(crate) fn may_discard_changes(&mut self) -> bool {
+        if !self.has_unsaved_changes() {
+            return true;
+        }
+        let buttons = MessageButtons::YesNoCancelCustom("Save".into(), "Discard".into(), "Cancel".into());
+        let answer = rfd::MessageDialog::new()
+            .set_title("Unsaved changes")
+            .set_description("The project has changes that are not saved.")
+            .set_buttons(buttons)
+            .show();
+        // Some platforms answer with the button label, others with Yes/No.
+        match answer {
+            MessageDialogResult::Yes => self.save(),
+            MessageDialogResult::Custom(label) if label == "Save" => self.save(),
+            MessageDialogResult::No => true,
+            MessageDialogResult::Custom(label) if label == "Discard" => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn import(&mut self) {
+        let Some(paths) = rfd::FileDialog::new().add_filter("Audio", AUDIO_FILES).pick_files() else {
+            return;
+        };
+        for path in paths {
+            let source = match load_source(&path) {
+                Ok(source) => Arc::new(source),
+                Err(e) => {
+                    self.status = format!("{}: {e}", path.display());
+                    continue;
+                }
+            };
+            if !self.run(Command::AddTrack {
+                name: source.name.clone(),
+            }) {
+                continue;
+            }
+            let Some(track) = self.session.project().tracks.last().map(|t| t.id) else {
+                continue;
+            };
+            if !self.run(Command::AddClip {
+                track,
+                source,
+                start: 0,
+            }) {
+                let error = std::mem::take(&mut self.status);
+                self.undo();
+                self.status = format!("{}: {error}", path.display());
+            }
+        }
+    }
+
+    pub(crate) fn export(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("WAV", &["wav"])
+            .set_file_name("mix.wav")
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match export_wav(self.session.project(), &path) {
+            Ok(()) => format!("Exported {}", path.display()),
+            Err(e) => e.to_string(),
+        };
+    }
+}

@@ -1,0 +1,260 @@
+//! Mouse editing on the timeline: selecting, moving clips, fades and volume points.
+
+use audioeditor_engine::{ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId};
+use egui::{Pos2, Rect, pos2};
+
+use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, y_of_amp};
+use crate::{Editor, HANDLE, HEADER_W, TRACK_H};
+
+/// What the mouse is dragging. The project only changes when the drag ends, so one drag is one undo step.
+pub(crate) enum Drag {
+    /// `track` is `None` over the empty row below all tracks: dropping there makes a new track.
+    Move {
+        clip: ClipId,
+        grab: Frames,
+        start: Frames,
+        track: Option<TrackId>,
+    },
+    FadeIn {
+        clip: ClipId,
+        len: Frames,
+    },
+    FadeOut {
+        clip: ClipId,
+        len: Frames,
+    },
+    Point {
+        clip: ClipId,
+        index: usize,
+        point: GainPoint,
+    },
+}
+
+/// What is under the mouse, most specific first.
+pub(crate) enum Hit {
+    Point(ClipId, usize),
+    FadeIn(ClipId),
+    FadeOut(ClipId),
+    Clip(ClipId, TrackId, Frames),
+}
+
+impl Drag {
+    pub(crate) fn clip(&self) -> ClipId {
+        match self {
+            Drag::Move { clip, .. }
+            | Drag::FadeIn { clip, .. }
+            | Drag::FadeOut { clip, .. }
+            | Drag::Point { clip, .. } => *clip,
+        }
+    }
+}
+
+impl Hit {
+    fn clip(&self) -> ClipId {
+        match self {
+            Hit::Point(c, _) | Hit::FadeIn(c) | Hit::FadeOut(c) | Hit::Clip(c, ..) => *c,
+        }
+    }
+}
+
+impl Editor {
+    pub(crate) fn handle_mouse(&mut self, project: &Project, rect: Rect, response: &egui::Response) {
+        let lane_left = rect.left() + HEADER_W;
+        let Some(pos) = response.interact_pointer_pos() else {
+            return;
+        };
+        let frame = self.frame_at(lane_left, pos.x);
+        let hit = self.hit(project, rect, pos);
+
+        if response.clicked() {
+            self.selected = hit.as_ref().map(Hit::clip);
+            self.player.seek(frame);
+        }
+        if response.double_clicked()
+            && let Some(Hit::Clip(id, ..)) = hit
+            && let Some((track, clip)) = project.clip(id)
+        {
+            let row = project.tracks.iter().position(|t| t.id == track.id).unwrap_or(0);
+            let area = self.clip_area(rect, row, clip.start, clip.len);
+            let mut points = clip.gain.clone();
+            points.push(GainPoint {
+                at: frame - clip.start,
+                db: db_of_y(area, pos.y),
+            });
+            self.run(Command::SetGainCurve { clip: id, points });
+        }
+        if response.secondary_clicked()
+            && let Some(Hit::Point(id, index)) = hit
+            && let Some((_, clip)) = project.clip(id)
+        {
+            let mut points = clip.gain.clone();
+            if index < points.len() {
+                points.remove(index);
+            }
+            self.run(Command::SetGainCurve { clip: id, points });
+        }
+
+        if response.dragged_by(egui::PointerButton::Middle) {
+            self.scroll -= f64::from(response.drag_delta().x) * self.frames_per_px;
+            self.clamp_scroll(rect.width() - HEADER_W);
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            // A drag only starts after the mouse moved a little; hit-test where the button went down.
+            let origin = response.ctx.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+            let hit = self.hit(project, rect, origin);
+            let frame = self.frame_at(lane_left, origin.x);
+            self.drag = match hit {
+                Some(Hit::Point(clip, index)) => project
+                    .clip(clip)
+                    .and_then(|(_, c)| c.gain.get(index))
+                    .map(|&point| Drag::Point { clip, index, point }),
+                Some(Hit::FadeIn(clip)) => project.clip(clip).map(|(_, c)| Drag::FadeIn {
+                    clip,
+                    len: c.fade_in.len,
+                }),
+                Some(Hit::FadeOut(clip)) => project.clip(clip).map(|(_, c)| Drag::FadeOut {
+                    clip,
+                    len: c.fade_out.len,
+                }),
+                Some(Hit::Clip(clip, track, start)) => Some(Drag::Move {
+                    clip,
+                    grab: frame - start,
+                    start,
+                    track: Some(track),
+                }),
+                None => None,
+            };
+            if let Some(clip) = hit.as_ref().map(Hit::clip) {
+                self.selected = Some(clip);
+            }
+        }
+        self.update_drag(project, rect, pos, frame);
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            && let Some(drag) = self.drag.take()
+        {
+            self.finish_drag(project, drag);
+        }
+    }
+
+    fn update_drag(&mut self, project: &Project, rect: Rect, pos: Pos2, frame: Frames) {
+        let Some(drag) = &mut self.drag else { return };
+        match drag {
+            Drag::Move {
+                clip,
+                grab,
+                start,
+                track,
+            } => {
+                // Moving past 0 hides the clip's start; at least one frame stays after 0.
+                let len = project.clip(*clip).map_or(1, |(_, c)| c.len);
+                *start = (frame - *grab).max(1 - len);
+                let row = ((pos.y - rect.top()) / TRACK_H).floor().max(0.0) as usize;
+                *track = project.tracks.get(row).map(|t| t.id);
+            }
+            Drag::FadeIn { clip, len } => {
+                if let Some((_, c)) = project.clip(*clip) {
+                    *len = (frame - c.start).clamp(0, c.len - c.fade_out.len);
+                }
+            }
+            Drag::FadeOut { clip, len } => {
+                if let Some((_, c)) = project.clip(*clip) {
+                    *len = (c.end() - frame).clamp(0, c.len - c.fade_in.len);
+                }
+            }
+            Drag::Point { clip, point, .. } => {
+                let found = project
+                    .clip(*clip)
+                    .and_then(|(t, c)| Some((project.tracks.iter().position(|x| x.id == t.id)?, c)));
+                if let Some((row, c)) = found {
+                    let area = clip_area(rect, row, c.start, c.len, self.scroll, self.frames_per_px);
+                    point.at = (frame - c.start).clamp(0, c.len);
+                    point.db = db_of_y(area, pos.y);
+                    self.status = format!("{:.1} dB", point.db);
+                }
+            }
+        }
+    }
+
+    fn finish_drag(&mut self, project: &Project, drag: Drag) {
+        let command = match drag {
+            Drag::Move {
+                clip,
+                start,
+                track: Some(track),
+                ..
+            } => Command::MoveClip { clip, track, start },
+            Drag::Move {
+                clip,
+                start,
+                track: None,
+                ..
+            } => Command::MoveClipToNewTrack { clip, start },
+            Drag::FadeIn { clip, len } => {
+                let shape = project.clip(clip).map_or(FadeShape::Linear, |(_, c)| c.fade_in.shape);
+                Command::SetFadeIn {
+                    clip,
+                    fade: Fade { len, shape },
+                }
+            }
+            Drag::FadeOut { clip, len } => {
+                let shape = project.clip(clip).map_or(FadeShape::Linear, |(_, c)| c.fade_out.shape);
+                Command::SetFadeOut {
+                    clip,
+                    fade: Fade { len, shape },
+                }
+            }
+            Drag::Point { clip, index, point } => {
+                let Some((_, c)) = project.clip(clip) else { return };
+                let mut points = c.gain.clone();
+                if let Some(p) = points.get_mut(index) {
+                    *p = point;
+                }
+                Command::SetGainCurve { clip, points }
+            }
+        };
+        self.run(command);
+    }
+
+    fn hit(&self, project: &Project, rect: Rect, pos: Pos2) -> Option<Hit> {
+        let row = usize::try_from(((pos.y - rect.top()) / TRACK_H).floor() as i64).ok()?;
+        let track = project.tracks.get(row)?;
+        let lane_left = rect.left() + HEADER_W;
+        let near = |p: Pos2| p.distance(pos) <= HANDLE + 2.0;
+        let order = self.stacking(&track.clips);
+        for &i in &order {
+            let Some(clip) = track.clips.get(i) else { continue };
+            let area = self.clip_area(rect, row, clip.start, clip.len);
+            let free = free_ends(&track.clips, i);
+            for (index, point) in clip.gain.iter().enumerate() {
+                if near(pos2(
+                    self.x_of(lane_left, clip.start + point.at),
+                    y_of_amp(area, db_to_amp(point.db)),
+                )) {
+                    return Some(Hit::Point(clip.id, index));
+                }
+            }
+            if free.0
+                && near(pos2(
+                    self.x_of(lane_left, clip.start + clip.fade_in.len),
+                    area.top() + HANDLE,
+                ))
+            {
+                return Some(Hit::FadeIn(clip.id));
+            }
+            if free.1
+                && near(pos2(
+                    self.x_of(lane_left, clip.end() - clip.fade_out.len),
+                    area.top() + HANDLE,
+                ))
+            {
+                return Some(Hit::FadeOut(clip.id));
+            }
+        }
+        let frame = self.frame_at(lane_left, pos.x);
+        let clip = order
+            .iter()
+            .filter_map(|&i| track.clips.get(i))
+            .find(|c| c.start <= frame && frame < c.end())?;
+        Some(Hit::Clip(clip.id, track.id, clip.start))
+    }
+}
