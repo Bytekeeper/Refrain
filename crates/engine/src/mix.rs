@@ -1,5 +1,6 @@
 use std::f32::consts::FRAC_PI_2;
 
+use crate::EffectLane;
 use crate::effects::apply_lane;
 use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
 
@@ -80,19 +81,21 @@ pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] 
 
 /// All tracks with their effects and volume, mixed, then the first `lanes` mix effects.
 pub(crate) fn mix_upto(project: &Project, start: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
-    let mut out = [vec![0.0; frames], vec![0.0; frames]];
+    let effects = project.mix_effects.get(..lanes).unwrap_or(&project.mix_effects);
+    let (from, total) = with_warmup(project, effects, start, frames);
+    let mut out = [vec![0.0; total], vec![0.0; total]];
     for track in project.tracks.iter().filter(|t| !t.muted) {
         let amp = db_to_amp(track.gain_db);
-        let [left, right] = render_track(project, track, start, frames, track.effects.len());
+        let [left, right] = render_track(project, track, from, total, track.effects.len());
         let [out_left, out_right] = &mut out;
         for (o, s) in out_left.iter_mut().zip(left).chain(out_right.iter_mut().zip(right)) {
             *o += s * amp;
         }
     }
-    for lane in project.mix_effects.iter().take(lanes) {
-        apply_lane(lane, project, &mut out, start);
+    for lane in effects {
+        apply_lane(lane, project, &mut out, from);
     }
-    out
+    drop_warmup(out, total - frames)
 }
 
 /// One track's clips and crossfades, then its first `lanes` effects. Without the track volume.
@@ -103,23 +106,46 @@ pub(crate) fn render_track(
     frames: usize,
     lanes: usize,
 ) -> [Vec<f32>; 2] {
-    let mut out = [vec![0.0; frames], vec![0.0; frames]];
+    let effects = track.effects.get(..lanes).unwrap_or(&track.effects);
+    let (from, total) = with_warmup(project, effects, start, frames);
+    let mut out = [vec![0.0; total], vec![0.0; total]];
     match project.loop_end.filter(|l| *l > 0) {
-        None => clips_into(project, track, &mut out, 0, start, frames),
+        None => clips_into(project, track, &mut out, 0, from, total),
         Some(l) => {
             let mut done = 0;
-            while done < frames {
-                let at = start.saturating_add(done as Frames).rem_euclid(l);
-                let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(frames - done);
+            while done < total {
+                let at = from.saturating_add(done as Frames).rem_euclid(l);
+                let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(total - done);
                 clips_into(project, track, &mut out, done, at, n);
                 done += n;
             }
         }
     }
-    for lane in track.effects.iter().take(lanes) {
-        apply_lane(lane, project, &mut out, start);
+    for lane in effects {
+        apply_lane(lane, project, &mut out, from);
     }
-    out
+    drop_warmup(out, total - frames)
+}
+
+/// Where to start rendering so the effects' memory of the past is filled at `start`, and how many frames
+/// that makes. With a loop, the frames before 0 are the end of the loop, so the seam stays seamless.
+fn with_warmup(project: &Project, effects: &[EffectLane], start: Frames, frames: usize) -> (Frames, usize) {
+    let end = start.saturating_add(Frames::try_from(frames).unwrap_or(Frames::MAX));
+    let touches =
+        |l: &EffectLane| project.loop_end.is_some() || l.ranges.iter().any(|r| r.start < end && r.end > start);
+    let warmup: Frames = effects
+        .iter()
+        .filter(|l| l.enabled && touches(l))
+        .map(|l| l.effect.warmup(project.sample_rate))
+        .sum();
+    let warmup = usize::try_from(warmup).unwrap_or(0);
+    (start.saturating_sub(warmup as Frames), frames.saturating_add(warmup))
+}
+
+fn drop_warmup([mut left, mut right]: [Vec<f32>; 2], warmup: usize) -> [Vec<f32>; 2] {
+    left.drain(..warmup.min(left.len()));
+    right.drain(..warmup.min(right.len()));
+    [left, right]
 }
 
 /// Adds the track's timeline frames `from..from + n` to `out` from index `at`. With a loop end, this range must

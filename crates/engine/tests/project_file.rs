@@ -121,6 +121,22 @@ fn edited_project(dir: &Path) -> Session {
         enabled: false,
     })
     .unwrap();
+    let low_pass = Effect::LowPass {
+        hz: 2000.0,
+        steep: true,
+    };
+    s.execute(Command::AddEffectLane {
+        track: Some(t2),
+        effect: low_pass,
+    })
+    .unwrap();
+    let lane = s.project().tracks[1].effects[0].id;
+    s.execute(Command::AddEffectRange {
+        lane,
+        start: 6000,
+        end: 14_000,
+    })
+    .unwrap();
     let mix = s.project().mix_effects[0].id;
     s.execute(Command::AddEffectRange {
         lane: mix,

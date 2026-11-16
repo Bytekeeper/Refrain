@@ -346,14 +346,17 @@ impl Editor {
                     Stroke::new(1.0, color)
                 };
                 painter.rect_stroke(area, 3.0, stroke, egui::StrokeKind::Inside);
-                if let (Some(gain), Effect::Normalize { .. }) = (gain, lane.effect)
-                    && x1 - x0 > 40.0
-                {
-                    let db = 20.0 * gain.max(1e-9).log10();
+                let label = match (lane.effect, gain) {
+                    (Effect::Normalize { .. }, Some(gain)) => format!("{:+.1} dB", 20.0 * gain.max(1e-9).log10()),
+                    (Effect::Normalize { .. }, None) => String::new(),
+                    (Effect::HighPass { hz, .. }, _) => format!("above {}", hz_text(hz)),
+                    (Effect::LowPass { hz, .. }, _) => format!("below {}", hz_text(hz)),
+                };
+                if x1 - x0 > 50.0 {
                     painter.text(
                         pos2(x0.max(lane_left) + 6.0, area.center().y),
                         Align2::LEFT_CENTER,
-                        format!("{db:+.1} dB"),
+                        label,
                         FontId::proportional(11.0),
                         Color32::WHITE,
                     );
@@ -373,33 +376,17 @@ impl Editor {
             return;
         };
         ui.label(lane.effect.name());
-        match lane.effect {
-            Effect::Normalize { peak_db } => {
-                let mut db = match self.effect_edit {
-                    Some((l, Effect::Normalize { peak_db })) if l == id => peak_db,
-                    _ => peak_db,
-                };
-                let response = ui
-                    .horizontal(|ui| {
-                        ui.label("Loudest point at");
-                        ui.add(
-                            egui::DragValue::new(&mut db)
-                                .range(-60.0..=0.0)
-                                .speed(0.1)
-                                .fixed_decimals(1)
-                                .suffix(" dB"),
-                        )
-                    })
-                    .inner;
-                if response.changed() {
-                    self.effect_edit = Some((id, Effect::Normalize { peak_db: db }));
-                }
-                let done =
-                    response.drag_stopped() || response.lost_focus() || (response.changed() && !response.dragged());
-                if done && let Some((lane, effect)) = self.effect_edit.take() {
-                    self.run(Command::SetEffect { lane, effect });
-                }
-            }
+        // While a value is dragged it lives here; the project only changes when it is let go, as one undo step.
+        let mut effect = match self.effect_edit {
+            Some((lane, effect)) if lane == id => effect,
+            _ => lane.effect,
+        };
+        let (changed, done) = effect_settings(ui, &mut effect);
+        if changed {
+            self.effect_edit = Some((id, effect));
+        }
+        if done && let Some((lane, effect)) = self.effect_edit.take() {
+            self.run(Command::SetEffect { lane, effect });
         }
         ui.separator();
         if let Some(range) = range
@@ -480,4 +467,63 @@ enum Edge {
     Start,
     End,
     Inside,
+}
+
+fn hz_text(hz: f32) -> String {
+    if hz >= 1000.0 {
+        format!("{} kHz", (hz / 100.0).round() / 10.0)
+    } else {
+        format!("{hz:.0} Hz")
+    }
+}
+
+/// The settings of one effect. Returns whether a value changed, and whether the change is finished, which is
+/// at once for a choice and on release for a dragged number.
+fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
+    let number = |response: egui::Response| {
+        let done = response.drag_stopped() || response.lost_focus() || (response.changed() && !response.dragged());
+        (response.changed(), done)
+    };
+    match effect {
+        Effect::Normalize { peak_db } => {
+            let response = ui.horizontal(|ui| {
+                ui.label("Loudest point at");
+                ui.add(
+                    egui::DragValue::new(peak_db)
+                        .range(-60.0..=0.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                )
+            });
+            number(response.inner)
+        }
+        Effect::HighPass { hz, steep } | Effect::LowPass { hz, steep } => {
+            // Each pixel dragged moves the frequency by 1 %, so low and high frequencies are equally easy to set.
+            let speed = hz.max(10.0) * 0.01;
+            let response = ui.horizontal(|ui| {
+                ui.label("Frequency");
+                ui.add(
+                    egui::DragValue::new(hz)
+                        .range(10.0..=20_000.0)
+                        .speed(speed)
+                        .fixed_decimals(0)
+                        .suffix(" Hz"),
+                )
+            });
+            let (mut changed, mut done) = number(response.inner);
+            ui.horizontal(|ui| {
+                ui.label("Slope");
+                for (value, text, hint) in [
+                    (false, "12 dB/octave", "Gentle: sounds natural"),
+                    (true, "24 dB/octave", "Steep: removes more right past the frequency"),
+                ] {
+                    if ui.radio_value(steep, value, text).on_hover_text(hint).changed() {
+                        (changed, done) = (true, true);
+                    }
+                }
+            });
+            (changed, done)
+        }
+    }
 }

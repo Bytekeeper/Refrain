@@ -913,3 +913,29 @@ fn effect_ranges_are_edited_with_the_mouse() {
         "the selected clip stays"
     );
 }
+
+/// A filter is added from the FX menu, gets a range, and its slope is set in the lane menu.
+#[test]
+fn a_filter_is_added_and_set_from_the_menus() {
+    let mut h = harness_sized(overlapping(), 400.0);
+    h.get_by_label("FX").click();
+    h.run();
+    h.get_by_label("High-pass").click();
+    h.run();
+    let lane = |h: &Harness<'_, Editor>| h.state().session.project().tracks[0].effects[0].clone();
+    assert_eq!(
+        lane(&h).effect,
+        audioeditor_engine::Effect::HighPass { hz: 80.0, steep: false }
+    );
+
+    drag(&mut h, egui::pos2(206.0, 188.0), egui::pos2(606.0, 188.0));
+    assert_eq!(lane(&h).ranges.len(), 1);
+    right_click(&mut h, 400.0, 188.0);
+    save(&mut h, "filter_menu");
+    h.get_by_label("24 dB/octave").click();
+    h.run();
+    assert_eq!(
+        lane(&h).effect,
+        audioeditor_engine::Effect::HighPass { hz: 80.0, steep: true }
+    );
+}
