@@ -119,7 +119,7 @@ impl Editor {
         self.guard_close(ui);
         self.update_title(ui);
         self.shortcuts(ui);
-        egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal(|ui| self.toolbar(ui)));
+        egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal_wrapped(|ui| self.toolbar(ui)));
         egui::Panel::bottom("status").show(ui, |ui| {
             if self.status.is_empty() {
                 ui.label(HINTS);
@@ -162,31 +162,34 @@ impl Editor {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
-        if ui.button("Open…").clicked() {
-            self.open();
-        }
-        if ui.button("Save").clicked() {
-            self.save();
-        }
-        if ui.button("Save as…").clicked() {
-            self.save_as();
-        }
-        ui.separator();
-        if ui.button("Import…").clicked() {
-            self.import();
-        }
-        ui.menu_button("Export", |ui| {
-            if ui.button("Stereo WAV…").clicked() {
+        ui.menu_button("File", |ui| {
+            if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+                self.open();
+            }
+            if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                self.save();
+            }
+            if ui
+                .add(egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S"))
+                .clicked()
+            {
+                self.save_as();
+            }
+            ui.separator();
+            if ui.button("Export stereo WAV…").clicked() {
                 self.export(false);
             }
             if ui
-                .button("Mono WAV…")
+                .button("Export mono WAV…")
                 .on_hover_text("Left and right mixed into one channel, as game engines want for sounds placed in space")
                 .clicked()
             {
                 self.export(true);
             }
         });
+        if ui.button("Import…").clicked() {
+            self.import();
+        }
         self.rate_choice(ui);
         ui.separator();
         let label = if self.player.is_playing() { "Stop" } else { "Play" };

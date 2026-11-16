@@ -505,7 +505,7 @@ fn dragging_the_line_below_a_track_changes_its_height() {
 #[test]
 fn changing_the_sample_rate_keeps_the_view() {
     let mut h = harness(overlapping());
-    click(&mut h, 460.0, 20.0);
+    click(&mut h, 185.0, 20.0);
     h.get_by_label("48 kHz").click();
     h.run();
     let p = h.state().session.project();
