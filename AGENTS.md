@@ -45,6 +45,9 @@ the audio under them changes, never stored as a fixed number.
 
 Effects live in lanes below a track, or below the mix for effects across all tracks. A lane is one
 effect with its settings and the time ranges where it applies; lanes apply from the top down.
+Effects that need the sound before a frame (filters, echo, reverb) get it by starting the render earlier,
+so a render from any point sounds like one from the start. Playback instead keeps their memory from one
+piece to the next (`engine::Renderer`), because a reverb cannot hear seconds of the past again every 10 ms.
 
 ## 3. Clean room
 

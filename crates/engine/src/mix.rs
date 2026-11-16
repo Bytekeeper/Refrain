@@ -1,7 +1,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use crate::EffectLane;
-use crate::effects::apply_lane;
+use crate::effects::{Memory, apply_lane};
 use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
 
 /// Gain of a fade-in at progress `t` (0 = start, 1 = done).
@@ -79,23 +79,55 @@ pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] 
     mix_upto(project, start, frames, project.mix_effects.len())
 }
 
+/// Renders the mix piece after piece for playback. The effects keep their memory of the sound between pieces,
+/// so echo and reverb do not have to render seconds of the past again for each piece.
+#[derive(Default)]
+pub struct Renderer {
+    memory: Memory,
+    /// Where the last piece ended: a piece starting there goes on from the memory.
+    next: Option<Frames>,
+}
+
+impl Renderer {
+    pub fn render(&mut self, project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] {
+        let lanes = project.mix_effects.len();
+        let warmup = if self.next == Some(start) {
+            self.memory.forget_removed(project);
+            0
+        } else {
+            self.memory = Memory::default();
+            // After a jump, a full warm-up for a long reverb would stall the sound, so the tails before the jump
+            // are left out, as on a mixing desk.
+            mix_warmup(project, lanes, start, frames).min(Frames::from(project.sample_rate) / 4)
+        };
+        let out = mix_with(project, &mut self.memory, start - warmup, frames + warmup as usize, lanes);
+        let end = start.saturating_add(Frames::try_from(frames).unwrap_or(0));
+        self.next = Some(project.loop_end.filter(|l| *l > 0).map_or(end, |l| end.rem_euclid(l)));
+        drop_warmup(out, warmup as usize)
+    }
+}
+
 /// All tracks with their effects and volume, mixed, then the first `lanes` mix effects.
 pub(crate) fn mix_upto(project: &Project, start: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
-    let effects = project.mix_effects.get(..lanes).unwrap_or(&project.mix_effects);
-    let (from, total) = with_warmup(project, effects, start, frames);
-    let mut out = [vec![0.0; total], vec![0.0; total]];
+    let warmup = mix_warmup(project, lanes, start, frames);
+    let out = mix_with(project, &mut Memory::default(), start - warmup, frames + warmup as usize, lanes);
+    drop_warmup(out, warmup as usize)
+}
+
+fn mix_with(project: &Project, memory: &mut Memory, from: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
+    let mut out = [vec![0.0; frames], vec![0.0; frames]];
     for track in project.tracks.iter().filter(|t| !t.muted) {
         let amp = db_to_amp(track.gain_db);
-        let [left, right] = render_track(project, track, from, total, track.effects.len());
+        let [left, right] = track_with(project, track, memory, from, frames, track.effects.len());
         let [out_left, out_right] = &mut out;
         for (o, s) in out_left.iter_mut().zip(left).chain(out_right.iter_mut().zip(right)) {
             *o += s * amp;
         }
     }
-    for lane in effects {
-        apply_lane(lane, project, &mut out, from);
+    for lane in project.mix_effects.iter().take(lanes) {
+        apply_lane(lane, project, &mut out, from, memory);
     }
-    drop_warmup(out, total - frames)
+    out
 }
 
 /// One track's clips and crossfades, then its first `lanes` effects. Without the track volume.
@@ -107,39 +139,68 @@ pub(crate) fn render_track(
     lanes: usize,
 ) -> [Vec<f32>; 2] {
     let effects = track.effects.get(..lanes).unwrap_or(&track.effects);
-    let (from, total) = with_warmup(project, effects, start, frames);
-    let mut out = [vec![0.0; total], vec![0.0; total]];
+    let warmup = lanes_warmup(project, effects, start, frames);
+    let out = track_with(project, track, &mut Memory::default(), start - warmup, frames + warmup as usize, lanes);
+    drop_warmup(out, warmup as usize)
+}
+
+fn track_with(
+    project: &Project,
+    track: &Track,
+    memory: &mut Memory,
+    from: Frames,
+    frames: usize,
+    lanes: usize,
+) -> [Vec<f32>; 2] {
+    let mut out = [vec![0.0; frames], vec![0.0; frames]];
     match project.loop_end.filter(|l| *l > 0) {
-        None => clips_into(project, track, &mut out, 0, from, total),
+        None => clips_into(project, track, &mut out, 0, from, frames),
         Some(l) => {
             let mut done = 0;
-            while done < total {
+            while done < frames {
                 let at = from.saturating_add(done as Frames).rem_euclid(l);
-                let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(total - done);
+                let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(frames - done);
                 clips_into(project, track, &mut out, done, at, n);
                 done += n;
             }
         }
     }
-    for lane in effects {
-        apply_lane(lane, project, &mut out, from);
+    for lane in track.effects.iter().take(lanes) {
+        apply_lane(lane, project, &mut out, from, memory);
     }
-    drop_warmup(out, total - frames)
+    out
 }
 
-/// Where to start rendering so the effects' memory of the past is filled at `start`, and how many frames
-/// that makes. With a loop, the frames before 0 are the end of the loop, so the seam stays seamless.
-fn with_warmup(project: &Project, effects: &[EffectLane], start: Frames, frames: usize) -> (Frames, usize) {
+/// How much earlier to start rendering so every effect that sounds in the piece has heard enough of the past.
+/// Stacked lanes add up: a lane needs its input to be right already from its own warm-up on.
+fn lanes_warmup(project: &Project, lanes: &[EffectLane], start: Frames, frames: usize) -> Frames {
     let end = start.saturating_add(Frames::try_from(frames).unwrap_or(Frames::MAX));
-    let touches =
-        |l: &EffectLane| project.loop_end.is_some() || l.ranges.iter().any(|r| r.start < end && r.end > start);
-    let warmup: Frames = effects
+    let rate = project.sample_rate;
+    // With a loop every lane counts: what comes before 0 is the end of the loop.
+    let sounds = |l: &EffectLane| {
+        project.loop_end.is_some()
+            || l.ranges
+                .iter()
+                .any(|r| r.start < end && r.end.saturating_add(l.effect.tail(rate)) > start)
+    };
+    lanes
         .iter()
-        .filter(|l| l.enabled && touches(l))
-        .map(|l| l.effect.warmup(project.sample_rate))
-        .sum();
-    let warmup = usize::try_from(warmup).unwrap_or(0);
-    (start.saturating_sub(warmup as Frames), frames.saturating_add(warmup))
+        .filter(|l| l.enabled && sounds(l))
+        .map(|l| l.effect.warmup(rate))
+        .fold(0, Frames::saturating_add)
+}
+
+fn mix_warmup(project: &Project, lanes: usize, start: Frames, frames: usize) -> Frames {
+    let mix = project.mix_effects.get(..lanes).unwrap_or(&project.mix_effects);
+    let after = lanes_warmup(project, mix, start, frames);
+    let longer = frames.saturating_add(usize::try_from(after).unwrap_or(0));
+    let tracks = project
+        .tracks
+        .iter()
+        .map(|t| lanes_warmup(project, &t.effects, start - after, longer))
+        .max()
+        .unwrap_or(0);
+    after.saturating_add(tracks)
 }
 
 fn drop_warmup([mut left, mut right]: [Vec<f32>; 2], warmup: usize) -> [Vec<f32>; 2] {

@@ -9,7 +9,7 @@ mod session;
 
 pub use effects::{Effect, EffectLane, EffectRange, LaneId, RangeId};
 pub use io::{ExportFormat, ExportSettings, export, load_source, resample};
-pub use mix::{clip_amp, edge_fades, fade_gain, overlap_after, overlap_before, render, similarity};
+pub use mix::{clip_amp, edge_fades, fade_gain, overlap_after, overlap_before, render, Renderer, similarity};
 pub use model::{ChannelMode, Clip, ClipId, Fade, FadeShape, Frames, GainPoint, Project, Source, Track, TrackId};
 pub use project_file::{PROJECT_EXTENSION, open_project, save_project};
 pub use session::{Command, Session};

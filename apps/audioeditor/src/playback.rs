@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use audioeditor_engine::{Frames, Project, render};
+use audioeditor_engine::{Frames, Project, Renderer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// What the audio thread reads. The window swaps in each new project snapshot, so edits are heard at once.
@@ -95,10 +95,11 @@ fn open(rate: u32, shared: Arc<Mutex<Shared>>) -> Result<cpal::Stream, String> {
         .next()
         .ok_or_else(|| format!("The audio device cannot play {rate} Hz; resampling is not supported yet."))?;
     let channels = usize::from(config.channels());
+    let mut renderer = Renderer::default();
     let stream = device
         .build_output_stream(
             config.config(),
-            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| fill(out, channels, &shared),
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| fill(out, channels, &shared, &mut renderer),
             |e| eprintln!("audio output error: {e}"),
             None,
         )
@@ -110,7 +111,7 @@ fn open(rate: u32, shared: Arc<Mutex<Shared>>) -> Result<cpal::Stream, String> {
 }
 
 /// Runs on the audio thread. Renders without holding the lock so the window never waits on it.
-fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
+fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>, renderer: &mut Renderer) {
     out.fill(0.0);
     let (project, pos) = {
         let s = lock(shared);
@@ -120,7 +121,7 @@ fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
         (s.project.clone(), s.pos)
     };
     let frames = out.len() / channels;
-    let [left, right] = render(&project, pos, frames);
+    let [left, right] = renderer.render(&project, pos, frames);
     for ((frame, l), r) in out.chunks_mut(channels).zip(&left).zip(&right) {
         let (l, r) = (l.clamp(-1.0, 1.0), r.clamp(-1.0, 1.0));
         match frame {

@@ -1,5 +1,7 @@
 //! Effects in lanes: each lane is one effect applied in its time ranges, lanes in order from the top.
 
+use std::collections::HashMap;
+
 use crate::mix::{db_to_amp, mix_upto, render_track};
 use crate::{Error, Frames, Project, Result};
 
@@ -18,6 +20,10 @@ pub enum Effect {
     HighPass { hz: f32, steep: bool },
     /// Lets through what is below `hz`: removes hiss and harshness.
     LowPass { hz: f32, steep: bool },
+    /// Repeats the sound every `delay_ms`; the first repeat at `level_db`, each next one `fade_db` quieter.
+    Echo { delay_ms: f32, fade_db: f32, level_db: f32 },
+    /// The sound of a room that dies away to -60 dB in `seconds`, added at `level_db`.
+    Reverb { seconds: f32, level_db: f32 },
 }
 
 impl Effect {
@@ -30,6 +36,15 @@ impl Effect {
                 hz: 8000.0,
                 steep: false,
             },
+            Effect::Echo {
+                delay_ms: 300.0,
+                fade_db: 6.0,
+                level_db: -6.0,
+            },
+            Effect::Reverb {
+                seconds: 1.5,
+                level_db: -12.0,
+            },
         ]
     }
 
@@ -38,26 +53,36 @@ impl Effect {
             Effect::Normalize { .. } => "Normalize",
             Effect::HighPass { .. } => "High-pass",
             Effect::LowPass { .. } => "Low-pass",
+            Effect::Echo { .. } => "Echo",
+            Effect::Reverb { .. } => "Reverb",
         }
     }
 
-    /// How long before a range the effect already changes the sound.
-    pub fn lead_in(&self, _rate: u32) -> Frames {
-        match self {
+    /// How long after a range the effect still sounds: until it is 60 dB below the sound that went in.
+    pub fn tail(&self, rate: u32) -> Frames {
+        match *self {
             Effect::Normalize { .. } | Effect::HighPass { .. } | Effect::LowPass { .. } => 0,
+            Effect::Echo {
+                delay_ms,
+                fade_db,
+                level_db,
+            } => {
+                let repeats = ((60.0 + level_db) / fade_db.max(0.1)).ceil().max(0.0) as Frames + 1;
+                ms_frames(delay_ms, rate).saturating_mul(repeats)
+            }
+            Effect::Reverb { seconds, .. } => {
+                ms_frames(seconds * 1000.0, rate).saturating_add(ms_frames(COMB_MS[7] + SPREAD_MS, rate))
+            }
         }
     }
 
-    /// How long after a range the effect still sounds.
-    pub fn tail(&self, _rate: u32) -> Frames {
-        match self {
-            Effect::Normalize { .. } | Effect::HighPass { .. } | Effect::LowPass { .. } => 0,
-        }
-    }
-
-    /// How much audio before a frame the effect needs to compute it: a filter's memory of the past fades to
-    /// -80 dB in this time. Rendering starts this much earlier, so playback in pieces sounds like one render.
+    /// How much audio before a frame the effect needs to compute it. Rendering starts this much earlier, so a
+    /// render from the middle sounds like one from the start. For a filter its memory of the past fades to
+    /// -80 dB in this time.
     pub(crate) fn warmup(&self, rate: u32) -> Frames {
+        if let Effect::Echo { .. } | Effect::Reverb { .. } = self {
+            return self.tail(rate);
+        }
         let Some((hz, stages)) = self.filter() else { return 0 };
         let w0 = std::f64::consts::TAU * f64::from(cutoff(hz, rate)) / f64::from(rate.max(1));
         // The slowest stage decays by exp(-w0 / (2 q)) per frame.
@@ -77,24 +102,39 @@ impl Effect {
             Effect::HighPass { hz, steep } | Effect::LowPass { hz, steep } => {
                 Some((hz, if steep { STEEP } else { GENTLE }))
             }
-            Effect::Normalize { .. } => None,
+            _ => None,
         }
     }
 
     fn check(self) -> Result<Effect> {
-        match self {
-            Effect::Normalize { peak_db } if peak_db.is_finite() && (-60.0..=0.0).contains(&peak_db) => Ok(self),
-            Effect::Normalize { .. } => Err(Error::Invalid("normalize goes to a peak between -60 and 0 dB".into())),
-            Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. }
-                if hz.is_finite() && (10.0..=40_000.0).contains(&hz) =>
-            {
-                Ok(self)
+        let within = |v: f32, r: std::ops::RangeInclusive<f32>| v.is_finite() && r.contains(&v);
+        let problem = match self {
+            Effect::Normalize { peak_db } if !within(peak_db, -60.0..=0.0) => {
+                "normalize goes to a peak between -60 and 0 dB"
             }
-            Effect::HighPass { .. } | Effect::LowPass { .. } => Err(Error::Invalid(
-                "a filter's frequency must be between 10 Hz and 40 kHz".into(),
-            )),
-        }
+            Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. } if !within(hz, 10.0..=40_000.0) => {
+                "a filter's frequency must be between 10 Hz and 40 kHz"
+            }
+            Effect::Echo { delay_ms, .. } if !within(delay_ms, 10.0..=2000.0) => {
+                "an echo's delay must be between 10 ms and 2 s"
+            }
+            Effect::Echo { fade_db, .. } if !within(fade_db, 3.0..=40.0) => {
+                "each echo must be between 3 and 40 dB quieter than the one before"
+            }
+            Effect::Reverb { seconds, .. } if !within(seconds, 0.1..=10.0) => {
+                "a reverb must last between 0.1 and 10 seconds"
+            }
+            Effect::Echo { level_db, .. } | Effect::Reverb { level_db, .. } if !within(level_db, -40.0..=0.0) => {
+                "the volume of an echo or reverb must be between -40 and 0 dB"
+            }
+            _ => return Ok(self),
+        };
+        Err(Error::Invalid(problem.into()))
     }
+}
+
+fn ms_frames(ms: f32, rate: u32) -> Frames {
+    ((f64::from(ms) * f64::from(rate) / 1000.0).round() as Frames).max(1)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,9 +209,66 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Resu
     Ok(())
 }
 
+/// What each effect remembers of the sound before the current piece, by lane. Playback keeps it from one
+/// piece to the next, so a reverb does not have to hear seconds of the past again for every piece.
+#[derive(Default)]
+pub struct Memory {
+    lanes: HashMap<LaneId, (Effect, u32, State)>,
+}
+
+impl Memory {
+    /// The memory of this lane; empty when the lane is new or its settings changed.
+    fn of(&mut self, lane: &EffectLane, rate: u32) -> &mut State {
+        let fresh = || (lane.effect, rate, State::new(lane.effect, rate));
+        let entry = self.lanes.entry(lane.id).or_insert_with(fresh);
+        if entry.0 != lane.effect || entry.1 != rate {
+            *entry = fresh();
+        }
+        &mut entry.2
+    }
+
+    pub(crate) fn forget_removed(&mut self, project: &Project) {
+        self.lanes.retain(|id, _| project.lane(*id).is_some_and(|l| l.enabled));
+    }
+}
+
+enum State {
+    Nothing,
+    /// The last two inputs and outputs of each stage, per channel.
+    Filter(Vec<[[f64; 4]; 2]>),
+    Echo { lines: [Vec<f32>; 2], at: usize },
+    Reverb(Box<Reverb>),
+}
+
+impl State {
+    fn new(effect: Effect, rate: u32) -> State {
+        match effect {
+            Effect::Normalize { .. } => State::Nothing,
+            Effect::HighPass { .. } | Effect::LowPass { .. } => {
+                State::Filter(vec![[[0.0; 4]; 2]; effect.filter().map_or(0, |(_, s)| s.len())])
+            }
+            Effect::Echo { delay_ms, .. } => {
+                let len = usize::try_from(ms_frames(delay_ms, rate)).unwrap_or(1);
+                State::Echo {
+                    lines: [vec![0.0; len], vec![0.0; len]],
+                    at: 0,
+                }
+            }
+            Effect::Reverb { seconds, .. } => State::Reverb(Box::new(Reverb::new(seconds, rate))),
+        }
+    }
+}
+
 /// Applies the lane to `out`, which holds timeline frames from `start`. Inside its ranges the processed sound
-/// replaces the plain one, with short fades between them at the edges.
-pub(crate) fn apply_lane(lane: &EffectLane, project: &Project, out: &mut [Vec<f32>; 2], start: Frames) {
+/// replaces the plain one, with short fades between them at the edges. Echo and reverb add to the plain sound
+/// instead and keep sounding after the range.
+pub(crate) fn apply_lane(
+    lane: &EffectLane,
+    project: &Project,
+    out: &mut [Vec<f32>; 2],
+    start: Frames,
+    memory: &mut Memory,
+) {
     if !lane.enabled {
         return;
     }
@@ -197,28 +294,54 @@ pub(crate) fn apply_lane(lane: &EffectLane, project: &Project, out: &mut [Vec<f3
             *w = (weight, index);
         }
     }
-    if weights.iter().all(|(w, _)| *w == 0.0) {
-        return;
-    }
-    let wet: Option<[Vec<f32>; 2]> = lane.effect.filter().map(|(hz, stages)| {
-        let mut wet = out.clone();
-        for channel in &mut wet {
-            for &q in stages {
-                Biquad::new(lane.effect, hz, q, project.sample_rate).run(channel);
-            }
+    let wet: [Vec<f32>; 2] = match memory.of(lane, project.sample_rate) {
+        State::Nothing => {
+            let gain = |range: usize| lane.ranges.get(range).map_or(1.0, |r| r.gain);
+            out.clone().map(|c| c.iter().zip(&weights).map(|(s, &(_, r))| s * gain(r)).collect())
         }
-        wet
-    });
-    for (c, channel) in out.iter_mut().enumerate() {
-        for (i, (sample, &(weight, range))) in channel.iter_mut().zip(&weights).enumerate() {
-            if weight == 0.0 {
-                continue;
+        State::Filter(stages) => {
+            let mut wet = out.clone();
+            if let Some((hz, qs)) = lane.effect.filter() {
+                for (&q, memory) in qs.iter().zip(stages.iter_mut()) {
+                    let biquad = Biquad::new(lane.effect, hz, q, project.sample_rate);
+                    for (channel, memory) in wet.iter_mut().zip(memory.iter_mut()) {
+                        biquad.run(memory, channel);
+                    }
+                }
             }
-            let processed = match &wet {
-                Some(wet) => wet.get(c).and_then(|w| w.get(i)).copied().unwrap_or(*sample),
-                None => *sample * lane.ranges.get(range).map_or(1.0, |r| r.gain),
+            wet
+        }
+        State::Echo { lines, at } => {
+            let Effect::Echo { fade_db, level_db, .. } = lane.effect else {
+                return;
             };
-            *sample += weight * (processed - *sample);
+            let (feedback, level) = (db_to_amp(-fade_db), db_to_amp(level_db));
+            let len = lines[0].len().max(1);
+            for (channel, line) in out.iter_mut().zip(lines.iter_mut()) {
+                let mut i = *at;
+                for (sample, &(weight, _)) in channel.iter_mut().zip(&weights) {
+                    if let Some(slot) = line.get_mut(i) {
+                        let delayed = *slot;
+                        *slot = *sample * weight + feedback * delayed;
+                        *sample += level * delayed;
+                    }
+                    i = (i + 1) % len;
+                }
+            }
+            *at = (*at + frames) % len;
+            return;
+        }
+        State::Reverb(reverb) => {
+            let Effect::Reverb { level_db, .. } = lane.effect else {
+                return;
+            };
+            reverb.run(out, &weights, db_to_amp(level_db));
+            return;
+        }
+    };
+    for (channel, wet) in out.iter_mut().zip(wet) {
+        for ((sample, wet), &(weight, _)) in channel.iter_mut().zip(wet).zip(&weights) {
+            *sample += weight * (wet - *sample);
         }
     }
 }
@@ -250,14 +373,106 @@ impl Biquad {
         }
     }
 
-    /// Filters in place, starting from silence.
-    fn run(&self, samples: &mut [f32]) {
-        let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+    /// Filters in place, going on from the last two inputs and outputs in `memory`.
+    fn run(&self, memory: &mut [f64; 4], samples: &mut [f32]) {
+        let [mut x1, mut x2, mut y1, mut y2] = *memory;
         for s in samples {
             let x = f64::from(*s);
             let y = self.b[0] * x + self.b[1] * x1 + self.b[2] * x2 - self.a[0] * y1 - self.a[1] * y2;
             (x2, x1, y2, y1) = (x1, x, y1, y);
             *s = y as f32;
+        }
+        *memory = [x1, x2, y1, y2];
+    }
+}
+
+/// Delays of the parallel echo loops. Not multiples of each other, so their repeats do not pile up into a tone.
+const COMB_MS: [f32; 8] = [25.3, 26.9, 28.9, 30.7, 32.3, 33.8, 35.3, 36.7];
+/// Delays of the diffusers in a row after the loops: they smear each repeat into a cloud.
+const PASS_MS: [f32; 4] = [12.6, 10.0, 7.7, 5.1];
+/// The right side's loops are this much longer, so left and right differ and the room sounds wide.
+const SPREAD_MS: f32 = 0.5;
+/// How much of the highs each loop loses per round: real walls absorb highs first.
+const DAMPING: f32 = 0.25;
+const DIFFUSION: f32 = 0.5;
+
+/// One echo loop of the room.
+struct Comb {
+    line: Vec<f32>,
+    at: usize,
+    feedback: f32,
+    /// The sound going round, without its highs.
+    low: f32,
+}
+
+/// A room after Schroeder: echo loops in parallel that lose highs, then all-pass diffusers in a row.
+struct Reverb {
+    combs: [Vec<Comb>; 2],
+    passes: [Vec<(Vec<f32>, usize)>; 2],
+    /// Brings the energy of the room's response to 1, so the volume means the same for every length.
+    scale: f32,
+}
+
+impl Reverb {
+    fn new(seconds: f32, rate: u32) -> Reverb {
+        let line = |ms: f32| vec![0.0f32; usize::try_from(ms_frames(ms, rate)).unwrap_or(1)];
+        let side = |spread: f32| {
+            let combs: Vec<Comb> = COMB_MS
+                .iter()
+                .map(|ms| {
+                    let line = line(ms + spread);
+                    // Each round through the loop takes its delay; after `seconds` the sound is 60 dB down.
+                    let feedback = 10f32.powf(-3.0 * line.len() as f32 / (seconds.max(0.01) * rate.max(1) as f32));
+                    Comb {
+                        line,
+                        at: 0,
+                        feedback,
+                        low: 0.0,
+                    }
+                })
+                .collect();
+            let passes = PASS_MS.iter().map(|ms| (line(ms + spread), 0)).collect();
+            (combs, passes)
+        };
+        let (left, left_passes) = side(0.0);
+        let (right, right_passes) = side(SPREAD_MS);
+        let energy: f32 = left.iter().map(|c| 1.0 / (1.0 - c.feedback * c.feedback).max(1e-6)).sum();
+        Reverb {
+            combs: [left, right],
+            passes: [left_passes, right_passes],
+            scale: 1.0 / energy.sqrt(),
+        }
+    }
+
+    /// Adds the room to `out`, fed with both sides of the sound times `weights`.
+    fn run(&mut self, out: &mut [Vec<f32>; 2], weights: &[(f32, usize)], level: f32) {
+        let feed: Vec<f32> = out[0]
+            .iter()
+            .zip(&out[1])
+            .zip(weights)
+            .map(|((l, r), (w, _))| (l + r) * 0.5 * w * self.scale)
+            .collect();
+        for ((channel, combs), passes) in out.iter_mut().zip(&mut self.combs).zip(&mut self.passes) {
+            for (sample, &input) in channel.iter_mut().zip(&feed) {
+                let mut room = 0.0;
+                for comb in combs.iter_mut() {
+                    let Some(slot) = comb.line.get_mut(comb.at) else { continue };
+                    let delayed = *slot;
+                    comb.low = delayed * (1.0 - DAMPING) + comb.low * DAMPING;
+                    *slot = input + comb.low * comb.feedback;
+                    comb.at = (comb.at + 1) % comb.line.len();
+                    room += delayed;
+                }
+                for (line, at) in passes.iter_mut() {
+                    let Some(slot) = line.get_mut(*at) else { continue };
+                    let delayed = *slot;
+                    let v = room + DIFFUSION * delayed;
+                    *slot = v;
+                    *at = (*at + 1) % line.len();
+                    room = delayed - DIFFUSION * v;
+                }
+                *sample += level * room;
+            }
         }
     }
 }
@@ -561,5 +776,111 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f32::max);
         assert!(most < 1e-3, "{most}");
+    }
+
+    /// One click at frame 100 on a track, with a lane of `effect` over 0..200.
+    fn click_session(effect: Effect) -> Session {
+        let mut samples = vec![0.0; 300];
+        samples[100] = 1.0;
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        let source = Arc::new(Source {
+            path: None,
+            name: "click".into(),
+            sample_rate: RATE,
+            channels: vec![samples],
+        });
+        s.execute(Command::AddClip { track, source, start: 0 }).unwrap();
+        s.execute(Command::AddEffectLane {
+            track: Some(track),
+            effect,
+        })
+        .unwrap();
+        let lane = s.project().tracks[0].effects[0].id;
+        s.execute(Command::AddEffectRange { lane, start: 0, end: 200 }).unwrap();
+        s
+    }
+
+    #[test]
+    fn echo_repeats_quieter_each_time_and_sounds_past_the_range() {
+        let echo = Effect::Echo {
+            delay_ms: 100.0,
+            fade_db: 6.0,
+            level_db: -6.0,
+        };
+        let s = click_session(echo);
+        // The first echo at -6 dB, each next one 6 dB quieter, until 60 dB down: 10 repeats, 1 s.
+        assert_eq!(echo.tail(RATE), 1000);
+        assert_eq!(s.project().len(), 1200);
+        let [left, _] = render(s.project(), 0, 1200);
+        assert_eq!(left[100], 1.0);
+        for (k, at) in [200, 300, 400].into_iter().enumerate() {
+            let expected = db_to_amp(-6.0 * (k as f32 + 1.0));
+            assert!((left[at] - expected).abs() < 1e-5, "{at}: {}", left[at]);
+        }
+        assert!(left[250].abs() < 1e-6);
+    }
+
+    #[test]
+    fn reverb_dies_away_after_the_range() {
+        let s = click_session(Effect::Reverb {
+            seconds: 0.5,
+            level_db: 0.0,
+        });
+        let [left, right] = render(s.project(), 0, 1200);
+        let peak = |from: usize, to: usize| left[from..to].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let early = peak(200, 300);
+        assert!(early > 0.01, "the room sounds after the range: {early}");
+        assert!(peak(700, 800) < early / 100.0, "{}", peak(700, 800));
+        assert_ne!(left[250], right[250], "left and right differ, so it sounds wide");
+    }
+
+    /// Playback goes on from the effects' memory instead of rendering the past again; the result is the
+    /// same as one render, and with the loop on, the tail runs over the seam into the start.
+    #[test]
+    fn playback_in_pieces_matches_one_render() {
+        let mut s = click_session(Effect::Echo {
+            delay_ms: 70.0,
+            fade_db: 4.0,
+            level_db: -3.0,
+        });
+        let track = s.project().tracks[0].id;
+        for effect in [
+            Effect::Reverb {
+                seconds: 0.3,
+                level_db: -6.0,
+            },
+            Effect::LowPass { hz: 200.0, steep: true },
+        ] {
+            s.execute(Command::AddEffectLane {
+                track: Some(track),
+                effect,
+            })
+            .unwrap();
+            let lane = s.project().tracks[0].effects.last().unwrap().id;
+            s.execute(Command::AddEffectRange { lane, start: 50, end: 250 }).unwrap();
+        }
+        let differs = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+        let played = |s: &Session, from: usize, to: usize| {
+            let mut renderer = crate::Renderer::default();
+            let mut out = vec![];
+            for start in (0..to).step_by(64) {
+                let at = s.project().loop_end.map_or(start as Frames, |l| start as Frames % l);
+                let piece = renderer.render(s.project(), at, 64)[0].clone();
+                out.extend(piece);
+            }
+            out[from..to].to_vec()
+        };
+        let whole = render(s.project(), 0, 1500)[0].clone();
+        assert!(differs(&whole, &played(&s, 0, 1500)) < 1e-4);
+
+        s.execute(Command::SetLoopEnd { at: Some(600) }).unwrap();
+        let whole = render(s.project(), 0, 600)[0].clone();
+        // The 8th echo comes at 660, which is 60 in the next loop.
+        assert!(whole[50..100].iter().any(|v| v.abs() > 1e-3), "the tail wraps into the start");
+        // Once playback has run longer than the echo's tail (1120 frames, almost two loops), each loop sounds
+        // like the exported one.
+        assert!(differs(&whole, &played(&s, 1800, 2400)) < 1e-4);
     }
 }

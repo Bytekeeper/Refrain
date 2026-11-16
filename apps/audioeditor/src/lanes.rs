@@ -319,26 +319,16 @@ impl Editor {
         {
             ranges.push((None, d.start, d.end, None));
         }
+        let tail = lane.effect.tail(rate);
+        if tail > 0 {
+            for &(_, _, end, _) in &ranges {
+                self.draw_tail(&painter, lane_left, body, end, tail, color);
+            }
+        }
         for (id, start, end, gain) in ranges {
             let selected = id.is_some() && id == self.selected_range;
             for (x0, x1) in self.range_spans(lane_left, start, end) {
                 let area = Rect::from_x_y_ranges(x0..=x1, body.y_range());
-                let lead = self.px_of(lane.effect.lead_in(rate));
-                let tail = self.px_of(lane.effect.tail(rate));
-                if lead > 0.0 {
-                    painter.rect_filled(
-                        Rect::from_x_y_ranges((x0 - lead)..=x0, body.y_range()),
-                        0.0,
-                        color.gamma_multiply(0.12),
-                    );
-                }
-                if tail > 0.0 {
-                    painter.rect_filled(
-                        Rect::from_x_y_ranges(x1..=(x1 + tail), body.y_range()),
-                        0.0,
-                        color.gamma_multiply(0.12),
-                    );
-                }
                 painter.rect_filled(area, 3.0, color.gamma_multiply(0.35));
                 let stroke = if selected {
                     Stroke::new(2.0, Color32::WHITE)
@@ -351,6 +341,8 @@ impl Editor {
                     (Effect::Normalize { .. }, None) => String::new(),
                     (Effect::HighPass { hz, .. }, _) => format!("above {}", hz_text(hz)),
                     (Effect::LowPass { hz, .. }, _) => format!("below {}", hz_text(hz)),
+                    (Effect::Echo { delay_ms, .. }, _) => format!("every {delay_ms:.0} ms"),
+                    (Effect::Reverb { seconds, .. }, _) => format!("{seconds:.1} s room"),
                 };
                 if x1 - x0 > 50.0 {
                     painter.text(
@@ -365,8 +357,23 @@ impl Editor {
         }
     }
 
-    fn px_of(&self, frames: Frames) -> f32 {
-        (frames as f64 / self.frames_per_px.max(1e-9)) as f32
+    /// How long the effect keeps sounding after a range, fading out. With the loop on it wraps into the start,
+    /// as it is heard.
+    fn draw_tail(&self, painter: &egui::Painter, lane_left: f32, body: Rect, end: Frames, tail: Frames, color: Color32) {
+        let (from, len) = match self.session.project().loop_end.filter(|l| *l > 0) {
+            Some(l) => (end.rem_euclid(l), tail.min(l)),
+            None => (end, tail),
+        };
+        for (x0, x1) in self.range_spans(lane_left, from, from + len) {
+            let alpha = |x: f32| if x == x0 { 0.3 } else { 0.0 };
+            let mut mesh = egui::Mesh::default();
+            for (x, y) in [(x0, body.top()), (x1, body.top()), (x1, body.bottom()), (x0, body.bottom())] {
+                mesh.colored_vertex(pos2(x, y), color.gamma_multiply(alpha(x)));
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(mesh);
+        }
     }
 
     pub(crate) fn lane_menu_ui(&mut self, ui: &mut Ui, id: LaneId, range: Option<RangeId>) {
@@ -477,6 +484,30 @@ fn hz_text(hz: f32) -> String {
     }
 }
 
+type NumberRow<'a> = (&'static str, &'a mut f32, std::ops::RangeInclusive<f32>, f64, &'static str, usize);
+
+/// One line per number: label and drag field. Returns whether one changed, and whether that change is finished.
+fn number_rows<const N: usize>(ui: &mut Ui, rows: [NumberRow<'_>; N]) -> (bool, bool) {
+    let (mut changed, mut done) = (false, false);
+    for (label, value, range, speed, suffix, decimals) in rows {
+        let response = ui
+            .horizontal(|ui| {
+                ui.label(label);
+                ui.add(
+                    egui::DragValue::new(value)
+                        .range(range)
+                        .speed(speed)
+                        .fixed_decimals(decimals)
+                        .suffix(suffix),
+                )
+            })
+            .inner;
+        changed |= response.changed();
+        done |= response.drag_stopped() || response.lost_focus() || (response.changed() && !response.dragged());
+    }
+    (changed, done)
+}
+
 /// The settings of one effect. Returns whether a value changed, and whether the change is finished, which is
 /// at once for a choice and on release for a dragged number.
 fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
@@ -524,6 +555,25 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
                 }
             });
             (changed, done)
+        }
+        Effect::Echo {
+            delay_ms,
+            fade_db,
+            level_db,
+        } => {
+            let rows = [
+                ("Repeat every", delay_ms, 10.0..=2000.0, 1.0, " ms", 0),
+                ("First echo at", level_db, -40.0..=0.0, 0.1, " dB", 1),
+                ("Each next one", fade_db, 3.0..=40.0, 0.1, " dB quieter", 1),
+            ];
+            number_rows(ui, rows)
+        }
+        Effect::Reverb { seconds, level_db } => {
+            let rows = [
+                ("Dies away in", seconds, 0.1..=10.0, 0.01, " s", 2),
+                ("Volume", level_db, -40.0..=0.0, 0.1, " dB", 1),
+            ];
+            number_rows(ui, rows)
         }
     }
 }
