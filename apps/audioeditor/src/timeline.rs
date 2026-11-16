@@ -68,6 +68,8 @@ impl Editor {
         {
             self.menu = None;
         }
+        // A drop or menu command above changed the project; drawing the copy from before shows the old state for a frame.
+        let project = self.session.project().clone();
 
         let painter = ui.painter_at(rect);
         let text = ui.visuals().text_color();
@@ -682,6 +684,7 @@ impl Editor {
         {
             self.run(Command::SetLoopEnd { at: Some(at) });
         }
+        let project = self.session.project().clone();
         let rate = self.session.project().sample_rate.max(1);
         let painter = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
         let color = ui.visuals().weak_text_color();

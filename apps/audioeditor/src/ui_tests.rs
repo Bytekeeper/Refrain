@@ -648,3 +648,42 @@ fn a_dragged_clip_snaps_to_other_clip_edges() {
     drag(&mut h, from, to);
     assert_eq!(b_start(&h), 24_250);
 }
+
+/// Regression: the frame in which a dragged clip was dropped showed it at its old place.
+#[test]
+fn a_dropped_clip_is_drawn_at_its_new_place_at_once() {
+    let mut e = Editor::default();
+    e.run(Command::AddTrack { name: "A".into() });
+    let track = e.session.project().tracks[0].id;
+    e.run(Command::AddClip {
+        track,
+        source: tone(220.0, 1.0),
+        start: 0,
+    });
+    e.snap = false;
+    e.frames_per_px = 20.0;
+    let mut h = harness(e);
+    // A second layout pass would hide the stale frame here, but the real window does not always run one.
+    h.ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::MIN);
+    let (from, to) = (egui::pos2(300.0, 120.0), egui::pos2(500.0, 120.0));
+    let press = |pos, pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.run();
+    h.event(press(from, true));
+    for step in 1..=10 {
+        h.hover_at(from + (to - from) * (step as f32 / 10.0));
+        h.run();
+    }
+    h.event(press(to, false));
+    h.step();
+    let dropped = h.render().unwrap();
+    h.run();
+    let settled = h.render().unwrap();
+    assert_eq!(h.state().session.project().tracks[0].clips[0].start, 4000);
+    assert!(dropped == settled, "the drop frame differs from the frames after it");
+}
