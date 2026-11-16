@@ -19,8 +19,17 @@ struct View {
 }
 
 impl Editor {
+    /// Track heights count as a change because people set them on purpose; zoom and scroll do not.
     pub(crate) fn has_unsaved_changes(&self) -> bool {
-        !Arc::ptr_eq(&self.saved, self.session.project())
+        !Arc::ptr_eq(&self.saved, self.session.project()) || self.heights() != self.saved_heights
+    }
+
+    /// In track order.
+    fn heights(&self) -> Vec<f32> {
+        let tracks = self.session.project().tracks.iter();
+        tracks
+            .map(|t| self.track_heights.get(&t.id).copied().unwrap_or(crate::TRACK_H))
+            .collect()
     }
 
     pub(crate) fn open(&mut self) {
@@ -33,7 +42,7 @@ impl Editor {
         }
     }
 
-    pub(crate) fn open_from(&mut self, path: &Path) {
+    pub(crate) fn open_from(&mut self, path: &Path) -> bool {
         match open_project(path) {
             Ok((session, view)) => {
                 self.player.stop();
@@ -46,10 +55,15 @@ impl Editor {
                 self.scroll = 0.0;
                 self.track_heights.clear();
                 self.apply_view(view);
+                self.saved_heights = self.heights();
                 self.peaks.retain(|_, wave| wave.source.strong_count() > 0);
                 self.info(format!("Opened {}", path.display()));
+                true
             }
-            Err(e) => self.fail(format!("{}: {e}", path.display())),
+            Err(e) => {
+                self.fail(format!("{}: {e}", path.display()));
+                false
+            }
         }
     }
 
@@ -78,6 +92,7 @@ impl Editor {
         match save_project(self.session.project(), path, Some(&self.view())) {
             Ok(()) => {
                 self.saved = self.session.project().clone();
+                self.saved_heights = self.heights();
                 self.file = Some(path.to_path_buf());
                 self.info(format!("Saved {}", path.display()));
                 true
@@ -89,14 +104,11 @@ impl Editor {
         }
     }
 
-    fn view(&self) -> serde_json::Value {
-        let heights = self.session.project().tracks.iter();
+    pub(crate) fn view(&self) -> serde_json::Value {
         let view = View {
             frames_per_px: self.frames_per_px,
             scroll: self.scroll,
-            track_heights: heights
-                .map(|t| self.track_heights.get(&t.id).copied().unwrap_or(crate::TRACK_H))
-                .collect(),
+            track_heights: self.heights(),
         };
         serde_json::to_value(view).unwrap_or_default()
     }

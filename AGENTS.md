@@ -11,6 +11,7 @@ apps/audioeditor   the egui window. Reads the project, sends commands, shows err
   timeline.rs      drawing: tracks, clips, crossfades, ruler, scrollbar
   mouse.rs         mouse editing: hit-testing and drags
   files.rs         open, save, import, export, unsaved-changes question
+  recovery.rs      copies of unsaved work, restored after a crash
   playback.rs      audio output (cpal)
 crates/engine      project model, commands, undo, mixing, project files, import and export.
                    No UI or OS audio crates.

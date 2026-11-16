@@ -1,6 +1,7 @@
 mod files;
 mod mouse;
 mod playback;
+mod recovery;
 mod timeline;
 #[cfg(test)]
 mod ui_tests;
@@ -14,6 +15,7 @@ use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
 use mouse::{Drag, Menu};
 use playback::Player;
+use recovery::Recovery;
 use timeline::SCROLLBAR_H;
 
 const HEADER_W: f32 = 110.0;
@@ -28,7 +30,12 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 600.0]),
         ..Default::default()
     };
-    eframe::run_native("Audio editor", options, Box::new(|_| Ok(Box::new(Editor::default()))))
+    let mut editor = Editor {
+        recovery: dirs::data_local_dir().map(|dir| Recovery::new(dir.join("audioeditor"))),
+        ..Editor::default()
+    };
+    editor.offer_recovery();
+    eframe::run_native("Audio editor", options, Box::new(|_| Ok(Box::new(editor))))
 }
 
 struct Editor {
@@ -62,6 +69,9 @@ struct Editor {
     file: Option<PathBuf>,
     /// The project as last opened or saved; any other snapshot means unsaved changes.
     saved: Arc<Project>,
+    saved_heights: Vec<f32>,
+    /// Where unsaved work is copied in case the editor does not close normally. None in tests.
+    recovery: Option<Recovery>,
     title: String,
     /// Set after the user agreed to close, so the close request is not asked about again.
     closing: bool,
@@ -80,6 +90,8 @@ impl Default for Editor {
         let session = Session::default();
         Editor {
             saved: session.project().clone(),
+            saved_heights: vec![],
+            recovery: None,
             file: None,
             title: String::new(),
             closing: false,
@@ -107,6 +119,13 @@ impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+
+    /// Only reached once the user agreed to close, so whatever is unsaved was meant to be dropped.
+    fn on_exit(&mut self) {
+        if let Some(recovery) = &mut self.recovery {
+            recovery.remove();
+        }
+    }
 }
 
 impl Editor {
@@ -119,6 +138,7 @@ impl Editor {
         self.guard_close(ui);
         self.update_title(ui);
         self.shortcuts(ui);
+        self.autosave(ui.ctx());
         egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal_wrapped(|ui| self.toolbar(ui)));
         egui::Panel::bottom("status").show(ui, |ui| {
             if self.status.is_empty() {

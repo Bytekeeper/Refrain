@@ -336,6 +336,13 @@ fn save_and_open_track_unsaved_changes() {
     h.state_mut().undo();
     h.run();
     assert_eq!(h.state().title, "song – Audio editor");
+    h.state_mut().track_heights.insert(track, 300.0);
+    h.run();
+    assert!(
+        h.state().title.starts_with("• song"),
+        "a changed track height is unsaved"
+    );
+    h.state_mut().track_heights.insert(track, 250.0);
 
     let mut other = harness(Editor::default());
     other.state_mut().open_from(&project);
@@ -686,4 +693,62 @@ fn a_dropped_clip_is_drawn_at_its_new_place_at_once() {
     let settled = h.render().unwrap();
     assert_eq!(h.state().session.project().tracks[0].clips[0].start, 4000);
     assert!(dropped == settled, "the drop frame differs from the frames after it");
+}
+
+/// Unsaved work is copied aside, a later editor restores it as unsaved work of the same file, and saving removes
+/// the copy.
+#[test]
+fn unsaved_work_is_recovered() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-test-files/recovery");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("tone.wav");
+    audioeditor_engine::export_wav(overlapping().session.project(), &wav, false).unwrap();
+    let project = dir.join("song.audioedit");
+    let copies = dir.join("copies");
+
+    let mut e = Editor {
+        recovery: Some(super::Recovery::named(copies.clone(), "crashed")),
+        ..Editor::default()
+    };
+    e.run(Command::AddTrack { name: "Tone".into() });
+    let track = e.session.project().tracks[0].id;
+    let source = Arc::new(audioeditor_engine::load_source(&wav).unwrap());
+    e.run(Command::AddClip {
+        track,
+        source,
+        start: 0,
+    });
+    assert!(e.save_to(&project));
+    let clip = e.session.project().tracks[0].clips[0].id;
+    e.run(Command::MoveClip {
+        clip,
+        track,
+        start: 4000,
+    });
+    let _crashed = harness(e);
+    let copy = copies.join("recovery-crashed.audioedit");
+    assert!(copy.exists());
+
+    let mut e = Editor {
+        recovery: Some(super::Recovery::named(copies.clone(), "next")),
+        ..Editor::default()
+    };
+    let found = e.recovery.as_ref().unwrap().left_behind();
+    assert_eq!(
+        found.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        std::slice::from_ref(&copy)
+    );
+    assert!(e.restore(&copy));
+    assert!(!copy.exists());
+    assert_eq!(e.file.as_deref(), Some(project.as_path()));
+    assert_eq!(e.session.project().tracks[0].clips[0].start, 4000);
+    let mut h = harness(e);
+    assert!(h.state().title.starts_with("• song"), "{}", h.state().title);
+    let next = copies.join("recovery-next.audioedit");
+    assert!(next.exists(), "the restored work is still only in a copy");
+
+    assert!(h.state_mut().save());
+    h.run();
+    assert!(!next.exists());
 }
