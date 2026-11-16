@@ -41,6 +41,7 @@ impl Editor {
         let height: f32 = (0..=project.tracks.len()).map(|row| self.row_height(row)).sum();
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         let lane_left = rect.left() + HEADER_W;
+        self.lane_w = rect.width() - HEADER_W;
 
         if let Some(pos) = response.hover_pos() {
             let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.x));

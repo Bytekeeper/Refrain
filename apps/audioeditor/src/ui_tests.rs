@@ -836,3 +836,31 @@ fn unused_kept_originals_are_removed() {
     assert!(wav.exists());
     assert!(!kept.join("1-6-gone.wav").exists());
 }
+
+/// Ctrl+D puts a copy right after the clip, or on a new track where the loop leaves no room; F shows everything.
+#[test]
+fn duplicate_and_zoom_to_fit() {
+    let mut e = overlapping();
+    e.selected = Some(e.session.project().tracks[0].clips[1].id);
+    let mut h = harness_sized(e, 400.0);
+    h.key_press_modifiers(Modifiers::COMMAND, egui::Key::D);
+    h.run();
+    let p = h.state().session.project().clone();
+    let starts: Vec<_> = p.tracks[0].clips.iter().map(|c| c.start).collect();
+    assert_eq!(starts, [0, 16_000, 40_000]);
+    assert_eq!(h.state().selected, Some(p.tracks[0].clips[2].id));
+
+    h.state_mut().run(Command::SetLoopEnd { at: Some(64_000) });
+    h.key_press_modifiers(Modifiers::COMMAND, egui::Key::D);
+    h.run();
+    let p = h.state().session.project().clone();
+    assert_eq!(p.tracks.len(), 2, "{}", h.state().status);
+    assert_eq!(p.tracks[1].clips[0].start, 40_000);
+
+    h.key_press(egui::Key::F);
+    h.run();
+    assert_eq!(h.state().scroll, 0.0);
+    let shown = h.state().frames_per_px * f64::from(h.state().lane_w);
+    assert!((64_000.0..70_000.0).contains(&shown), "{shown}");
+    save(&mut h, "duplicate_fit");
+}

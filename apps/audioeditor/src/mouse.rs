@@ -408,7 +408,16 @@ impl Editor {
     pub(crate) fn menu_ui(&mut self, ui: &mut egui::Ui, menu: Menu) {
         match menu {
             Menu::Fade(fade) => self.fade_menu_ui(ui, fade),
-            Menu::Clip(_) | Menu::Track(_) => self.channels_menu_ui(ui, menu),
+            Menu::Clip(clip) => {
+                if ui.add(egui::Button::new("Duplicate").shortcut_text("Ctrl+D")).clicked() {
+                    self.selected = Some(clip);
+                    self.duplicate();
+                    ui.close();
+                }
+                ui.separator();
+                self.channels_menu_ui(ui, menu);
+            }
+            Menu::Track(_) => self.channels_menu_ui(ui, menu),
         }
     }
 

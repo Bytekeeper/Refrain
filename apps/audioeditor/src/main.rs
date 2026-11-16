@@ -26,7 +26,7 @@ const HANDLE: f32 = 6.0;
 /// The working rates offered for a project and for an export.
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const AUDIO_FILES: &[&str] = &["wav", "flac", "mp3", "ogg", "opus", "aif", "aiff", "m4a"];
-const HINTS: &str = "Space: play · middle-drag or scrollbar: move along · Ctrl+wheel: zoom · S: split · \
+const HINTS: &str = "Space: play · middle-drag or scrollbar: move along · Ctrl+wheel: zoom · S: split · Ctrl+D: duplicate · F: fit all · \
     drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim · right-click: fade curves, channels";
 
 fn main() -> eframe::Result {
@@ -62,6 +62,8 @@ struct Editor {
     menu: Option<Menu>,
     /// Track heights the user dragged; other tracks have the default. A view setting, not part of the project.
     track_heights: HashMap<TrackId, f32>,
+    /// The width of the track lanes in the last frame, for zooming to fit.
+    lane_w: f32,
     /// The track whose height is being dragged.
     resizing: Option<TrackId>,
     /// A track volume being dragged, not yet in the project.
@@ -119,6 +121,7 @@ impl Default for Editor {
             snap_guide: None,
             track_heights: HashMap::new(),
             resizing: None,
+            lane_w: 800.0,
             gain_edit: None,
             peaks: HashMap::new(),
         }
@@ -230,6 +233,13 @@ impl Editor {
         }
         ui.label(self.time_text(self.player.position()));
         if ui
+            .button("Fit")
+            .on_hover_text("Zoom to show the whole project. F")
+            .clicked()
+        {
+            self.zoom_to_fit();
+        }
+        if ui
             .selectable_label(self.snap, "Snap")
             .on_hover_text("Dragged clips and edges snap to other clips' edges, 0, the loop end and the play position. Hold Shift while dragging to place freely.")
             .clicked()
@@ -270,7 +280,8 @@ impl Editor {
     }
 
     fn shortcuts(&mut self, ui: &mut Ui) {
-        let (undo, redo, delete, save, save_as, open, export) = ui.input(|i| {
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let (undo, redo, delete, save, save_as, open, export, duplicate, fit) = ui.input(|i| {
             let (cmd, shift) = (i.modifiers.command, i.modifiers.shift);
             (
                 cmd && !shift && i.key_pressed(Key::Z),
@@ -280,8 +291,16 @@ impl Editor {
                 cmd && shift && i.key_pressed(Key::S),
                 cmd && i.key_pressed(Key::O),
                 cmd && i.key_pressed(Key::E),
+                cmd && i.key_pressed(Key::D),
+                !typing && !cmd && i.key_pressed(Key::F),
             )
         });
+        if duplicate {
+            self.duplicate();
+        }
+        if fit {
+            self.zoom_to_fit();
+        }
         if export {
             self.export_again();
         }
@@ -308,6 +327,48 @@ impl Editor {
         if space {
             self.toggle_play();
         }
+    }
+
+    /// Right after the original on its track; where the rules do not allow that, on a new track at the same time.
+    fn duplicate(&mut self) {
+        let Some(id) = self.selected else {
+            self.info("Select a clip to duplicate it.".into());
+            return;
+        };
+        let Some((track, clip)) = self.session.project().clip(id) else {
+            return;
+        };
+        let (track, start, end) = (track.id, clip.start, clip.end());
+        let after = Command::DuplicateClip {
+            clip: id,
+            track: Some(track),
+            start: end,
+        };
+        if self.session.execute(after).is_ok() {
+            self.info(String::new());
+        } else if self.run(Command::DuplicateClip {
+            clip: id,
+            track: None,
+            start,
+        }) {
+            self.info("There is no room after the clip, so the copy is on a new track.".into());
+        } else {
+            return;
+        }
+        // The copy has the newest id.
+        let clips = self.session.project().tracks.iter().flat_map(|t| &t.clips);
+        self.selected = clips.map(|c| c.id).max_by_key(|c| c.0);
+    }
+
+    fn zoom_to_fit(&mut self) {
+        let len = self.session.project().len().max(self.session.project().clips_end());
+        if len <= 0 {
+            return;
+        }
+        // A little room after the end, so the last clip's edge can still be grabbed.
+        let room = (self.lane_w - 24.0).max(50.0);
+        self.frames_per_px = (len as f64 / f64::from(room)).clamp(1.0, 200_000.0);
+        self.scroll = 0.0;
     }
 
     fn toggle_play(&mut self) {

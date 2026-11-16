@@ -55,6 +55,13 @@ pub enum Command {
         clip: ClipId,
         at: Frames,
     },
+    /// A copy with the same trim, fades, volume points and channels, at `start` on `track`, or on a new track
+    /// when `track` is `None`.
+    DuplicateClip {
+        clip: ClipId,
+        track: Option<TrackId>,
+        start: Frames,
+    },
     DeleteClip {
         clip: ClipId,
     },
@@ -280,6 +287,25 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::TrimClip { clip, start, end } => clip_mut(p, clip)?.trim(start, end)?,
         Command::SplitClip { clip, at } => split(p, clip, at)?,
+        Command::DuplicateClip { clip, track, start } => {
+            let mut copy = p.clip(clip).map(|(_, c)| c.clone()).ok_or(Error::NoClip(clip))?;
+            copy.id = ClipId(p.new_id());
+            copy.start = check_placement(start, copy.len)?;
+            match track {
+                Some(track) => track_mut(p, track)?.clips.push(copy),
+                None => {
+                    let id = TrackId(p.new_id());
+                    let name = copy.source.name.clone();
+                    p.tracks.push(Track {
+                        id,
+                        name,
+                        gain_db: 0.0,
+                        muted: false,
+                        clips: vec![copy],
+                    });
+                }
+            }
+        }
         Command::DeleteClip { clip } => {
             take_clip(p, clip)?;
         }
