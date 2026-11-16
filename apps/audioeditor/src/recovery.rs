@@ -97,7 +97,7 @@ impl Editor {
 
     fn write_recovery(&mut self, recovery: &mut Recovery) {
         recovery.last_write = Some(Instant::now());
-        let mut view = self.view();
+        let mut view = self.view(None);
         if let (Some(view), Some(file)) = (view.as_object_mut(), &self.file) {
             view.insert("file".into(), file.to_string_lossy().into());
         }

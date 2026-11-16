@@ -6,7 +6,7 @@ mod model;
 mod project_file;
 mod session;
 
-pub use io::{export_wav, load_source, resample};
+pub use io::{ExportFormat, ExportSettings, export, load_source, resample};
 pub use mix::{clip_amp, edge_fades, fade_gain, overlap_after, overlap_before, render, similarity};
 pub use model::{ChannelMode, Clip, ClipId, Fade, FadeShape, Frames, GainPoint, Project, Source, Track, TrackId};
 pub use project_file::{PROJECT_EXTENSION, open_project, save_project};

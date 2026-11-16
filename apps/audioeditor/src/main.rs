@@ -1,3 +1,4 @@
+mod export;
 mod files;
 mod mouse;
 mod playback;
@@ -13,6 +14,7 @@ use std::sync::{Arc, Weak};
 use audioeditor_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
+use export::ExportTarget;
 use mouse::{Drag, Menu};
 use playback::Player;
 use recovery::Recovery;
@@ -21,6 +23,8 @@ use timeline::SCROLLBAR_H;
 const HEADER_W: f32 = 110.0;
 const TRACK_H: f32 = 110.0;
 const HANDLE: f32 = 6.0;
+/// The working rates offered for a project and for an export.
+const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const AUDIO_FILES: &[&str] = &["wav", "flac", "mp3", "ogg", "opus", "aif", "aiff", "m4a"];
 const HINTS: &str = "Space: play · middle-drag or scrollbar: move along · Ctrl+wheel: zoom · S: split · \
     drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim · right-click: fade curves, channels";
@@ -70,6 +74,9 @@ struct Editor {
     /// The project as last opened or saved; any other snapshot means unsaved changes.
     saved: Arc<Project>,
     saved_heights: Vec<f32>,
+    export_target: ExportTarget,
+    saved_export: ExportTarget,
+    export_open: bool,
     /// Where unsaved work is copied in case the editor does not close normally. None in tests.
     recovery: Option<Recovery>,
     title: String,
@@ -91,6 +98,9 @@ impl Default for Editor {
         Editor {
             saved: session.project().clone(),
             saved_heights: vec![],
+            export_target: ExportTarget::default(),
+            saved_export: ExportTarget::default(),
+            export_open: false,
             recovery: None,
             file: None,
             title: String::new(),
@@ -139,6 +149,7 @@ impl Editor {
         self.update_title(ui);
         self.shortcuts(ui);
         self.autosave(ui.ctx());
+        self.export_panel(ui.ctx());
         egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal_wrapped(|ui| self.toolbar(ui)));
         egui::Panel::bottom("status").show(ui, |ui| {
             if self.status.is_empty() {
@@ -196,19 +207,19 @@ impl Editor {
                 self.save_as();
             }
             ui.separator();
-            if ui.button("Export stereo WAV…").clicked() {
-                self.export(false);
-            }
             if ui
-                .button("Export mono WAV…")
-                .on_hover_text("Left and right mixed into one channel, as game engines want for sounds placed in space")
+                .button("Export…")
+                .on_hover_text("Format, quality and target file")
                 .clicked()
             {
-                self.export(true);
+                self.export_open = true;
             }
         });
         if ui.button("Import…").clicked() {
             self.import();
+        }
+        if ui.button("Export").on_hover_text(self.export_tooltip()).clicked() {
+            self.export_again();
         }
         self.rate_choice(ui);
         ui.separator();
@@ -258,7 +269,7 @@ impl Editor {
     }
 
     fn shortcuts(&mut self, ui: &mut Ui) {
-        let (undo, redo, delete, save, save_as, open) = ui.input(|i| {
+        let (undo, redo, delete, save, save_as, open, export) = ui.input(|i| {
             let (cmd, shift) = (i.modifiers.command, i.modifiers.shift);
             (
                 cmd && !shift && i.key_pressed(Key::Z),
@@ -267,8 +278,12 @@ impl Editor {
                 cmd && !shift && i.key_pressed(Key::S),
                 cmd && shift && i.key_pressed(Key::S),
                 cmd && i.key_pressed(Key::O),
+                cmd && i.key_pressed(Key::E),
             )
         });
+        if export {
+            self.export_again();
+        }
         if save {
             self.save();
         }
@@ -304,10 +319,8 @@ impl Editor {
 
     /// The project's working rate. Files at other rates are converted to it on import.
     fn rate_choice(&mut self, ui: &mut Ui) {
-        const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
         let project = self.session.project();
         let current = project.sample_rate;
-        let khz = |rate: u32| format!("{} kHz", f64::from(rate) / 1000.0);
         let mut chosen = None;
         ui.add_enabled_ui(!project.is_empty(), |ui| {
             egui::ComboBox::from_id_salt("sample rate")
@@ -417,4 +430,8 @@ impl Editor {
             }
         }
     }
+}
+
+fn khz(rate: u32) -> String {
+    format!("{} kHz", f64::from(rate) / 1000.0)
 }

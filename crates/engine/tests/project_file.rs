@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use audioeditor_engine::{
-    ChannelMode, Command, Fade, FadeShape, GainPoint, Session, Source, export_wav, load_source, open_project, render,
-    save_project,
+    ChannelMode, Command, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Session, Source, export,
+    load_source, open_project, render, save_project,
 };
 
 const RATE: u32 = 8000;
@@ -42,7 +42,7 @@ fn write_wav(path: &Path, freq: f32, secs: f32) {
         start: 0,
     })
     .unwrap();
-    export_wav(s.project(), path, false).unwrap();
+    export(s.project(), &ExportSettings::default(), path).unwrap();
 }
 
 /// Two tracks with a crossfade, free fades, a volume curve, a clip before 0 and a muted, quieter track.
@@ -147,7 +147,11 @@ fn mono_export_mixes_both_sides_into_one_channel() {
     })
     .unwrap();
     let file = dir.join("mono.wav");
-    export_wav(s.project(), &file, true).unwrap();
+    let mono = ExportSettings {
+        mono: true,
+        ..ExportSettings::default()
+    };
+    export(s.project(), &mono, &file).unwrap();
     let back = load_source(&file).unwrap();
     assert_eq!(back.channels.len(), 1);
     assert!(
@@ -251,5 +255,51 @@ fn damaged_files_are_refused() {
     for garbage in [&b""[..], b"{", b"\xff\xfe", b"[1,2,3]"] {
         std::fs::write(&file, garbage).unwrap();
         assert!(open_project(&file).is_err());
+    }
+}
+
+/// Each format reads back at the rate it promises and with the exact length, except MP3. MP3 has no 96 kHz, so it is
+/// written at 48 kHz.
+#[test]
+fn every_export_format_reads_back() {
+    let dir = folder("formats");
+    let rate = 96_000;
+    let tone = (0..rate)
+        .map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin())
+        .collect::<Vec<f32>>();
+    let source = Arc::new(Source {
+        path: None,
+        name: "tone".into(),
+        sample_rate: rate,
+        channels: vec![tone.clone(), tone],
+    });
+    let mut s = Session::default();
+    s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+    let track = s.project().tracks[0].id;
+    s.execute(Command::AddClip {
+        track,
+        source,
+        start: 0,
+    })
+    .unwrap();
+    for format in ExportFormat::ALL {
+        let file = dir.join(format!("mix.{}", format.extension()));
+        let settings = ExportSettings {
+            format,
+            bits: 16,
+            kbps: 160,
+            ..ExportSettings::default()
+        };
+        let written = export(s.project(), &settings, &file).unwrap();
+        let back = load_source(&file).unwrap();
+        let expected = if format == ExportFormat::Mp3 { 48_000 } else { rate };
+        assert_eq!((written, back.sample_rate), (expected, expected), "{format:?}");
+        assert_eq!(back.channels.len(), 2, "{format:?}");
+        if format == ExportFormat::Mp3 {
+            // The silence MP3 adds at the ends: why a loop exported as MP3 gets a gap.
+            assert!(back.frames() > 48_000, "{}", back.frames());
+        } else {
+            assert_eq!(back.frames(), i64::from(rate), "{format:?}");
+        }
     }
 }

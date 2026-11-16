@@ -304,7 +304,7 @@ fn save_and_open_track_unsaved_changes() {
     std::fs::create_dir_all(&dir).unwrap();
     // Saved projects refer to audio files, so the test audio has to exist on disk.
     let wav = dir.join("tone.wav");
-    audioeditor_engine::export_wav(overlapping().session.project(), &wav, false).unwrap();
+    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
     let mut e = Editor::default();
     e.run(Command::AddTrack { name: "Tone".into() });
     let track = e.session.project().tracks[0].id;
@@ -512,7 +512,7 @@ fn dragging_the_line_below_a_track_changes_its_height() {
 #[test]
 fn changing_the_sample_rate_keeps_the_view() {
     let mut h = harness(overlapping());
-    click(&mut h, 185.0, 20.0);
+    click(&mut h, 250.0, 20.0);
     h.get_by_label("48 kHz").click();
     h.run();
     let p = h.state().session.project();
@@ -703,7 +703,7 @@ fn unsaved_work_is_recovered() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let wav = dir.join("tone.wav");
-    audioeditor_engine::export_wav(overlapping().session.project(), &wav, false).unwrap();
+    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
     let project = dir.join("song.audioedit");
     let copies = dir.join("copies");
 
@@ -751,4 +751,45 @@ fn unsaved_work_is_recovered() {
     assert!(h.state_mut().save());
     h.run();
     assert!(!next.exists());
+}
+
+/// The panel warns about MP3 loops; exporting over the audio the project uses continues from the new file; the
+/// target is saved relative to the project.
+#[test]
+fn export_panel_and_overwriting_a_source() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-test-files/export");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("engine.wav");
+    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
+    let mut e = Editor::default();
+    e.import_files(std::slice::from_ref(&wav));
+    assert!(e.run(Command::SetLoopEnd { at: Some(24_000) }));
+    e.export_target.file = Some(wav.clone());
+    e.export_open = true;
+    let mut h = harness_sized(e, 450.0);
+    save(&mut h, "export_panel");
+    h.state_mut().export_target.settings.format = audioeditor_engine::ExportFormat::Mp3;
+    h.run();
+    save(&mut h, "export_panel_mp3_loop");
+    h.state_mut().export_target.settings.format = audioeditor_engine::ExportFormat::Wav;
+    h.run();
+
+    assert!(h.state().uses_file(&wav));
+    h.state_mut().write_export(&wav, true);
+    h.run();
+    let p = h.state().session.project().clone();
+    assert_eq!(p.tracks.len(), 1);
+    assert_eq!(p.tracks[0].clips[0].len, 24_000);
+    assert_eq!(p.loop_end, Some(24_000));
+    assert!(!h.state().session.can_undo());
+    assert!(h.state().title.starts_with("• "), "{}", h.state().title);
+
+    let project = dir.join("song.audioedit");
+    assert!(h.state_mut().save_to(&project));
+    let text = std::fs::read_to_string(&project).unwrap();
+    assert!(text.contains("\"file\": \"engine.wav\""), "{text}");
+    let mut other = Editor::default();
+    assert!(other.open_from(&project));
+    assert_eq!(other.export_target.file.as_deref(), Some(wav.as_path()));
 }

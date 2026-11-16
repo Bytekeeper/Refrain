@@ -3,9 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use audioeditor_engine::{Command, PROJECT_EXTENSION, export_wav, load_source, open_project, save_project};
+use audioeditor_engine::{Command, PROJECT_EXTENSION, load_source, open_project, save_project};
 use rfd::{MessageButtons, MessageDialogResult};
 
+use crate::export::ExportTarget;
 use crate::timeline::{MAX_TRACK_H, MIN_TRACK_H};
 use crate::{AUDIO_FILES, Editor};
 
@@ -16,12 +17,17 @@ struct View {
     scroll: f64,
     /// In track order.
     track_heights: Vec<f32>,
+    /// Its file is relative to the project file when it lies below it.
+    #[serde(default)]
+    export: ExportTarget,
 }
 
 impl Editor {
     /// Track heights count as a change because people set them on purpose; zoom and scroll do not.
     pub(crate) fn has_unsaved_changes(&self) -> bool {
-        !Arc::ptr_eq(&self.saved, self.session.project()) || self.heights() != self.saved_heights
+        !Arc::ptr_eq(&self.saved, self.session.project())
+            || self.heights() != self.saved_heights
+            || self.export_target != self.saved_export
     }
 
     /// In track order.
@@ -54,8 +60,10 @@ impl Editor {
                 self.drag = None;
                 self.scroll = 0.0;
                 self.track_heights.clear();
-                self.apply_view(view);
+                self.export_target = ExportTarget::default();
+                self.apply_view(view, path.parent());
                 self.saved_heights = self.heights();
+                self.saved_export = self.export_target.clone();
                 self.peaks.retain(|_, wave| wave.source.strong_count() > 0);
                 self.info(format!("Opened {}", path.display()));
                 true
@@ -89,10 +97,12 @@ impl Editor {
     }
 
     pub(crate) fn save_to(&mut self, path: &Path) -> bool {
-        match save_project(self.session.project(), path, Some(&self.view())) {
+        let view = self.view(std::path::absolute(path).ok().as_deref().and_then(Path::parent));
+        match save_project(self.session.project(), path, Some(&view)) {
             Ok(()) => {
                 self.saved = self.session.project().clone();
                 self.saved_heights = self.heights();
+                self.saved_export = self.export_target.clone();
                 self.file = Some(path.to_path_buf());
                 self.info(format!("Saved {}", path.display()));
                 true
@@ -104,17 +114,25 @@ impl Editor {
         }
     }
 
-    pub(crate) fn view(&self) -> serde_json::Value {
+    /// With `dir`, the export file is stored relative to it where it can be.
+    pub(crate) fn view(&self, dir: Option<&Path>) -> serde_json::Value {
+        let mut export = self.export_target.clone();
+        if let (Some(dir), Some(file)) = (dir, &mut export.file)
+            && let Ok(relative) = file.strip_prefix(dir)
+        {
+            *file = relative.to_path_buf();
+        }
         let view = View {
             frames_per_px: self.frames_per_px,
             scroll: self.scroll,
             track_heights: self.heights(),
+            export,
         };
         serde_json::to_value(view).unwrap_or_default()
     }
 
     /// A view from a file is checked like any other input; whatever does not fit is left as it is.
-    fn apply_view(&mut self, view: Option<serde_json::Value>) {
+    fn apply_view(&mut self, view: Option<serde_json::Value>, dir: Option<&Path>) {
         let Some(view) = view.and_then(|v| serde_json::from_value::<View>(v).ok()) else {
             return;
         };
@@ -131,6 +149,13 @@ impl Editor {
                     .insert(track.id, height.clamp(MIN_TRACK_H, MAX_TRACK_H));
             }
         }
+        let mut export = view.export;
+        if let (Some(dir), Some(file)) = (dir, &mut export.file)
+            && file.is_relative()
+        {
+            *file = dir.join(&*file);
+        }
+        self.export_target = export;
     }
 
     /// Asks before unsaved changes are lost. Returns whether it is fine to go on.
@@ -188,20 +213,6 @@ impl Editor {
                 self.undo();
                 self.fail(format!("{}: {error}", path.display()));
             }
-        }
-    }
-
-    pub(crate) fn export(&mut self, mono: bool) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("WAV", &["wav"])
-            .set_file_name(if mono { "mix-mono.wav" } else { "mix.wav" })
-            .save_file()
-        else {
-            return;
-        };
-        match export_wav(self.session.project(), &path, mono) {
-            Ok(()) => self.info(format!("Exported {}", path.display())),
-            Err(e) => self.fail(format!("Not exported: {e}")),
         }
     }
 }

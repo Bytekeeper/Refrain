@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use craft_audio::{AudioBuffer, DecodeOptions, EncodeOptions};
+use craft_audio::{AudioBuffer, BitDepth, DecodeOptions, EncodeFormat, EncodeOptions};
 use rubato::audioadapter::Adapter;
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
@@ -74,27 +74,144 @@ pub fn resample(source: &Source, rate: u32) -> Result<Source> {
     })
 }
 
-/// Writes the whole mix as a 24-bit stereo WAV file.
-/// With `mono`, left and right are mixed into one channel, as game engines want for sounds placed in space.
-pub fn export_wav(project: &Project, path: &Path, mono: bool) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    #[default]
+    Wav,
+    Flac,
+    Ogg,
+    Mp3,
+    M4a,
+}
+
+impl ExportFormat {
+    pub const ALL: [ExportFormat; 5] = [Self::Wav, Self::Flac, Self::Ogg, Self::Mp3, Self::M4a];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wav => "WAV",
+            Self::Flac => "FLAC",
+            Self::Ogg => "Ogg Vorbis",
+            Self::Mp3 => "MP3",
+            Self::M4a => "M4A (AAC)",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Flac => "flac",
+            Self::Ogg => "ogg",
+            Self::Mp3 => "mp3",
+            Self::M4a => "m4a",
+        }
+    }
+
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.extension().eq_ignore_ascii_case(ext))
+    }
+
+    /// Lossy formats take a bit rate; the others a bit depth.
+    pub fn is_lossy(self) -> bool {
+        matches!(self, Self::Ogg | Self::Mp3 | Self::M4a)
+    }
+
+    /// The rate a file of this format is written at when `wanted` is asked for. MP3 only has rates up to 48 kHz;
+    /// a rate it divides evenly is preferred, so 88.2 kHz becomes 44.1 kHz.
+    pub fn rate_for(self, wanted: u32) -> u32 {
+        const MP3: [u32; 6] = [48_000, 44_100, 32_000, 24_000, 22_050, 16_000];
+        if self != Self::Mp3 || MP3.contains(&wanted) {
+            return wanted;
+        }
+        MP3.into_iter()
+            .find(|&r| wanted.is_multiple_of(r))
+            .or_else(|| MP3.into_iter().min_by_key(|&r| r.abs_diff(wanted)))
+            .unwrap_or(48_000)
+    }
+}
+
+/// How the mix is written. Values may come from a project file, so `export` checks them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExportSettings {
+    pub format: ExportFormat,
+    /// WAV: 16, 24 or 32 (32 is float). FLAC: 16 or 24.
+    pub bits: u16,
+    /// For the lossy formats.
+    pub kbps: u32,
+    /// Left and right mixed into one channel, as game engines want for sounds placed in space.
+    pub mono: bool,
+    /// `None` is the project rate.
+    pub sample_rate: Option<u32>,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        ExportSettings {
+            format: ExportFormat::Wav,
+            bits: 24,
+            kbps: 192,
+            mono: false,
+            sample_rate: None,
+        }
+    }
+}
+
+/// Writes the whole mix (with the loop on: exactly one loop). Returns the sample rate the file was written at.
+pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Result<u32> {
     if project.is_empty() {
         return Err(Error::Invalid("the project has no audio to export".into()));
     }
+    let format = settings.format;
+    let rate = format.rate_for(settings.sample_rate.unwrap_or(project.sample_rate));
     let frames = usize::try_from(project.len()).map_err(|_| Error::Invalid("the project is too long".into()))?;
     let [left, right] = render(project, 0, frames);
-    let channels = if mono {
+    let mut channels = if settings.mono {
         vec![left.iter().zip(&right).map(|(l, r)| (l + r) * 0.5).collect()]
     } else {
         vec![left, right]
     };
-    let bytes = craft_audio::encode(
-        &AudioBuffer {
+    if rate != project.sample_rate {
+        let mix = Source {
+            path: None,
+            name: "mix".into(),
             sample_rate: project.sample_rate,
             channels,
+        };
+        channels = resample(&mix, rate)?.channels;
+    }
+    let mut options = EncodeOptions::new(match format {
+        ExportFormat::Wav => EncodeFormat::Wav,
+        ExportFormat::Flac => EncodeFormat::Flac,
+        ExportFormat::Ogg => EncodeFormat::Ogg,
+        ExportFormat::Mp3 => EncodeFormat::Mp3,
+        ExportFormat::M4a => EncodeFormat::Aac,
+    });
+    if format.is_lossy() {
+        options = options.with_bitrate(settings.kbps.saturating_mul(1000));
+    } else {
+        let depth = match (format, settings.bits) {
+            (_, 16) => BitDepth::Int16,
+            (_, 24) => BitDepth::Int24,
+            (ExportFormat::Wav, 32) => BitDepth::Float32,
+            (_, bits) => {
+                return Err(Error::Invalid(format!(
+                    "{} cannot be written with {bits} bits",
+                    format.name()
+                )));
+            }
+        };
+        options = options.with_bit_depth(depth).with_dither(depth == BitDepth::Int16);
+    }
+    let bytes = craft_audio::encode(
+        &AudioBuffer {
+            sample_rate: rate,
+            channels,
         },
-        &EncodeOptions::default(),
+        &options,
     )?;
-    write_atomic(path, &bytes)
+    write_atomic(path, &bytes)?;
+    Ok(rate)
 }
 
 /// Writes next to the target and renames, so a full disk never leaves a half-written file behind.
