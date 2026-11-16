@@ -38,7 +38,11 @@ impl Editor {
     pub(crate) fn timeline(&mut self, ui: &mut Ui) {
         let project = self.session.project().clone();
         // One row more than there are tracks: it holds the Add track button and takes dropped clips.
-        let height: f32 = (0..=project.tracks.len()).map(|row| self.row_height(row)).sum();
+        let rows = 0..=project.tracks.len();
+        let height: f32 = rows
+            .map(|row| self.row_height(row) + self.lanes_height(row))
+            .sum::<f32>()
+            + self.mix_height();
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         let lane_left = rect.left() + HEADER_W;
         self.lane_w = rect.width() - HEADER_W;
@@ -61,8 +65,12 @@ impl Editor {
                 });
             }
         }
-        if !self.resize_track(&project, rect, &response) {
+        let selected = self.selected;
+        if !self.resize_track(&project, rect, &response) && !self.lane_mouse(&project, rect, &response) {
             self.handle_mouse(&project, rect, &response);
+        }
+        if self.selected.is_some() && self.selected != selected {
+            self.selected_range = None;
         }
         if let Some(menu) = self.menu
             && response.context_menu(|ui| self.menu_ui(ui, menu)).is_none()
@@ -88,12 +96,14 @@ impl Editor {
                 FontId::proportional(13.0),
                 text,
             );
+            let bottom = row.bottom() + self.lanes_height(i);
             painter.line_segment(
-                [row.left_bottom(), row.right_bottom()],
+                [pos2(row.left(), bottom), pos2(row.right(), bottom)],
                 Stroke::new(1.0, ui.visuals().weak_text_color()),
             );
             self.track_controls(ui, row, track);
         }
+        self.draw_lanes(ui, rect, &project);
         let lanes = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
         let new_row = project.tracks.len();
         let last_row = self.row_rect(rect, new_row);
@@ -103,6 +113,14 @@ impl Editor {
         if !dropping_new && ui.put(add, egui::Button::new("Add track").small()).clicked() {
             let name = format!("Track {}", project.tracks.len() + 1);
             self.run(Command::AddTrack { name });
+        }
+        if !dropping_new {
+            let mix = Rect::from_min_size(add.right_top() + vec2(12.0, 0.0), vec2(60.0, 20.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(mix), |ui| {
+                ui.menu_button("Mix FX", |ui| self.effects_menu_ui(ui, None))
+                    .response
+                    .on_hover_text("Effects on all tracks together, such as normalizing the whole loop");
+            });
         }
         if dropping_new {
             let row = last_row.shrink(2.0);
@@ -260,6 +278,16 @@ impl Editor {
         }
 
         let delete = Rect::from_min_size(pos2(row.left() + 6.0, row.bottom() - 28.0), vec2(24.0, 24.0));
+        let fx = Rect::from_min_size(delete.right_top() + vec2(4.0, 2.0), vec2(56.0, 20.0));
+        let label = match track.effects.len() {
+            0 => "FX".to_string(),
+            n => format!("FX {n}"),
+        };
+        ui.scope_builder(egui::UiBuilder::new().max_rect(fx), |ui| {
+            ui.menu_button(label, |ui| self.effects_menu_ui(ui, Some(track.id)))
+                .response
+                .on_hover_text("Effects on this track: add one, or hide and show its lanes");
+        });
         let response = ui.put(delete, egui::Button::new("")).on_hover_text("Delete this track");
         draw_trash_can(
             ui.painter(),
@@ -795,7 +823,7 @@ impl Editor {
     }
 
     /// Each track keeps the height it was dragged to; the row below all tracks has the default.
-    fn row_height(&self, row: usize) -> f32 {
+    pub(crate) fn row_height(&self, row: usize) -> f32 {
         let track = self.session.project().tracks.get(row).map(|t| t.id);
         track
             .and_then(|t| self.track_heights.get(&t))
@@ -804,7 +832,10 @@ impl Editor {
     }
 
     pub(crate) fn row_rect(&self, rect: Rect, row: usize) -> Rect {
-        let top = rect.top() + (0..row).map(|r| self.row_height(r)).sum::<f32>();
+        let mut top = rect.top() + (0..row).map(|r| self.row_height(r) + self.lanes_height(r)).sum::<f32>();
+        if row >= self.session.project().tracks.len() {
+            top += self.mix_height();
+        }
         Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), self.row_height(row)))
     }
 
@@ -812,7 +843,7 @@ impl Editor {
     pub(crate) fn row_at(&self, rect: Rect, y: f32) -> usize {
         let rows = self.session.project().tracks.len() + 1;
         (0..rows)
-            .find(|&r| y < self.row_rect(rect, r).bottom())
+            .find(|&r| y < self.row_rect(rect, r).bottom() + self.lanes_height(r))
             .unwrap_or(rows - 1)
     }
 

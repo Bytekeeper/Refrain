@@ -1,5 +1,6 @@
 mod export;
 mod files;
+mod lanes;
 mod mouse;
 mod playback;
 mod recovery;
@@ -62,6 +63,13 @@ struct Editor {
     menu: Option<Menu>,
     /// Track heights the user dragged; other tracks have the default. A view setting, not part of the project.
     track_heights: HashMap<TrackId, f32>,
+    /// The effect range being drawn, moved or resized.
+    range_drag: Option<lanes::RangeDrag>,
+    selected_range: Option<audioeditor_engine::RangeId>,
+    /// Tracks whose effect lanes are hidden. A view setting.
+    folded: std::collections::HashSet<TrackId>,
+    /// An effect setting being dragged in its menu, not yet in the project.
+    effect_edit: Option<(audioeditor_engine::LaneId, audioeditor_engine::Effect)>,
     /// The width of the track lanes in the last frame, for zooming to fit.
     lane_w: f32,
     /// The track whose height is being dragged.
@@ -122,6 +130,10 @@ impl Default for Editor {
             track_heights: HashMap::new(),
             resizing: None,
             lane_w: 800.0,
+            range_drag: None,
+            selected_range: None,
+            folded: std::collections::HashSet::new(),
+            effect_edit: None,
             gain_edit: None,
             peaks: HashMap::new(),
         }
@@ -321,7 +333,9 @@ impl Editor {
         if redo {
             self.redo();
         }
-        if delete && let Some(clip) = self.selected {
+        if delete && let Some(range) = self.selected_range.take() {
+            self.run(Command::RemoveEffectRange { range });
+        } else if delete && let Some(clip) = self.selected {
             self.run(Command::DeleteClip { clip });
         }
         if space {

@@ -48,6 +48,8 @@ pub(crate) enum Menu {
     Clip(ClipId),
     /// The channels of all clips on a track; opened from the track header.
     Track(TrackId),
+    /// An effect lane, and the range that was right-clicked in it.
+    Lane(audioeditor_engine::LaneId, Option<audioeditor_engine::RangeId>),
 }
 
 /// The fade whose curve the right-click menu changes.
@@ -418,6 +420,7 @@ impl Editor {
                 self.channels_menu_ui(ui, menu);
             }
             Menu::Track(_) => self.channels_menu_ui(ui, menu),
+            Menu::Lane(lane, range) => self.lane_menu_ui(ui, lane, range),
         }
     }
 
@@ -430,7 +433,7 @@ impl Editor {
                 project.track(id).map(|t| t.clips.iter().collect()).unwrap_or_default(),
             ),
             Menu::Clip(id) => ("Channels", project.clip(id).map(|(_, c)| vec![c]).unwrap_or_default()),
-            Menu::Fade(_) => return,
+            Menu::Fade(_) | Menu::Lane(..) => return,
         };
         ui.label(title);
         if clips.is_empty() {

@@ -864,3 +864,52 @@ fn duplicate_and_zoom_to_fit() {
     assert!((64_000.0..70_000.0).contains(&shown), "{shown}");
     save(&mut h, "duplicate_fit");
 }
+
+/// Effect lanes: draw a range in the mix lane, move and resize a track range, switch a lane off, delete a range.
+#[test]
+fn effect_ranges_are_edited_with_the_mouse() {
+    let mut e = overlapping();
+    let track = e.session.project().tracks[0].id;
+    let normalize = |peak_db| audioeditor_engine::Effect::Normalize { peak_db };
+    e.run(Command::AddEffectLane {
+        track: Some(track),
+        effect: normalize(-1.0),
+    });
+    let lane = e.session.project().tracks[0].effects[0].id;
+    e.run(Command::AddEffectRange {
+        lane,
+        start: 8000,
+        end: 32000,
+    });
+    e.run(Command::AddEffectLane {
+        track: None,
+        effect: normalize(-3.0),
+    });
+    let mut h = harness_sized(e, 400.0);
+    let ranges = |h: &Harness<'_, Editor>| -> Vec<(i64, i64)> {
+        let p = h.state().session.project();
+        let lanes = p.tracks[0].effects.iter().chain(&p.mix_effects);
+        lanes.flat_map(|l| l.ranges.iter().map(|r| (r.start, r.end))).collect()
+    };
+
+    // The track lane is at y 188, the mix lane at y 236; x = 126 + frame / 50.
+    drag(&mut h, egui::pos2(206.0, 236.0), egui::pos2(446.0, 236.0));
+    assert_eq!(ranges(&h), [(8000, 32000), (4000, 16000)]);
+    drag(&mut h, egui::pos2(500.0, 188.0), egui::pos2(550.0, 188.0));
+    assert_eq!(ranges(&h), [(10_500, 34_500), (4000, 16000)]);
+    drag(&mut h, egui::pos2(816.0, 188.0), egui::pos2(786.0, 188.0));
+    assert_eq!(ranges(&h), [(10_500, 33_000), (4000, 16000)]);
+    save(&mut h, "effect_lanes");
+
+    click(&mut h, 40.0, 188.0);
+    assert!(!h.state().session.project().tracks[0].effects[0].enabled);
+    click(&mut h, 300.0, 236.0);
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(ranges(&h), [(10_500, 33_000)]);
+    assert_eq!(
+        h.state().session.project().tracks[0].clips.len(),
+        2,
+        "the selected clip stays"
+    );
+}
