@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::{EffectLane, LaneId};
+
 /// A position or length in sample frames at the project sample rate.
 pub type Frames = i64;
 
@@ -157,6 +159,8 @@ pub struct Track {
     /// Sorted by start. Two clips may overlap, and the overlap is their crossfade. No clip lies
     /// fully inside another, and no point is covered by three clips.
     pub clips: Vec<Clip>,
+    /// Applied to the track's sound from the first lane down, before the track volume.
+    pub effects: Vec<EffectLane>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,6 +172,8 @@ pub struct Project {
     /// crossfaded with what is there. Clips then start in `0..loop_end`.
     pub loop_end: Option<Frames>,
     pub(crate) next_id: u64,
+    /// Applied to the mix of all tracks from the first lane down.
+    pub mix_effects: Vec<EffectLane>,
     /// Audio whose file now lives elsewhere, because the file it was read from was overwritten. Keyed by the
     /// audio, not the path, so audio read later from the new file at the old path is not affected.
     pub(crate) relocated: Vec<(Arc<Source>, PathBuf)>,
@@ -207,8 +213,28 @@ impl Project {
     }
 
     /// The length that is played and exported: the loop, or up to the end of the last clip.
+    /// With a loop exactly one loop; otherwise up to the end of the last clip or the last effect tail.
     pub fn len(&self) -> Frames {
-        self.loop_end.unwrap_or_else(|| self.clips_end())
+        self.loop_end.unwrap_or_else(|| self.clips_end().max(self.tails_end()))
+    }
+
+    fn tails_end(&self) -> Frames {
+        let lanes = self.tracks.iter().flat_map(|t| &t.effects).chain(&self.mix_effects);
+        lanes
+            .filter(|lane| lane.effect.tail(self.sample_rate) > 0)
+            .flat_map(|lane| {
+                lane.ranges
+                    .iter()
+                    .map(|r| r.end.saturating_add(lane.effect.tail(self.sample_rate)))
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The lane with this id, under a track or under the mix.
+    pub fn lane(&self, id: LaneId) -> Option<&EffectLane> {
+        let mut lanes = self.tracks.iter().flat_map(|t| &t.effects).chain(&self.mix_effects);
+        lanes.find(|l| l.id == id)
     }
 
     /// End of the last clip. With a loop, this can be past the loop end.

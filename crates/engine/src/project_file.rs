@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::io::write_atomic;
 use crate::session::check_db;
 use crate::{
-    ChannelMode, Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, Project, Result, Session, Source, Track,
-    TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, LaneId,
+    Project, RangeId, Result, Session, Source, Track, TrackId,
 };
 
 pub const PROJECT_EXTENSION: &str = "audioedit";
@@ -33,6 +33,8 @@ struct ProjectFile {
     tracks: Vec<TrackFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loop_end: Option<Frames>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mix_effects: Vec<LaneFile>,
     /// Settings of the program that edits the project, such as zoom. Stored as they come, never read here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<serde_json::Value>,
@@ -44,6 +46,58 @@ struct TrackFile {
     gain_db: f32,
     muted: bool,
     clips: Vec<ClipFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<LaneFile>,
+}
+
+/// What the effect measures from the audio is not stored: it is measured again when the project opens.
+#[derive(Serialize, Deserialize)]
+struct LaneFile {
+    effect: Effect,
+    enabled: bool,
+    ranges: Vec<RangeFile>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RangeFile {
+    start: Frames,
+    end: Frames,
+}
+
+fn lanes_to_file(lanes: &[EffectLane]) -> Vec<LaneFile> {
+    lanes
+        .iter()
+        .map(|lane| LaneFile {
+            effect: lane.effect,
+            enabled: lane.enabled,
+            ranges: lane
+                .ranges
+                .iter()
+                .map(|r| RangeFile {
+                    start: r.start,
+                    end: r.end,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<EffectLane>> {
+    let mut out = vec![];
+    for file in lanes {
+        let mut lane = EffectLane::new(LaneId(project.new_id()), file.effect)?;
+        lane.enabled = file.enabled;
+        for r in file.ranges {
+            lane.ranges.push(EffectRange {
+                id: RangeId(project.new_id()),
+                start: r.start,
+                end: r.end,
+                gain: 1.0,
+            });
+        }
+        out.push(lane);
+    }
+    Ok(out)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +155,7 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
             gain_db: track.gain_db,
             muted: track.muted,
             clips,
+            effects: lanes_to_file(&track.effects),
         });
     }
     let file = ProjectFile {
@@ -109,6 +164,7 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
         sources,
         tracks,
         loop_end: project.loop_end,
+        mix_effects: lanes_to_file(&project.mix_effects),
         view: view.cloned(),
     };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|e| Error::ProjectFile(e.to_string()))?;
@@ -164,8 +220,14 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
             gain_db,
             muted: track.muted,
             clips,
+            effects: vec![],
         });
+        let effects = lanes_from_file(&mut project, track.effects)?;
+        if let Some(t) = project.tracks.last_mut() {
+            t.effects = effects;
+        }
     }
+    project.mix_effects = lanes_from_file(&mut project, file.mix_effects)?;
     Ok((Session::open(project)?, file.view))
 }
 

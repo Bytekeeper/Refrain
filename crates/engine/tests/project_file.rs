@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use audioeditor_engine::{
-    ChannelMode, Command, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Session, Source, export,
+    ChannelMode, Command, Effect, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Session, Source, export,
     load_source, open_project, render, save_project,
 };
 
@@ -95,6 +95,39 @@ fn edited_project(dir: &Path) -> Session {
     let points = vec![GainPoint { at: 0, db: -3.0 }, GainPoint { at: 8000, db: -12.5 }];
     s.execute(Command::SetGainCurve { clip: clips[0], points }).unwrap();
     s.execute(Command::SetTrackGain { track: t2, db: -6.0 }).unwrap();
+    // A track effect across both clips, a switched-off one below it, and one on the mix.
+    for (track, peak_db) in [(Some(t1), -1.0), (Some(t1), -20.0), (None, -3.0)] {
+        s.execute(Command::AddEffectLane {
+            track,
+            effect: Effect::Normalize { peak_db },
+        })
+        .unwrap();
+    }
+    let lanes: Vec<_> = s.project().tracks[0].effects.iter().map(|l| l.id).collect();
+    s.execute(Command::AddEffectRange {
+        lane: lanes[0],
+        start: 8000,
+        end: 20000,
+    })
+    .unwrap();
+    s.execute(Command::AddEffectRange {
+        lane: lanes[1],
+        start: 0,
+        end: 4000,
+    })
+    .unwrap();
+    s.execute(Command::SetEffectEnabled {
+        lane: lanes[1],
+        enabled: false,
+    })
+    .unwrap();
+    let mix = s.project().mix_effects[0].id;
+    s.execute(Command::AddEffectRange {
+        lane: mix,
+        start: 0,
+        end: 30000,
+    })
+    .unwrap();
     s
 }
 
@@ -120,6 +153,8 @@ fn saved_project_opens_with_the_same_sound() {
     let names: Vec<_> = opened.project().tracks.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["Music", "Quiet"]);
     assert!(!opened.can_undo(), "opening is not an undo step");
+    let lanes = &opened.project().tracks[0].effects;
+    assert_eq!((lanes.len(), lanes[1].enabled), (2, false));
 
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(

@@ -1,6 +1,7 @@
 use std::f32::consts::FRAC_PI_2;
 
-use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project};
+use crate::effects::apply_lane;
+use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
 
 /// Gain of a fade-in at progress `t` (0 = start, 1 = done).
 pub fn fade_gain(shape: FadeShape, t: f32) -> f32 {
@@ -74,41 +75,71 @@ pub fn overlap_after(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Fram
 /// Mixes `frames` stereo frames from timeline position `start`. With a loop end, positions repeat
 /// every loop and audio past the loop end plays again from 0.
 pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] {
+    mix_upto(project, start, frames, project.mix_effects.len())
+}
+
+/// All tracks with their effects and volume, mixed, then the first `lanes` mix effects.
+pub(crate) fn mix_upto(project: &Project, start: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
     let mut out = [vec![0.0; frames], vec![0.0; frames]];
-    let Some(l) = project.loop_end.filter(|l| *l > 0) else {
-        mix_into(project, &mut out, 0, start, frames);
-        return out;
-    };
-    let mut done = 0;
-    while done < frames {
-        let at = start.saturating_add(done as Frames).rem_euclid(l);
-        let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(frames - done);
-        mix_into(project, &mut out, done, at, n);
-        done += n;
+    for track in project.tracks.iter().filter(|t| !t.muted) {
+        let amp = db_to_amp(track.gain_db);
+        let [left, right] = render_track(project, track, start, frames, track.effects.len());
+        let [out_left, out_right] = &mut out;
+        for (o, s) in out_left.iter_mut().zip(left).chain(out_right.iter_mut().zip(right)) {
+            *o += s * amp;
+        }
+    }
+    for lane in project.mix_effects.iter().take(lanes) {
+        apply_lane(lane, project, &mut out, start);
     }
     out
 }
 
-/// Adds timeline frames `from..from + n` to `out` from index `at`. With a loop end, this range must lie in one loop.
-fn mix_into(project: &Project, out: &mut [Vec<f32>; 2], at: usize, from: Frames, n: usize) {
+/// One track's clips and crossfades, then its first `lanes` effects. Without the track volume.
+pub(crate) fn render_track(
+    project: &Project,
+    track: &Track,
+    start: Frames,
+    frames: usize,
+    lanes: usize,
+) -> [Vec<f32>; 2] {
+    let mut out = [vec![0.0; frames], vec![0.0; frames]];
+    match project.loop_end.filter(|l| *l > 0) {
+        None => clips_into(project, track, &mut out, 0, start, frames),
+        Some(l) => {
+            let mut done = 0;
+            while done < frames {
+                let at = start.saturating_add(done as Frames).rem_euclid(l);
+                let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(frames - done);
+                clips_into(project, track, &mut out, done, at, n);
+                done += n;
+            }
+        }
+    }
+    for lane in track.effects.iter().take(lanes) {
+        apply_lane(lane, project, &mut out, start);
+    }
+    out
+}
+
+/// Adds the track's timeline frames `from..from + n` to `out` from index `at`. With a loop end, this range must
+/// lie in one loop.
+fn clips_into(project: &Project, track: &Track, out: &mut [Vec<f32>; 2], at: usize, from: Frames, n: usize) {
     let to = from.saturating_add(Frames::try_from(n).unwrap_or(Frames::MAX));
     let [left, right] = out;
-    for track in project.tracks.iter().filter(|t| !t.muted) {
-        let track_amp = db_to_amp(track.gain_db);
-        for (index, clip) in track.clips.iter().enumerate() {
-            let fades = edge_fades(&track.clips, index, project.loop_end);
-            for shift in loop_shifts(clip, from, to, project.loop_end) {
-                let clip_start = clip.start.saturating_sub(shift);
-                for pos in clip_start.max(from)..clip_start.saturating_add(clip.len).min(to) {
-                    let Ok(i) = usize::try_from(pos - from) else { continue };
-                    let rel = pos - clip_start;
-                    let src = clip.offset.saturating_add(rel);
-                    let amp = track_amp * clip_amp(clip, fades, rel);
-                    let (l, r) = clip.frame(src);
-                    if let (Some(ol), Some(or)) = (left.get_mut(at + i), right.get_mut(at + i)) {
-                        *ol += l * amp;
-                        *or += r * amp;
-                    }
+    for (index, clip) in track.clips.iter().enumerate() {
+        let fades = edge_fades(&track.clips, index, project.loop_end);
+        for shift in loop_shifts(clip, from, to, project.loop_end) {
+            let clip_start = clip.start.saturating_sub(shift);
+            for pos in clip_start.max(from)..clip_start.saturating_add(clip.len).min(to) {
+                let Ok(i) = usize::try_from(pos - from) else { continue };
+                let rel = pos - clip_start;
+                let src = clip.offset.saturating_add(rel);
+                let amp = clip_amp(clip, fades, rel);
+                let (l, r) = clip.frame(src);
+                if let (Some(ol), Some(or)) = (left.get_mut(at + i), right.get_mut(at + i)) {
+                    *ol += l * amp;
+                    *or += r * amp;
                 }
             }
         }
@@ -244,6 +275,7 @@ mod tests {
             gain_db: 0.0,
             muted: false,
             clips,
+            effects: vec![],
         };
         Project {
             sample_rate: 1000,
@@ -251,6 +283,7 @@ mod tests {
             next_id: 10,
             loop_end: None,
             relocated: vec![],
+            mix_effects: vec![],
         }
     }
 

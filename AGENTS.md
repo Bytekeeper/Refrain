@@ -34,7 +34,18 @@ error message, never a crash and never lost work.
   never divide by a sample rate or length that can be zero.
 - A failed command leaves the project unchanged. `Session::execute` edits a copy and only keeps it on success.
 
-## 2. Clean room
+## 2. Non-destructive
+
+Every edit stays editable. Trims, fades, volume curves, crossfades, channels and effects are settings
+stored in the project; the audio is computed from the files whenever it plays or is exported. Nothing
+is ever applied to the audio for good, so a trim can be dragged back out and an effect changed or
+removed later. Results that depend on the audio (a normalize gain, a match) are measured again when
+the audio under them changes, never stored as a fixed number.
+
+Effects live in lanes below a track, or below the mix for effects across all tracks. A lane is one
+effect with its settings and the time ranges where it applies; lanes apply from the top down.
+
+## 3. Clean room
 
 - Learn from how other editors behave and from public specifications. Do not copy code, icons,
   strings or layouts from other products. This applies to Audacity in particular: it is GPL, so
@@ -43,7 +54,7 @@ error message, never a crash and never lost work.
   `ATTRIBUTION.md` in the same change.
 - Check a dependency's licence before adding it: MIT, Apache-2.0, BSD, ISC, zlib, CC0 are fine.
 
-## 3. Time
+## 4. Time
 
 All edit math uses whole sample frames (`i64`) at the project sample rate. No `f64` seconds in the
 model; seconds are only for display.
@@ -57,7 +68,7 @@ or its undo history uses, the original is copied aside first and `Session::reloc
 at the copy, so clips, undo and rate changes keep the original. Saving moves such copies into an
 `originals` folder next to the project file.
 
-## 4. Tests
+## 5. Tests
 
 Test the mixing maths and commands with a few concrete samples. Every crash fix gets a regression
 test that failed before the fix.

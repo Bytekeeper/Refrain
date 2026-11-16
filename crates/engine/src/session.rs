@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::effects::{measure, tidy_lane};
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::{
-    ChannelMode, Clip, ClipId, Error, Fade, FadeShape, Frames, GainPoint, MAX_DB, MIN_DB, Project, Result, Source,
-    Track, TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, LaneId,
+    MAX_DB, MIN_DB, Project, RangeId, Result, Source, Track, TrackId,
 };
 
 const MAX_UNDO: usize = 500;
@@ -54,6 +55,42 @@ pub enum Command {
     SplitClip {
         clip: ClipId,
         at: Frames,
+    },
+    /// A new lane at the bottom of a track's lanes, or of the mix's when `track` is `None`.
+    AddEffectLane {
+        track: Option<TrackId>,
+        effect: Effect,
+    },
+    SetEffect {
+        lane: LaneId,
+        effect: Effect,
+    },
+    /// Off lanes stay in place but do nothing, to compare with and without.
+    SetEffectEnabled {
+        lane: LaneId,
+        enabled: bool,
+    },
+    /// One place up (applied earlier) or down (later).
+    MoveEffectLane {
+        lane: LaneId,
+        down: bool,
+    },
+    RemoveEffectLane {
+        lane: LaneId,
+    },
+    AddEffectRange {
+        lane: LaneId,
+        start: Frames,
+        end: Frames,
+    },
+    /// Moves or resizes a range.
+    SetEffectRange {
+        range: RangeId,
+        start: Frames,
+        end: Frames,
+    },
+    RemoveEffectRange {
+        range: RangeId,
     },
     /// A copy with the same trim, fades, volume points and channels, at `start` on `track`, or on a new track
     /// when `track` is `None`.
@@ -119,9 +156,7 @@ impl Session {
         if project.loop_end.is_some_and(|l| l <= 0) {
             return Err(Error::Invalid("the loop end must be after 0".into()));
         }
-        for track in &mut project.tracks {
-            tidy(track, project.loop_end)?;
-        }
+        settle(&mut project)?;
         Ok(Session {
             project: Arc::new(project),
             undo: vec![],
@@ -137,9 +172,7 @@ impl Session {
     pub fn execute(&mut self, command: Command) -> Result<()> {
         let mut next = Project::clone(&self.project);
         apply(&mut next, command)?;
-        for track in &mut next.tracks {
-            tidy(track, next.loop_end)?;
-        }
+        settle(&mut next)?;
         let previous = std::mem::replace(&mut self.project, Arc::new(next));
         self.undo.push(previous);
         if self.undo.len() > MAX_UNDO {
@@ -208,6 +241,54 @@ fn same_file(a: &Path, b: &Path) -> bool {
     a == b || std::fs::canonicalize(a).is_ok_and(|a| std::fs::canonicalize(b).is_ok_and(|b| a == b))
 }
 
+/// Checks the rules every project keeps after a change, then measures what the effects need from the audio.
+fn settle(p: &mut Project) -> Result<()> {
+    for track in &mut p.tracks {
+        tidy(track, p.loop_end)?;
+        for lane in &mut track.effects {
+            tidy_lane(lane, p.loop_end)?;
+        }
+    }
+    for lane in &mut p.mix_effects {
+        tidy_lane(lane, p.loop_end)?;
+    }
+    measure(p);
+    Ok(())
+}
+
+/// The lanes holding `lane`, under its track or under the mix, and its index there.
+fn lanes_of(p: &mut Project, lane: LaneId) -> Result<(&mut Vec<EffectLane>, usize)> {
+    let lists = p
+        .tracks
+        .iter_mut()
+        .map(|t| &mut t.effects)
+        .chain(std::iter::once(&mut p.mix_effects));
+    for list in lists {
+        if let Some(i) = list.iter().position(|l| l.id == lane) {
+            return Ok((list, i));
+        }
+    }
+    Err(Error::Invalid("no such effect lane".into()))
+}
+
+fn lane_mut(p: &mut Project, lane: LaneId) -> Result<&mut EffectLane> {
+    let (list, i) = lanes_of(p, lane)?;
+    list.get_mut(i)
+        .ok_or_else(|| Error::Invalid("no such effect lane".into()))
+}
+
+fn range_mut(p: &mut Project, range: RangeId) -> Result<&mut EffectRange> {
+    let lanes = p
+        .tracks
+        .iter_mut()
+        .flat_map(|t| &mut t.effects)
+        .chain(&mut p.mix_effects);
+    let mut ranges = lanes.flat_map(|l| &mut l.ranges);
+    ranges
+        .find(|r| r.id == range)
+        .ok_or_else(|| Error::Invalid("no such effect range".into()))
+}
+
 fn apply(p: &mut Project, command: Command) -> Result<()> {
     let wrap = p.loop_end;
     match command {
@@ -219,6 +300,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 gain_db: 0.0,
                 muted: false,
                 clips: vec![],
+                effects: vec![],
             });
         }
         Command::RemoveTrack { track } => {
@@ -283,10 +365,64 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 gain_db: 0.0,
                 muted: false,
                 clips: vec![moved],
+                effects: vec![],
             });
         }
         Command::TrimClip { clip, start, end } => clip_mut(p, clip)?.trim(start, end)?,
         Command::SplitClip { clip, at } => split(p, clip, at)?,
+        Command::AddEffectLane { track, effect } => {
+            let lane = EffectLane::new(LaneId(p.new_id()), effect)?;
+            match track {
+                Some(track) => track_mut(p, track)?.effects.push(lane),
+                None => p.mix_effects.push(lane),
+            }
+        }
+        Command::SetEffect { lane, effect } => lane_mut(p, lane)?.set_effect(effect)?,
+        Command::SetEffectEnabled { lane, enabled } => lane_mut(p, lane)?.enabled = enabled,
+        Command::MoveEffectLane { lane, down } => {
+            let (list, i) = lanes_of(p, lane)?;
+            let j = if down { i.saturating_add(1) } else { i.saturating_sub(1) };
+            if j >= list.len() || j == i {
+                return Err(Error::Invalid(format!(
+                    "the effect is already {}",
+                    if down { "last" } else { "first" }
+                )));
+            }
+            list.swap(i, j);
+        }
+        Command::RemoveEffectLane { lane } => {
+            let (list, i) = lanes_of(p, lane)?;
+            list.remove(i);
+        }
+        Command::AddEffectRange { lane, start, end } => {
+            let id = RangeId(p.new_id());
+            lane_mut(p, lane)?.ranges.push(EffectRange {
+                id,
+                start,
+                end,
+                gain: 1.0,
+            });
+        }
+        Command::SetEffectRange { range, start, end } => {
+            let r = range_mut(p, range)?;
+            (r.start, r.end) = (start, end);
+        }
+        Command::RemoveEffectRange { range } => {
+            let lanes = p
+                .tracks
+                .iter_mut()
+                .flat_map(|t| &mut t.effects)
+                .chain(&mut p.mix_effects);
+            let mut found = false;
+            for lane in lanes {
+                let before = lane.ranges.len();
+                lane.ranges.retain(|r| r.id != range);
+                found |= lane.ranges.len() != before;
+            }
+            if !found {
+                return Err(Error::Invalid("no such effect range".into()));
+            }
+        }
         Command::DuplicateClip { clip, track, start } => {
             let mut copy = p.clip(clip).map(|(_, c)| c.clone()).ok_or(Error::NoClip(clip))?;
             copy.id = ClipId(p.new_id());
@@ -302,6 +438,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                         gain_db: 0.0,
                         muted: false,
                         clips: vec![copy],
+                        effects: vec![],
                     });
                 }
             }
@@ -479,6 +616,15 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
         clip.source = source;
     }
     p.loop_end = p.loop_end.map(|l| scale(l).max(1));
+    let lanes = p
+        .tracks
+        .iter_mut()
+        .flat_map(|t| &mut t.effects)
+        .chain(&mut p.mix_effects);
+    for range in lanes.flat_map(|l| &mut l.ranges) {
+        range.start = scale(range.start);
+        range.end = scale(range.end).max(range.start.saturating_add(1));
+    }
     p.sample_rate = rate;
     Ok(())
 }
