@@ -250,6 +250,7 @@ mod tests {
             tracks: vec![track],
             next_id: 10,
             loop_end: None,
+            relocated: vec![],
         }
     }
 

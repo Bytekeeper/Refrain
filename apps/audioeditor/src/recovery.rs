@@ -1,4 +1,5 @@
-//! Recovery copies of unsaved work, so a crash or power cut loses at most the last half minute.
+//! Recovery copies of unsaved work, so a crash or power cut loses at most the last half minute, and the kept
+//! originals of audio files an export overwrote.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,9 +12,12 @@ use crate::Editor;
 
 const EVERY: Duration = Duration::from_secs(30);
 const PREFIX: &str = "recovery-";
+const ORIGINALS: &str = "originals";
 
 pub(crate) struct Recovery {
     dir: PathBuf,
+    /// Starts the names of this window's files.
+    tag: String,
     /// This window's copy. Copies with other names were left by editors that did not close normally.
     file: PathBuf,
     /// The project last written to `file`, while the file exists.
@@ -30,6 +34,7 @@ impl Recovery {
         let file = dir.join(format!("{PREFIX}{name}.{PROJECT_EXTENSION}"));
         Recovery {
             dir,
+            tag: name.to_string(),
             file,
             written: None,
             last_write: None,
@@ -59,6 +64,55 @@ impl Recovery {
             let _ = std::fs::remove_file(&self.file);
         }
     }
+
+    pub(crate) fn originals_dir(&self) -> PathBuf {
+        self.dir.join(ORIGINALS)
+    }
+
+    /// Unique, and ends with the original name so it can be given back when the copy moves next to a project.
+    pub(crate) fn kept_path(&self, name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        self.originals_dir().join(format!("{}-{nanos}-{name}", self.tag))
+    }
+
+    /// At a normal close nothing of this window needs its kept originals any more.
+    pub(crate) fn remove_kept_originals(&self) {
+        let Ok(entries) = std::fs::read_dir(self.originals_dir()) else {
+            return;
+        };
+        let mine = format!("{}-", self.tag);
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&mine)) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// The name a kept original had before it was kept.
+fn given_name(kept: &Path) -> String {
+    let name = kept
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.splitn(3, '-').nth(2).map_or(name.clone(), str::to_string)
+}
+
+/// The audio files a project file names, read without loading any audio.
+fn files_named_in(project_file: &Path) -> Vec<PathBuf> {
+    let Ok(bytes) = std::fs::read(project_file) else {
+        return vec![];
+    };
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let sources = json.get("sources").and_then(|s| s.as_array());
+    sources
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn is_recovery(path: &Path) -> bool {
@@ -143,9 +197,84 @@ impl Editor {
                 _ => continue,
             }
             if self.restore(&copy) {
-                return;
+                break;
             }
         }
+        self.remove_unused_originals();
+    }
+
+    /// Kept originals that neither the open project nor any recovery copy uses are left over from a crash.
+    pub(crate) fn remove_unused_originals(&self) {
+        let Some(recovery) = &self.recovery else {
+            return;
+        };
+        let project = self.session.project();
+        let mut used: Vec<PathBuf> = project
+            .sources()
+            .iter()
+            .filter_map(|s| project.file_of(s))
+            .map(Path::to_path_buf)
+            .collect();
+        for (copy, _) in recovery.left_behind() {
+            used.extend(files_named_in(&copy));
+        }
+        let used: Vec<_> = used.iter().filter_map(|f| f.file_name()).collect();
+        let Ok(entries) = std::fs::read_dir(recovery.originals_dir()) else {
+            return;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.file_name().is_some_and(|n| !used.contains(&n)) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    pub(crate) fn originals_dir(&self) -> Option<PathBuf> {
+        self.recovery.as_ref().map(Recovery::originals_dir)
+    }
+
+    /// Kept originals the project uses move into an `originals` folder next to the project file, so the project
+    /// stays complete wherever it is copied.
+    pub(crate) fn take_originals_along(&mut self, project_file: &Path) -> std::io::Result<()> {
+        let Some(kept_dir) = self.originals_dir() else {
+            return Ok(());
+        };
+        let project = self.session.project().clone();
+        let mut kept: Vec<PathBuf> = project
+            .sources()
+            .iter()
+            .filter_map(|s| project.file_of(s))
+            .filter(|f| f.starts_with(&kept_dir))
+            .map(Path::to_path_buf)
+            .collect();
+        kept.sort();
+        kept.dedup();
+        let dir = std::path::absolute(project_file)?.parent().map(|d| d.join(ORIGINALS));
+        let Some(dir) = dir else {
+            return Ok(());
+        };
+        for file in kept {
+            std::fs::create_dir_all(&dir)?;
+            let name = given_name(&file);
+            let mut target = dir.join(&name);
+            let mut n = 2;
+            while target.exists() {
+                let path = Path::new(&name);
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let ext = path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                target = dir.join(format!("{stem} ({n}){ext}"));
+                n += 1;
+            }
+            std::fs::copy(&file, &target)?;
+            self.session.relocate(&file, &target);
+        }
+        Ok(())
     }
 
     /// Opens a recovery copy as unsaved work of the project it came from, and deletes the copy.

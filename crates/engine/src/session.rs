@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::io::{load_source, resample};
@@ -160,6 +161,44 @@ impl Session {
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+
+    /// Whether the project or any step of its undo history reads audio from `path`.
+    pub fn uses_file(&self, path: &Path) -> bool {
+        let mut snapshots = std::iter::once(&self.project).chain(&self.undo).chain(&self.redo);
+        snapshots.any(|p| {
+            p.sources()
+                .iter()
+                .any(|s| p.file_of(s).is_some_and(|f| same_file(f, path)))
+        })
+    }
+
+    /// The audio stored in `from` is now stored in `to`, in the project and the whole undo history. Not an undo
+    /// step: it records where files are, not an edit.
+    pub fn relocate(&mut self, from: &Path, to: &Path) {
+        let snapshots = std::iter::once(&mut self.project)
+            .chain(&mut self.undo)
+            .chain(&mut self.redo);
+        for snapshot in snapshots {
+            let moved: Vec<Arc<Source>> = snapshot
+                .sources()
+                .into_iter()
+                .filter(|s| snapshot.file_of(s).is_some_and(|f| same_file(f, from)))
+                .cloned()
+                .collect();
+            if moved.is_empty() {
+                continue;
+            }
+            let mut next = Project::clone(snapshot);
+            next.relocated.retain(|(s, _)| !moved.iter().any(|m| Arc::ptr_eq(s, m)));
+            next.relocated.extend(moved.into_iter().map(|s| (s, to.to_path_buf())));
+            *snapshot = Arc::new(next);
+        }
+    }
+}
+
+/// The same path, or two spellings of one existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || std::fs::canonicalize(a).is_ok_and(|a| std::fs::canonicalize(b).is_ok_and(|b| a == b))
 }
 
 fn apply(p: &mut Project, command: Command) -> Result<()> {
@@ -378,12 +417,16 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
     };
     // Keyed by the old source, which the map keeps alive so its address is not reused meanwhile.
     let mut converted: HashMap<usize, (Arc<Source>, Arc<Source>)> = HashMap::new();
+    // Converted audio is read from where its file is now, so the old relocations are no longer needed.
+    let relocated = std::mem::take(&mut p.relocated);
     for clip in p.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
         let key = Arc::as_ptr(&clip.source) as usize;
         let source = match converted.get(&key) {
             Some((_, new)) => new.clone(),
             None => {
-                let original = match &clip.source.path {
+                let moved = relocated.iter().find(|(s, _)| Arc::ptr_eq(s, &clip.source));
+                let file = moved.map(|(_, f)| f.as_path()).or(clip.source.path.as_deref());
+                let original = match file {
                     Some(path) => Arc::new(
                         load_source(path)
                             .map_err(|e| Error::Invalid(format!("cannot read {} again: {e}", path.display())))?,

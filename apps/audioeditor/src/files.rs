@@ -97,6 +97,12 @@ impl Editor {
     }
 
     pub(crate) fn save_to(&mut self, path: &Path) -> bool {
+        if let Err(e) = self.take_originals_along(path) {
+            self.fail(format!(
+                "Not saved: cannot copy the kept original audio next to the project: {e}"
+            ));
+            return false;
+        }
         let view = self.view(std::path::absolute(path).ok().as_deref().and_then(Path::parent));
         match save_project(self.session.project(), path, Some(&view)) {
             Ok(()) => {

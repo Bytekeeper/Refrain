@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// A position or length in sample frames at the project sample rate.
@@ -168,9 +168,29 @@ pub struct Project {
     /// crossfaded with what is there. Clips then start in `0..loop_end`.
     pub loop_end: Option<Frames>,
     pub(crate) next_id: u64,
+    /// Audio whose file now lives elsewhere, because the file it was read from was overwritten. Keyed by the
+    /// audio, not the path, so audio read later from the new file at the old path is not affected.
+    pub(crate) relocated: Vec<(Arc<Source>, PathBuf)>,
 }
 
 impl Project {
+    /// Where the audio is stored on disk now.
+    pub fn file_of<'a>(&'a self, source: &'a Arc<Source>) -> Option<&'a Path> {
+        let moved = self.relocated.iter().find(|(s, _)| Arc::ptr_eq(s, source));
+        moved.map(|(_, file)| file.as_path()).or(source.path.as_deref())
+    }
+
+    /// Every distinct piece of audio the clips use.
+    pub fn sources(&self) -> Vec<&Arc<Source>> {
+        let mut found: Vec<&Arc<Source>> = vec![];
+        for clip in self.tracks.iter().flat_map(|t| &t.clips) {
+            if !found.iter().any(|s| Arc::ptr_eq(s, &clip.source)) {
+                found.push(&clip.source);
+            }
+        }
+        found
+    }
+
     pub(crate) fn new_id(&mut self) -> u64 {
         self.next_id = self.next_id.saturating_add(1);
         self.next_id

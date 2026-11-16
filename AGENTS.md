@@ -52,6 +52,11 @@ A project has one working sample rate. Audio at another rate is converted to it 
 (`engine::resample`); the files on disk are never changed. Changing the project rate converts again
 from the files, not from already converted audio.
 
+The only file the editor overwrites is an export target the user chose. When that is audio the project
+or its undo history uses, the original is copied aside first and `Session::relocate` points the audio
+at the copy, so clips, undo and rate changes keep the original. Saving moves such copies into an
+`originals` folder next to the project file.
+
 ## 4. Tests
 
 Test the mixing maths and commands with a few concrete samples. Every crash fix gets a regression

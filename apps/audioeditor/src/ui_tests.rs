@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use audioeditor_engine::{Command, Source};
+use audioeditor_engine::{Command, Session, Source};
 use egui::{Event, Modifiers, MouseWheelSource, MouseWheelUnit, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -753,8 +753,8 @@ fn unsaved_work_is_recovered() {
     assert!(!next.exists());
 }
 
-/// The panel warns about MP3 loops; exporting over the audio the project uses continues from the new file; the
-/// target is saved relative to the project.
+/// The panel warns about MP3 loops. Exporting over audio the project uses keeps the original aside, so the clips,
+/// undo and the next export still use it; saving moves the original next to the project.
 #[test]
 fn export_panel_and_overwriting_a_source() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-test-files/export");
@@ -762,7 +762,10 @@ fn export_panel_and_overwriting_a_source() {
     std::fs::create_dir_all(&dir).unwrap();
     let wav = dir.join("engine.wav");
     audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
-    let mut e = Editor::default();
+    let mut e = Editor {
+        recovery: Some(super::Recovery::named(dir.join("editor"), "test")),
+        ..Editor::default()
+    };
     e.import_files(std::slice::from_ref(&wav));
     assert!(e.run(Command::SetLoopEnd { at: Some(24_000) }));
     e.export_target.file = Some(wav.clone());
@@ -775,21 +778,61 @@ fn export_panel_and_overwriting_a_source() {
     h.state_mut().export_target.settings.format = audioeditor_engine::ExportFormat::Wav;
     h.run();
 
-    assert!(h.state().uses_file(&wav));
-    h.state_mut().write_export(&wav, true);
+    let before = audioeditor_engine::render(h.state().session.project(), 0, 40_000);
+    h.state_mut().write_export(&wav);
     h.run();
-    let p = h.state().session.project().clone();
-    assert_eq!(p.tracks.len(), 1);
-    assert_eq!(p.tracks[0].clips[0].len, 24_000);
-    assert_eq!(p.loop_end, Some(24_000));
-    assert!(!h.state().session.can_undo());
-    assert!(h.state().title.starts_with("• "), "{}", h.state().title);
+    assert!(!h.state().status_error, "{}", h.state().status);
+    assert_eq!(audioeditor_engine::load_source(&wav).unwrap().frames(), 24_000);
+    assert_eq!(
+        audioeditor_engine::render(h.state().session.project(), 0, 40_000),
+        before
+    );
+    assert!(h.state().session.can_undo());
+    let kept = dir.join("editor/originals");
+    assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
+    // A second export over it needs no new copy: the project no longer reads that file.
+    h.state_mut().write_export(&wav);
+    assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
 
     let project = dir.join("song.audioedit");
     assert!(h.state_mut().save_to(&project));
     let text = std::fs::read_to_string(&project).unwrap();
+    assert!(text.contains("\"originals/engine.wav\""), "{text}");
     assert!(text.contains("\"file\": \"engine.wav\""), "{text}");
     let mut other = Editor::default();
     assert!(other.open_from(&project));
     assert_eq!(other.export_target.file.as_deref(), Some(wav.as_path()));
+    assert_eq!(audioeditor_engine::render(other.session.project(), 0, 40_000), before);
+}
+
+/// Kept originals a leftover recovery copy still uses survive the cleanup at start; unused ones go.
+#[test]
+fn unused_kept_originals_are_removed() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-test-files/originals");
+    let _ = std::fs::remove_dir_all(&dir);
+    let kept = dir.join("originals");
+    std::fs::create_dir_all(&kept).unwrap();
+    let wav = kept.join("1-5-engine.wav");
+    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
+    std::fs::write(kept.join("1-6-gone.wav"), b"").unwrap();
+    let mut crashed = Session::default();
+    crashed.execute(Command::AddTrack { name: "t".into() }).unwrap();
+    let track = crashed.project().tracks[0].id;
+    let source = Arc::new(audioeditor_engine::load_source(&wav).unwrap());
+    crashed
+        .execute(Command::AddClip {
+            track,
+            source,
+            start: 0,
+        })
+        .unwrap();
+    audioeditor_engine::save_project(crashed.project(), &dir.join("recovery-1.audioedit"), None).unwrap();
+
+    let e = Editor {
+        recovery: Some(super::Recovery::named(dir.clone(), "2")),
+        ..Editor::default()
+    };
+    e.remove_unused_originals();
+    assert!(wav.exists());
+    assert!(!kept.join("1-6-gone.wav").exists());
 }

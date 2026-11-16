@@ -303,3 +303,44 @@ fn every_export_format_reads_back() {
         }
     }
 }
+
+/// After the file of some audio is overwritten and the original kept elsewhere, a rate change, undo and saving
+/// all use the kept original; audio read afresh from the overwritten path is the new audio.
+#[test]
+fn relocated_audio_is_read_from_its_new_place() {
+    let dir = folder("relocated");
+    let file = dir.join("audio/a.wav");
+    let kept = dir.join("kept.wav");
+    write_wav(&file, 220.0, 1.0);
+    let session = |source| {
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddClip {
+            track,
+            source,
+            start: 0,
+        })
+        .unwrap();
+        s
+    };
+    let mut untouched = session(Arc::new(load_source(&file).unwrap()));
+    let mut s = session(Arc::new(load_source(&file).unwrap()));
+
+    untouched.execute(Command::SetSampleRate { rate: 16_000 }).unwrap();
+    std::fs::copy(&file, &kept).unwrap();
+    write_wav(&file, 330.0, 0.5);
+    s.relocate(&file, &kept);
+    let fresh = Arc::new(load_source(&file).unwrap());
+    assert_eq!(s.project().file_of(&fresh), Some(file.as_path()));
+
+    s.execute(Command::SetSampleRate { rate: 16_000 }).unwrap();
+    assert_eq!(render(s.project(), 0, 16_000), render(untouched.project(), 0, 16_000));
+    s.undo().unwrap();
+    let source = &s.project().tracks[0].clips[0].source;
+    assert_eq!(s.project().file_of(source), Some(kept.as_path()));
+
+    save_project(s.project(), &dir.join("song.audioedit"), None).unwrap();
+    let text = std::fs::read_to_string(dir.join("song.audioedit")).unwrap();
+    assert!(text.contains("kept.wav") && !text.contains("a.wav"), "{text}");
+}

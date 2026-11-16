@@ -1,11 +1,9 @@
 //! The export panel and "export again": one target per project, written with the same settings every time.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use audioeditor_engine::{Command, ExportFormat, ExportSettings, Session, export, load_source};
+use audioeditor_engine::{ExportFormat, ExportSettings, export};
 use egui::{Align2, Order, Ui, vec2};
-use rfd::{MessageButtons, MessageDialogResult};
 
 use crate::{Editor, RATES, khz};
 
@@ -244,15 +242,10 @@ impl Editor {
 
     /// The toolbar button and Ctrl+E: writes the target again, or opens the panel when there is none.
     pub(crate) fn export_again(&mut self) {
-        let Some(path) = self.export_target.file.clone() else {
-            self.export_open = true;
-            return;
-        };
-        let overwrites_source = self.uses_file(&path);
-        if overwrites_source && !confirm_overwrite(&path) {
-            return;
+        match self.export_target.file.clone() {
+            Some(path) => self.write_export(&path),
+            None => self.export_open = true,
         }
-        self.write_export(&path, overwrites_source);
     }
 
     pub(crate) fn export_tooltip(&self) -> String {
@@ -274,85 +267,42 @@ impl Editor {
         }
     }
 
-    pub(crate) fn uses_file(&self, path: &Path) -> bool {
-        let Ok(target) = std::fs::canonicalize(path) else {
-            return false;
-        };
-        let clips = self.session.project().tracks.iter().flat_map(|t| &t.clips);
-        clips
-            .filter_map(|c| c.source.path.as_deref())
-            .any(|p| std::fs::canonicalize(p).is_ok_and(|p| p == target))
-    }
-
-    /// With `overwrites_source`, the clips would point at audio that is gone, so the editor continues from the
-    /// new file instead.
-    pub(crate) fn write_export(&mut self, path: &Path, overwrites_source: bool) {
-        let rate = match export(self.session.project(), &self.export_target.settings, path) {
-            Ok(rate) => rate,
-            Err(e) => {
-                self.fail(format!("Not exported: {e}"));
-                return;
-            }
-        };
-        let summary = self.export_target.summary(rate);
-        if !overwrites_source {
-            self.info(format!("Exported {} ({summary})", path.display()));
+    /// When the target is audio the project uses, that file is copied aside first, so the clips keep their
+    /// audio and every later export starts from the original again.
+    pub(crate) fn write_export(&mut self, path: &Path) {
+        let keeps_original = self.session.uses_file(path);
+        if keeps_original && let Err(e) = self.keep_original(path) {
+            self.fail(format!(
+                "Not exported: cannot keep a copy of the original {}: {e}",
+                path.display()
+            ));
             return;
         }
-        match self.continue_from(path) {
-            Ok(()) => self.info(format!(
-                "Exported {} ({summary}). The project now continues from it; save to keep that.",
-                path.display()
-            )),
-            Err(e) => self.fail(format!("Exported {}, but cannot read it back: {e}", path.display())),
+        match export(self.session.project(), &self.export_target.settings, path) {
+            Ok(rate) => {
+                let summary = self.export_target.summary(rate);
+                let kept = if keeps_original {
+                    " The project keeps using the original audio."
+                } else {
+                    ""
+                };
+                self.info(format!("Exported {} ({summary}).{kept}", path.display()));
+            }
+            Err(e) => self.fail(format!("Not exported: {e}")),
         }
     }
 
-    /// One track holding the file, with a fresh undo history; the loop stays on if it was.
-    fn continue_from(&mut self, path: &Path) -> audioeditor_engine::Result<()> {
-        let source = Arc::new(load_source(path)?);
-        let looped = self.session.project().loop_end.is_some();
-        let mut building = Session::default();
-        building.execute(Command::AddTrack {
-            name: source.name.clone(),
-        })?;
-        let track = building.project().tracks.first().map(|t| t.id);
-        let track = track.ok_or_else(|| audioeditor_engine::Error::Invalid("no track".into()))?;
-        building.execute(Command::AddClip {
-            track,
-            source,
-            start: 0,
-        })?;
-        if looped {
-            let end = building.project().clips_end();
-            building.execute(Command::SetLoopEnd { at: Some(end) })?;
-        }
-        let session = Session::open((**building.project()).clone())?;
-        self.player.stop();
-        self.player.seek(0);
-        self.session = session;
-        self.selected = None;
-        self.drag = None;
-        self.track_heights.clear();
-        self.peaks.retain(|_, wave| wave.source.strong_count() > 0);
+    fn keep_original(&mut self, path: &Path) -> std::io::Result<()> {
+        let recovery = self.recovery.as_ref();
+        let recovery = recovery.ok_or_else(|| std::io::Error::other("there is no folder for it"))?;
+        std::fs::create_dir_all(recovery.originals_dir())?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let copy = recovery.kept_path(&name);
+        std::fs::copy(path, &copy)?;
+        self.session.relocate(path, &copy);
         Ok(())
     }
-}
-
-fn confirm_overwrite(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let answer = rfd::MessageDialog::new()
-        .set_title("Overwrite audio the project uses?")
-        .set_description(format!(
-            "\"{name}\" is audio this project uses. Overwrite it with the export?\n\n\
-             The editor then continues from the new file: one track holding the exported audio. \
-             The undo history starts fresh, because the old clips would point at audio that is gone."
-        ))
-        .set_buttons(MessageButtons::OkCancelCustom("Overwrite".into(), "Cancel".into()))
-        .show();
-    matches!(answer, MessageDialogResult::Ok)
-        || matches!(answer, MessageDialogResult::Custom(label) if label == "Overwrite")
 }

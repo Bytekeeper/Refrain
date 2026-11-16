@@ -75,7 +75,7 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
             let source = match index.get(&key) {
                 Some(&i) => i,
                 None => {
-                    let file = clip.source.path.as_deref().ok_or_else(|| {
+                    let file = project.file_of(&clip.source).ok_or_else(|| {
                         Error::ProjectFile(format!("\"{}\" was not read from a file", clip.source.name))
                     })?;
                     let file = std::path::absolute(file)?;

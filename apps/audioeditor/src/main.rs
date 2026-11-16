@@ -134,6 +134,7 @@ impl eframe::App for Editor {
     fn on_exit(&mut self) {
         if let Some(recovery) = &mut self.recovery {
             recovery.remove();
+            recovery.remove_kept_originals();
         }
     }
 }
