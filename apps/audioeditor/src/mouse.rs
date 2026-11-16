@@ -240,8 +240,9 @@ impl Editor {
         }
     }
 
-    /// Where dragged edges snap to: clip starts and ends on all tracks except `skip`'s, 0, the loop end and the
-    /// play position. Off when snapping is switched off or Shift is held.
+    /// Where dragged edges snap to: clip starts and ends on all tracks except `skip`'s, effect ranges and where
+    /// their tails end except for the range being dragged, 0, the loop end and the play position. Off when
+    /// snapping is switched off or Shift is held.
     pub(crate) fn snap_targets(&self, project: &Project, skip: Option<ClipId>, shift: bool) -> Snap {
         let mut targets = vec![];
         if self.snap && !shift {
@@ -254,6 +255,16 @@ impl Editor {
                 .filter(|c| Some(c.id) != skip)
             {
                 targets.extend([clip.start, clip.end()]);
+            }
+            let dragged = self.range_drag.as_ref().and_then(|d| d.range);
+            let lanes = project.tracks.iter().flat_map(|t| &t.effects).chain(&project.mix_effects);
+            for range in lanes.flat_map(|l| &l.ranges).filter(|r| Some(r.id) != dragged) {
+                targets.extend([range.start, range.end]);
+                let tail = range.effect.tail(project.sample_rate);
+                if tail > 0 {
+                    let done = range.end.saturating_add(tail);
+                    targets.push(project.loop_end.filter(|l| *l > 0).map_or(done, |l| done.rem_euclid(l)));
+                }
             }
         }
         Snap {

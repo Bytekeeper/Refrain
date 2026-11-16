@@ -1,6 +1,6 @@
 //! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
 
-use audioeditor_engine::{Command, Effect, EffectLane, Frames, LaneId, Project, RangeId, TrackId};
+use audioeditor_engine::{Command, Effect, EffectLane, EffectRange, Frames, LaneId, Project, RangeId, TrackId};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
 
 use crate::{Editor, HANDLE, HEADER_W};
@@ -12,7 +12,7 @@ const EFFECT: Color32 = Color32::from_rgb(180, 130, 255);
 pub(crate) struct RangeDrag {
     lane: LaneId,
     /// `None` while a new range is drawn.
-    range: Option<RangeId>,
+    pub(crate) range: Option<RangeId>,
     kind: RangeDragKind,
     start: Frames,
     end: Frames,
@@ -23,6 +23,17 @@ enum RangeDragKind {
     Move { grab: Frames, len: Frames },
     Start,
     End,
+    /// The end of the tail, `frames` after the range end.
+    Tail { frames: Frames },
+}
+
+/// A range as drawn: with a drag applied, or one being drawn (`id` `None`, nothing measured yet).
+struct ShownRange {
+    id: Option<RangeId>,
+    start: Frames,
+    end: Frames,
+    effect: Effect,
+    gain: Option<f32>,
 }
 
 /// One lane on screen.
@@ -91,6 +102,30 @@ impl Editor {
         }
     }
 
+    /// The range's settings as shown: while its tail is dragged, those that give the dragged tail.
+    fn shown_effect(&self, range: &EffectRange) -> Effect {
+        match &self.range_drag {
+            Some(RangeDrag {
+                range: Some(id),
+                kind: RangeDragKind::Tail { frames },
+                ..
+            }) if *id == range.id => range.effect.with_tail(*frames, self.session.project().sample_rate),
+            _ => range.effect,
+        }
+    }
+
+    /// Where the tail after a range ending at `end` is drawn: with a loop it wraps into the start, and it is
+    /// at most one loop long.
+    fn tail_span(&self, end: Frames, tail: Frames) -> (Frames, Frames) {
+        match self.session.project().loop_end.filter(|l| *l > 0) {
+            Some(l) => {
+                let from = end.rem_euclid(l);
+                (from, from + tail.min(l))
+            }
+            None => (end, end + tail),
+        }
+    }
+
     /// The screen spans of a range: with a loop, a range past the loop end also shows at the start.
     fn range_spans(&self, lane_left: f32, start: Frames, end: Frames) -> Vec<(f32, f32)> {
         let mut spans = vec![(self.x_of(lane_left, start), self.x_of(lane_left, end))];
@@ -112,7 +147,7 @@ impl Editor {
             && hover.x >= lane_left
             && matches!(
                 self.range_at(project, row, lane_left, hover),
-                Some((_, Edge::Start | Edge::End))
+                Some((_, Edge::Start | Edge::End | Edge::Tail))
             )
         {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -159,6 +194,9 @@ impl Editor {
                         kind: match edge {
                             Edge::Start => RangeDragKind::Start,
                             Edge::End => RangeDragKind::End,
+                            Edge::Tail => RangeDragKind::Tail {
+                                frames: r.effect.tail(project.sample_rate),
+                            },
                             Edge::Inside => RangeDragKind::Move {
                                 grab: at - r.start,
                                 len: r.end - r.start,
@@ -182,13 +220,14 @@ impl Editor {
         let shift = response.ctx.input(|i| i.modifiers.shift);
         let snap = self.snap_targets(project, None, shift);
         let mut guide = None;
+        let loop_end = project.loop_end.filter(|l| *l > 0);
         if let Some(drag) = &mut self.range_drag {
-            match drag.kind {
-                RangeDragKind::New { anchor } => {
+            match &mut drag.kind {
+                &mut RangeDragKind::New { anchor } => {
                     let to = snap.apply(frame, &mut guide);
                     (drag.start, drag.end) = (anchor.min(to), anchor.max(to));
                 }
-                RangeDragKind::Move { grab, len } => {
+                &mut RangeDragKind::Move { grab, len } => {
                     let start = frame - grab;
                     let snapped = snap.apply(start, &mut guide);
                     let start = if snapped != start {
@@ -200,6 +239,14 @@ impl Editor {
                 }
                 RangeDragKind::Start => drag.start = snap.apply(frame, &mut guide).min(drag.end - 1),
                 RangeDragKind::End => drag.end = snap.apply(frame, &mut guide).max(drag.start + 1),
+                RangeDragKind::Tail { frames } => {
+                    let to = snap.apply(frame, &mut guide) - drag.end;
+                    // With a loop the handle may sit before the range, one loop later.
+                    *frames = match loop_end {
+                        Some(l) => to.rem_euclid(l).max(1),
+                        None => to.max(1),
+                    };
+                }
             }
         }
         if guide.is_some() {
@@ -209,12 +256,23 @@ impl Editor {
             && let Some(drag) = self.range_drag.take()
         {
             let (start, end) = (drag.start, drag.end);
-            match drag.range {
-                Some(range) => {
+            let rate = project.sample_rate;
+            match (drag.range, drag.kind) {
+                (Some(range), RangeDragKind::Tail { frames }) => {
+                    let old = project.lane(drag.lane).and_then(|l| l.ranges.iter().find(|r| r.id == range));
+                    if let Some(old) = old
+                        && old.effect.with_tail(frames, rate) != old.effect
+                    {
+                        let effect = old.effect.with_tail(frames, rate);
+                        self.run(Command::SetEffect { range, effect });
+                    }
+                }
+                (Some(range), _) => {
                     self.run(Command::SetEffectRange { range, start, end });
                 }
-                None if end > start
-                    && self.run(Command::AddEffectRange {
+                (None, _)
+                    if end > start
+                        && self.run(Command::AddEffectRange {
                         lane: drag.lane,
                         start,
                         end,
@@ -225,15 +283,24 @@ impl Editor {
                         .and_then(|r| r.into_iter().find(|r| r.start == start))
                         .map(|r| r.id);
                 }
-                None => {}
+                (None, _) => {}
             }
         }
         true
     }
 
+    /// The range under `pos`, and which part. Range edges win over the end of another range's tail.
     fn range_at(&self, project: &Project, row: LaneRow, lane_left: f32, pos: Pos2) -> Option<(RangeId, Edge)> {
         let lane = project.lane(row.lane)?;
-        lane.ranges.iter().find_map(|r| {
+        let rate = project.sample_rate;
+        let tail_end = |r: &EffectRange| {
+            let tail = self.shown_effect(r).tail(rate);
+            let (_, end) = self.shown_range(lane.id, r.id, r.start, r.end);
+            let (from, to) = self.tail_span(end, tail);
+            (tail > 0 && self.range_spans(lane_left, from, to).iter().any(|(_, x)| (pos.x - x).abs() <= HANDLE))
+                .then_some((r.id, Edge::Tail))
+        };
+        let on_range = lane.ranges.iter().find_map(|r| {
             let (start, end) = self.shown_range(lane.id, r.id, r.start, r.end);
             self.range_spans(lane_left, start, end)
                 .into_iter()
@@ -246,7 +313,12 @@ impl Editor {
                         (pos.x > x0 && pos.x < x1).then_some((r.id, Edge::Inside))
                     }
                 })
-        })
+        });
+        match on_range {
+            Some((id, Edge::Inside)) => lane.ranges.iter().find_map(tail_end).or(Some((id, Edge::Inside))),
+            Some(hit) => Some(hit),
+            None => lane.ranges.iter().find_map(tail_end),
+        }
     }
 
     pub(crate) fn draw_lanes(&mut self, ui: &mut Ui, rect: Rect, project: &Project) {
@@ -303,13 +375,18 @@ impl Editor {
         let body = row.rect.with_min_x(lane_left).shrink2(vec2(0.0, 3.0));
         let painter = painter.with_clip_rect(row.rect.with_min_x(lane_left));
         let color = if lane.enabled { EFFECT } else { Color32::GRAY };
-        let rate = self.session.project().sample_rate;
-        let mut ranges: Vec<(Option<RangeId>, Frames, Frames, Option<f32>)> = lane
+        let mut ranges: Vec<ShownRange> = lane
             .ranges
             .iter()
             .map(|r| {
                 let (start, end) = self.shown_range(lane.id, r.id, r.start, r.end);
-                (Some(r.id), start, end, Some(r.gain))
+                ShownRange {
+                    id: Some(r.id),
+                    start,
+                    end,
+                    effect: self.shown_effect(r),
+                    gain: Some(r.gain),
+                }
             })
             .collect();
         if let Some(d) = &self.range_drag
@@ -317,15 +394,25 @@ impl Editor {
             && d.range.is_none()
             && d.end > d.start
         {
-            ranges.push((None, d.start, d.end, None));
+            ranges.push(ShownRange {
+                id: None,
+                start: d.start,
+                end: d.end,
+                effect: lane.effect,
+                gain: None,
+            });
         }
-        let tail = lane.effect.tail(rate);
-        if tail > 0 {
-            for &(_, _, end, _) in &ranges {
-                self.draw_tail(&painter, lane_left, body, end, tail, color);
-            }
+        for r in &ranges {
+            self.draw_tail(&painter, lane_left, body, r.end, r.effect, color);
         }
-        for (id, start, end, gain) in ranges {
+        for ShownRange {
+            id,
+            start,
+            end,
+            effect,
+            gain,
+        } in ranges
+        {
             let selected = id.is_some() && id == self.selected_range;
             for (x0, x1) in self.range_spans(lane_left, start, end) {
                 let area = Rect::from_x_y_ranges(x0..=x1, body.y_range());
@@ -336,7 +423,7 @@ impl Editor {
                     Stroke::new(1.0, color)
                 };
                 painter.rect_stroke(area, 3.0, stroke, egui::StrokeKind::Inside);
-                let label = match (lane.effect, gain) {
+                let label = match (effect, gain) {
                     (Effect::Normalize { .. }, Some(gain)) => format!("{:+.1} dB", 20.0 * gain.max(1e-9).log10()),
                     (Effect::Normalize { .. }, None) => String::new(),
                     (Effect::HighPass { hz, .. }, _) => format!("above {}", hz_text(hz)),
@@ -357,14 +444,20 @@ impl Editor {
         }
     }
 
-    /// How long the effect keeps sounding after a range, fading out. With the loop on it wraps into the start,
-    /// as it is heard.
-    fn draw_tail(&self, painter: &egui::Painter, lane_left: f32, body: Rect, end: Frames, tail: Frames, color: Color32) {
-        let (from, len) = match self.session.project().loop_end.filter(|l| *l > 0) {
-            Some(l) => (end.rem_euclid(l), tail.min(l)),
-            None => (end, tail),
+    /// How long the effect keeps sounding after a range, fading out, with a handle where it is done. An echo
+    /// shows a mark at each repeat. With the loop on it wraps into the start, as it is heard.
+    fn draw_tail(&self, painter: &egui::Painter, lane_left: f32, body: Rect, end: Frames, effect: Effect, color: Color32) {
+        let rate = self.session.project().sample_rate;
+        let tail = effect.tail(rate);
+        if tail <= 0 {
+            return;
+        }
+        let (from, to) = self.tail_span(end, tail);
+        let delay = match effect {
+            Effect::Echo { delay_ms, .. } => (f64::from(delay_ms) * f64::from(rate) / 1000.0).round() as Frames,
+            _ => 0,
         };
-        for (x0, x1) in self.range_spans(lane_left, from, from + len) {
+        for (x0, x1) in self.range_spans(lane_left, from, to) {
             let alpha = |x: f32| if x == x0 { 0.3 } else { 0.0 };
             let mut mesh = egui::Mesh::default();
             for (x, y) in [(x0, body.top()), (x1, body.top()), (x1, body.bottom()), (x0, body.bottom())] {
@@ -373,6 +466,17 @@ impl Editor {
             mesh.add_triangle(0, 1, 2);
             mesh.add_triangle(0, 2, 3);
             painter.add(mesh);
+            if delay > 0 {
+                let per_px = (x1 - x0) / (to - from).max(1) as f32;
+                let marks = (1..).map(|k| x0 + (k * delay) as f32 * per_px).take_while(|x| *x < x1 - 1.0);
+                for x in marks {
+                    painter.line_segment(
+                        [pos2(x, body.center().y - 4.0), pos2(x, body.center().y + 4.0)],
+                        Stroke::new(1.0, color.gamma_multiply(0.6)),
+                    );
+                }
+            }
+            painter.line_segment([pos2(x1, body.top()), pos2(x1, body.bottom())], Stroke::new(2.0, color));
         }
     }
 
@@ -382,18 +486,35 @@ impl Editor {
             ui.close();
             return;
         };
-        ui.label(lane.effect.name());
+        let this_range = range.and_then(|id| lane.ranges.iter().find(|r| r.id == id));
+        ui.label(match this_range {
+            Some(_) => format!("{}: this range", lane.effect.name()),
+            None => format!("{}: all ranges", lane.effect.name()),
+        });
         // While a value is dragged it lives here; the project only changes when it is let go, as one undo step.
         let mut effect = match self.effect_edit {
-            Some((lane, effect)) if lane == id => effect,
-            _ => lane.effect,
+            Some((lane, edited, effect)) if lane == id && edited == range => effect,
+            _ => this_range.map_or(lane.effect, |r| r.effect),
         };
         let (changed, done) = effect_settings(ui, &mut effect);
         if changed {
-            self.effect_edit = Some((id, effect));
+            self.effect_edit = Some((id, range, effect));
         }
-        if done && let Some((lane, effect)) = self.effect_edit.take() {
-            self.run(Command::SetEffect { lane, effect });
+        if done && let Some((lane, edited, effect)) = self.effect_edit.take() {
+            match edited {
+                Some(range) => self.run(Command::SetEffect { range, effect }),
+                None => self.run(Command::SetLaneEffect { lane, effect }),
+            };
+        }
+        if let Some(r) = this_range
+            && lane.ranges.len() > 1
+            && ui.button("Use these settings for all ranges in this lane").clicked()
+        {
+            self.run(Command::SetLaneEffect {
+                lane: id,
+                effect: r.effect,
+            });
+            ui.close();
         }
         ui.separator();
         if let Some(range) = range
@@ -474,6 +595,7 @@ enum Edge {
     Start,
     End,
     Inside,
+    Tail,
 }
 
 fn hz_text(hz: f32) -> String {

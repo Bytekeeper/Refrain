@@ -69,7 +69,11 @@ struct Editor {
     /// Tracks whose effect lanes are hidden. A view setting.
     folded: std::collections::HashSet<TrackId>,
     /// An effect setting being dragged in its menu, not yet in the project.
-    effect_edit: Option<(audioeditor_engine::LaneId, audioeditor_engine::Effect)>,
+    effect_edit: Option<(
+        audioeditor_engine::LaneId,
+        Option<audioeditor_engine::RangeId>,
+        audioeditor_engine::Effect,
+    )>,
     /// The width of the track lanes in the last frame, for zooming to fit.
     lane_w: f32,
     /// The track whose height is being dragged.

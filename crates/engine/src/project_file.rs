@@ -62,6 +62,9 @@ struct LaneFile {
 struct RangeFile {
     start: Frames,
     end: Frames,
+    /// Missing in files from before ranges had their own settings: then the lane's.
+    #[serde(default)]
+    effect: Option<Effect>,
 }
 
 fn lanes_to_file(lanes: &[EffectLane]) -> Vec<LaneFile> {
@@ -76,6 +79,7 @@ fn lanes_to_file(lanes: &[EffectLane]) -> Vec<LaneFile> {
                 .map(|r| RangeFile {
                     start: r.start,
                     end: r.end,
+                    effect: Some(r.effect),
                 })
                 .collect(),
         })
@@ -92,6 +96,7 @@ fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<Ef
                 id: RangeId(project.new_id()),
                 start: r.start,
                 end: r.end,
+                effect: r.effect.unwrap_or(file.effect),
                 gain: 1.0,
             });
         }

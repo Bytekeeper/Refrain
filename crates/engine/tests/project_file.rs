@@ -408,3 +408,29 @@ fn relocated_audio_is_read_from_its_new_place() {
     let text = std::fs::read_to_string(dir.join("song.audioedit")).unwrap();
     assert!(text.contains("kept.wav") && !text.contains("a.wav"), "{text}");
 }
+
+/// Files saved before ranges had their own settings kept them in the lane.
+#[test]
+fn ranges_in_older_files_take_the_lane_settings() {
+    let dir = folder("older");
+    let s = edited_project(&dir);
+    let file = dir.join("song.audioedit");
+    save_project(s.project(), &file, None).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let mut removed = 0;
+    for track in json["tracks"].as_array_mut().unwrap() {
+        for lane in track["effects"].as_array_mut().unwrap() {
+            for range in lane["ranges"].as_array_mut().unwrap() {
+                removed += usize::from(range.as_object_mut().unwrap().remove("effect").is_some());
+            }
+        }
+    }
+    assert!(removed > 0);
+    std::fs::write(&file, json.to_string()).unwrap();
+
+    let (opened, _) = open_project(&file).unwrap();
+    for lane in opened.project().tracks.iter().flat_map(|t| &t.effects) {
+        assert!(lane.ranges.iter().all(|r| r.effect == lane.effect));
+    }
+    assert_same_sound(&s, &opened);
+}

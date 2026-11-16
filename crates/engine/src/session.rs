@@ -61,7 +61,13 @@ pub enum Command {
         track: Option<TrackId>,
         effect: Effect,
     },
+    /// New settings for one range. Ranges drawn later in the lane start with them too.
     SetEffect {
+        range: RangeId,
+        effect: Effect,
+    },
+    /// The same settings for the whole lane: all its ranges and those drawn later.
+    SetLaneEffect {
         lane: LaneId,
         effect: Effect,
     },
@@ -377,7 +383,15 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 None => p.mix_effects.push(lane),
             }
         }
-        Command::SetEffect { lane, effect } => lane_mut(p, lane)?.set_effect(effect)?,
+        Command::SetEffect { range, effect } => {
+            let lanes = p.tracks.iter_mut().flat_map(|t| &mut t.effects).chain(&mut p.mix_effects);
+            let mut lanes = lanes.filter(|l| l.ranges.iter().any(|r| r.id == range));
+            let lane = lanes
+                .next()
+                .ok_or_else(|| Error::Invalid("no such effect range".into()))?;
+            lane.set_range_effect(Some(range), effect)?;
+        }
+        Command::SetLaneEffect { lane, effect } => lane_mut(p, lane)?.set_effect(effect)?,
         Command::SetEffectEnabled { lane, enabled } => lane_mut(p, lane)?.enabled = enabled,
         Command::MoveEffectLane { lane, down } => {
             let (list, i) = lanes_of(p, lane)?;
@@ -396,10 +410,12 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::AddEffectRange { lane, start, end } => {
             let id = RangeId(p.new_id());
-            lane_mut(p, lane)?.ranges.push(EffectRange {
+            let lane = lane_mut(p, lane)?;
+            lane.ranges.push(EffectRange {
                 id,
                 start,
                 end,
+                effect: lane.effect,
                 gain: 1.0,
             });
         }

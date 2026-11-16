@@ -221,12 +221,9 @@ impl Project {
     fn tails_end(&self) -> Frames {
         let lanes = self.tracks.iter().flat_map(|t| &t.effects).chain(&self.mix_effects);
         lanes
-            .filter(|lane| lane.effect.tail(self.sample_rate) > 0)
-            .flat_map(|lane| {
-                lane.ranges
-                    .iter()
-                    .map(|r| r.end.saturating_add(lane.effect.tail(self.sample_rate)))
-            })
+            .flat_map(|lane| &lane.ranges)
+            .filter(|r| r.effect.tail(self.sample_rate) > 0)
+            .map(|r| r.end.saturating_add(r.effect.tail(self.sample_rate)))
             .max()
             .unwrap_or(0)
     }

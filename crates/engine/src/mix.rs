@@ -1,6 +1,6 @@
 use std::f32::consts::FRAC_PI_2;
 
-use crate::EffectLane;
+use crate::{EffectLane, EffectRange};
 use crate::effects::{Memory, apply_lane};
 use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
 
@@ -176,17 +176,17 @@ fn track_with(
 fn lanes_warmup(project: &Project, lanes: &[EffectLane], start: Frames, frames: usize) -> Frames {
     let end = start.saturating_add(Frames::try_from(frames).unwrap_or(Frames::MAX));
     let rate = project.sample_rate;
-    // With a loop every lane counts: what comes before 0 is the end of the loop.
-    let sounds = |l: &EffectLane| {
-        project.loop_end.is_some()
-            || l.ranges
-                .iter()
-                .any(|r| r.start < end && r.end.saturating_add(l.effect.tail(rate)) > start)
+    // With a loop every range counts: what comes before 0 is the end of the loop.
+    let sounds = |r: &EffectRange| {
+        project.loop_end.is_some() || (r.start < end && r.end.saturating_add(r.effect.tail(rate)) > start)
     };
     lanes
         .iter()
-        .filter(|l| l.enabled && sounds(l))
-        .map(|l| l.effect.warmup(rate))
+        .filter(|l| l.enabled)
+        .map(|l| {
+            let ranges = l.ranges.iter().filter(|r| sounds(r));
+            ranges.map(|r| r.effect.warmup(rate)).max().unwrap_or(0)
+        })
         .fold(0, Frames::saturating_add)
 }
 
