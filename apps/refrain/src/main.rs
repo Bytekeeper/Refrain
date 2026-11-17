@@ -1,3 +1,4 @@
+mod effect_menu;
 mod export;
 mod files;
 mod lanes;

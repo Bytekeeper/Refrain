@@ -11,6 +11,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   timeline.rs      drawing: tracks, clips, crossfades, ruler, scrollbar
   mouse.rs         mouse editing: hit-testing and drags
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
+  effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
   files.rs         open, save, import, unsaved-changes question
   export.rs        export panel and "export again" to the project's export target
   recovery.rs      copies of unsaved work, restored after a crash

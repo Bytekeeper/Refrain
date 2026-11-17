@@ -257,12 +257,12 @@ impl Editor {
             }
             if response.lost_focus() {
                 let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                if let Some((track, name)) = self.name_edit.take()
+                if let Some((id, name)) = self.name_edit.take()
                     && !cancelled
                     && !name.trim().is_empty()
-                    && name.trim() != track_name(&self.session, track)
+                    && name.trim() != track.name
                 {
-                    self.run(Command::RenameTrack { track, name });
+                    self.run(Command::RenameTrack { track: id, name });
                 }
             }
         });
@@ -1039,12 +1039,4 @@ fn channel_label(clip: &Clip) -> String {
         ChannelMode::Left => format!("{name} · left only"),
         ChannelMode::Right => format!("{name} · right only"),
     }
-}
-
-fn track_name(session: &refrain_engine::Session, track: TrackId) -> String {
-    session
-        .project()
-        .track(track)
-        .map(|t| t.name.clone())
-        .unwrap_or_default()
 }

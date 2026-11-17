@@ -2,6 +2,7 @@
 
 mod effects;
 mod io;
+mod loudness;
 mod mix;
 mod model;
 mod project_file;
