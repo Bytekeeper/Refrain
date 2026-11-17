@@ -98,7 +98,7 @@ pub enum Command {
     RemoveEffectRange {
         range: RangeId,
     },
-    /// How long a range's effect takes to come in and to go, in frames.
+    /// How long a range's effect takes to come in and to go, in frames; together at most the range.
     SetRangeFades {
         range: RangeId,
         fade_in: Frames,
@@ -443,6 +443,11 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
             fade_out,
         } => {
             let r = range_mut(p, range)?;
+            if fade_in.saturating_add(fade_out) > r.end - r.start {
+                return Err(Error::Invalid(
+                    "the fades together cannot be longer than the range".into(),
+                ));
+            }
             (r.fade_in, r.fade_out) = (fade_in, fade_out);
         }
         Command::RemoveEffectRange { range } => {

@@ -74,6 +74,8 @@ struct Editor {
         Option<refrain_engine::RangeId>,
         refrain_engine::Effect,
     )>,
+    /// A range's fade-in and fade-out being dragged in its menu, in frames, not yet in the project.
+    fade_edit: Option<(refrain_engine::RangeId, Frames, Frames)>,
     /// The width of the track lanes in the last frame, for zooming to fit.
     lane_w: f32,
     /// The track whose height is being dragged.
@@ -138,6 +140,7 @@ impl Default for Editor {
             selected_range: None,
             folded: std::collections::HashSet::new(),
             effect_edit: None,
+            fade_edit: None,
             gain_edit: None,
             peaks: HashMap::new(),
         }

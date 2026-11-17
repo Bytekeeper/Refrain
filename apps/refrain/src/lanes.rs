@@ -133,8 +133,13 @@ impl Editor {
         }
     }
 
-    /// The range's fades as shown, with a fade drag applied.
+    /// The range's fades as shown, with a fade drag or a menu edit applied.
     fn shown_fades(&self, range: &EffectRange) -> (Frames, Frames) {
+        if let Some((id, fade_in, fade_out)) = self.fade_edit
+            && id == range.id
+        {
+            return (fade_in, fade_out);
+        }
         match &self.range_drag {
             Some(d) if d.range == Some(range.id) => match d.kind {
                 RangeDragKind::FadeIn { frames } => (frames, range.fade_out),
@@ -279,6 +284,10 @@ impl Editor {
         let mut guide = None;
         let loop_end = project.loop_end.filter(|l| *l > 0);
         if let Some(drag) = &mut self.range_drag {
+            let other_fades = drag
+                .range
+                .and_then(|id| project.lane(drag.lane)?.ranges.iter().find(|r| r.id == id))
+                .map_or((0, 0), |r| (r.fade_in, r.fade_out));
             match &mut drag.kind {
                 &mut RangeDragKind::New { anchor } => {
                     let to = snap.apply(frame, &mut guide);
@@ -297,15 +306,16 @@ impl Editor {
                 RangeDragKind::Start => drag.start = snap.apply(frame, &mut guide).min(drag.end - 1),
                 RangeDragKind::End => drag.end = snap.apply(frame, &mut guide).max(drag.start + 1),
                 // With a loop the handle of a range past the loop end may sit at the start.
+                // A fade stops at the other one: past it the effect would never be fully in.
                 RangeDragKind::FadeIn { frames } => {
                     let to = snap.apply(frame, &mut guide) - drag.start;
                     let to = loop_end.map_or(to, |l| to.rem_euclid(l));
-                    *frames = to.clamp(0, drag.end - drag.start);
+                    *frames = to.clamp(0, drag.end - drag.start - other_fades.1);
                 }
                 RangeDragKind::FadeOut { frames } => {
                     let to = drag.end - snap.apply(frame, &mut guide);
                     let to = loop_end.map_or(to, |l| to.rem_euclid(l));
-                    *frames = to.clamp(0, drag.end - drag.start);
+                    *frames = to.clamp(0, drag.end - drag.start - other_fades.0);
                 }
                 RangeDragKind::Tail { frames } => {
                     let to = snap.apply(frame, &mut guide) - drag.end;
@@ -674,6 +684,9 @@ impl Editor {
                 None => self.run(Command::SetLaneEffect { lane, effect }),
             };
         }
+        if let Some(r) = this_range {
+            self.fade_rows(ui, r, project.sample_rate);
+        }
         if let Some(r) = this_range
             && lane.ranges.len() > 1
             && ui.button("Use these settings for all ranges in this lane").clicked()
@@ -716,6 +729,36 @@ impl Editor {
         if ui.button("Remove this effect").clicked() {
             self.run(Command::RemoveEffectLane { lane: id });
             ui.close();
+        }
+    }
+
+    /// How long the range's effect takes to come in and to go, in ms; together at most the range.
+    fn fade_rows(&mut self, ui: &mut Ui, r: &EffectRange, rate: u32) {
+        let per_ms = f64::from(rate.max(1)) / 1000.0;
+        let (fade_in, fade_out) = self.shown_fades(r);
+        let len = r.end - r.start;
+        let ms = |frames: Frames| (frames as f64 / per_ms) as f32;
+        let (mut in_ms, mut out_ms) = (ms(fade_in), ms(fade_out));
+        let speed = (f64::from(ms(len)) / 400.0).max(0.1);
+        let rows = [
+            ("Fade in", &mut in_ms, 0.0..=ms(len - fade_out), speed, " ms", 0),
+            ("Fade out", &mut out_ms, 0.0..=ms(len - fade_in), speed, " ms", 0),
+        ];
+        let (changed, done) = number_rows(ui, rows);
+        if changed {
+            let frames = |ms: f32| ((f64::from(ms) * per_ms).round() as Frames).clamp(0, len);
+            let fade_in = frames(in_ms);
+            self.fade_edit = Some((r.id, fade_in, frames(out_ms).min(len - fade_in)));
+        }
+        if done
+            && let Some((range, fade_in, fade_out)) = self.fade_edit.take()
+            && (fade_in, fade_out) != (r.fade_in, r.fade_out)
+        {
+            self.run(Command::SetRangeFades {
+                range,
+                fade_in,
+                fade_out,
+            });
         }
     }
 

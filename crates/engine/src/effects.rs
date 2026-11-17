@@ -263,10 +263,13 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Resu
     if lane.ranges.iter().any(|r| r.fade_in < 0 || r.fade_out < 0) {
         return Err(Error::Invalid("a fade cannot be shorter than nothing".into()));
     }
-    // A range made shorter keeps its fades within it.
+    // A range made shorter than its fades shortens both alike.
     for r in &mut lane.ranges {
-        r.fade_in = r.fade_in.min(r.end - r.start);
-        r.fade_out = r.fade_out.min(r.end - r.start);
+        let (len, both) = (r.end - r.start, r.fade_in.saturating_add(r.fade_out));
+        if both > len {
+            r.fade_in = (r.fade_in as f64 * len as f64 / both as f64).floor() as Frames;
+            r.fade_out = len - r.fade_in;
+        }
     }
     if let Some(l) = loop_end {
         if lane
@@ -846,7 +849,13 @@ mod tests {
             left[899]
         );
 
-        // Shortening the range keeps the fades inside it.
+        // The fades cannot pass each other, and a shorter range shortens both alike.
+        let overlapping = Command::SetRangeFades {
+            range,
+            fade_in: 900,
+            fade_out: 200,
+        };
+        assert!(s.execute(overlapping).is_err());
         s.execute(Command::SetEffectRange {
             range,
             start: 0,
@@ -854,7 +863,7 @@ mod tests {
         })
         .unwrap();
         let r = &s.project().lane(lane).unwrap().ranges[0];
-        assert_eq!((r.fade_in, r.fade_out), (300, 200));
+        assert_eq!((r.fade_in, r.fade_out), (200, 100));
     }
 
     #[test]
