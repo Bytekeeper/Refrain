@@ -5,7 +5,8 @@ use refrain_engine::{
     ChannelMode, Clip, ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before,
 };
 
-use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, trash_button, y_of_amp};
+use crate::clips::trash_button;
+use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, y_of_amp};
 use crate::{Editor, HANDLE, HEADER_W};
 
 /// What the mouse is dragging. The project only changes when the drag ends, so one drag is one undo step.

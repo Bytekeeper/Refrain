@@ -1,3 +1,4 @@
+mod clips;
 mod effect_menu;
 mod export;
 mod files;

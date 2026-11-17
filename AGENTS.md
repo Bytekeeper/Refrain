@@ -8,7 +8,8 @@ It is not a DAW. When a feature only makes sense in a DAW (mixer busses, MIDI, p
 ```text
 apps/refrain       the egui window. Reads the project, sends commands, shows errors.
   main.rs          editor state, toolbar, shortcuts
-  timeline.rs      drawing: tracks, clips, crossfades, ruler, scrollbar
+  timeline.rs      the timeline: track rows and headers, ruler, scrollbar, layout
+  clips.rs         drawing one clip and the overlap zone of a crossfade
   mouse.rs         mouse editing: hit-testing and drags
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
