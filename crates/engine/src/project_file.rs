@@ -98,6 +98,7 @@ fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<Ef
                 end: r.end,
                 effect: r.effect.unwrap_or(file.effect),
                 gain: 1.0,
+                limited: false,
             });
         }
         out.push(lane);

@@ -40,7 +40,8 @@ struct ShownRange {
     start: Frames,
     end: Frames,
     effect: Effect,
-    gain: Option<f32>,
+    /// The measured gain, and whether the peak limit held it back.
+    gain: Option<(f32, bool)>,
 }
 
 /// One lane on screen.
@@ -398,7 +399,7 @@ impl Editor {
                     start,
                     end,
                     effect: self.shown_effect(r),
-                    gain: Some(r.gain),
+                    gain: Some((r.gain, r.limited)),
                 }
             })
             .collect();
@@ -437,8 +438,15 @@ impl Editor {
                 };
                 painter.rect_stroke(area, 3.0, stroke, egui::StrokeKind::Inside);
                 let label = match (effect, gain) {
-                    (Effect::Normalize { .. }, Some(gain)) => format!("{:+.1} dB", 20.0 * gain.max(1e-9).log10()),
-                    (Effect::Normalize { .. }, None) => String::new(),
+                    (Effect::Normalize { .. } | Effect::Loudness { .. }, Some((gain, limited))) => {
+                        let db = 20.0 * gain.max(1e-9).log10();
+                        if limited {
+                            format!("{db:+.1} dB (peak limit)")
+                        } else {
+                            format!("{db:+.1} dB")
+                        }
+                    }
+                    (Effect::Normalize { .. } | Effect::Loudness { .. }, None) => String::new(),
                     (Effect::HighPass { hz, .. }, _) => format!("above {}", hz_text(hz)),
                     (Effect::LowPass { hz, .. }, _) => format!("below {}", hz_text(hz)),
                     (Effect::Echo { delay_ms, .. }, _) => format!("every {delay_ms:.0} ms"),
@@ -685,6 +693,13 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
                 )
             });
             number(response.inner)
+        }
+        Effect::Loudness { lufs, peak_db } => {
+            let rows = [
+                ("As loud as", lufs, -60.0..=0.0, 0.1, " LUFS", 1),
+                ("Loudest point at most", peak_db, -60.0..=0.0, 0.1, " dB", 1),
+            ];
+            number_rows(ui, rows)
         }
         Effect::HighPass { hz, steep } | Effect::LowPass { hz, steep } => {
             // Each pixel dragged moves the frequency by 1 %, so low and high frequencies are equally easy to set.

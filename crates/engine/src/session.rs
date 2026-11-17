@@ -421,6 +421,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 end,
                 effect: lane.effect,
                 gain: 1.0,
+                limited: false,
             });
         }
         Command::SetEffectRange { range, start, end } => {

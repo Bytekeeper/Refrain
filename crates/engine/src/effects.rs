@@ -16,6 +16,9 @@ pub struct RangeId(pub u64);
 pub enum Effect {
     /// Sets the gain of each range so its loudest sample reaches `peak_db`.
     Normalize { peak_db: f32 },
+    /// Sets the gain of each range so it sounds as loud as `lufs`, measured after ITU-R BS.1770, but never
+    /// further than its loudest sample reaching `peak_db`.
+    Loudness { lufs: f32, peak_db: f32 },
     /// Lets through what is above `hz`: removes rumble and hum. `steep` falls 24 dB per octave instead of 12.
     HighPass { hz: f32, steep: bool },
     /// Lets through what is below `hz`: removes hiss and harshness.
@@ -31,6 +34,10 @@ impl Effect {
     pub fn defaults() -> Vec<Effect> {
         vec![
             Effect::Normalize { peak_db: -1.0 },
+            Effect::Loudness {
+                lufs: -16.0,
+                peak_db: -1.0,
+            },
             Effect::HighPass { hz: 80.0, steep: false },
             Effect::LowPass {
                 hz: 8000.0,
@@ -51,6 +58,7 @@ impl Effect {
     pub fn name(&self) -> &'static str {
         match self {
             Effect::Normalize { .. } => "Normalize",
+            Effect::Loudness { .. } => "Loudness",
             Effect::HighPass { .. } => "High-pass",
             Effect::LowPass { .. } => "Low-pass",
             Effect::Echo { .. } => "Echo",
@@ -61,7 +69,7 @@ impl Effect {
     /// How long after a range the effect still sounds: until it is 60 dB below the sound that went in.
     pub fn tail(&self, rate: u32) -> Frames {
         match *self {
-            Effect::Normalize { .. } | Effect::HighPass { .. } | Effect::LowPass { .. } => 0,
+            Effect::Normalize { .. } | Effect::Loudness { .. } | Effect::HighPass { .. } | Effect::LowPass { .. } => 0,
             Effect::Echo {
                 delay_ms,
                 fade_db,
@@ -143,6 +151,9 @@ impl Effect {
             Effect::Normalize { peak_db } if !within(peak_db, -60.0..=0.0) => {
                 "normalize goes to a peak between -60 and 0 dB"
             }
+            Effect::Loudness { lufs, peak_db } if !within(lufs, -60.0..=0.0) || !within(peak_db, -60.0..=0.0) => {
+                "the loudness and the peak limit must be between -60 and 0"
+            }
             Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. } if !within(hz, 10.0..=40_000.0) => {
                 "a filter's frequency must be between 10 Hz and 40 kHz"
             }
@@ -177,6 +188,8 @@ pub struct EffectRange {
     pub effect: Effect,
     /// Measured from the audio under the range whenever the project changes; for normalize the gain.
     pub gain: f32,
+    /// Measured with the gain: the peak limit kept a loudness range quieter than its target.
+    pub limited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,7 +329,7 @@ enum State {
 impl State {
     fn new(effect: Effect, rate: u32) -> State {
         match effect {
-            Effect::Normalize { .. } => State::Nothing,
+            Effect::Normalize { .. } | Effect::Loudness { .. } => State::Nothing,
             Effect::HighPass { .. } | Effect::LowPass { .. } => {
                 State::Filter(vec![[[0.0; 4]; 2]; effect.filter().map_or(0, |(_, s)| s.len())])
             }
@@ -598,34 +611,41 @@ fn position_in(range: &EffectRange, t: Frames, loop_end: Option<Frames>) -> Opti
 /// Measures what the effects need from the audio under them, lane by lane from the top, so each lane
 /// measures what the lanes above it produce.
 pub(crate) fn measure(project: &mut Project) {
+    let rate = project.sample_rate;
     for ti in 0..project.tracks.len() {
         let lanes = project.tracks.get(ti).map_or(0, |t| t.effects.len());
         for li in 0..lanes {
-            let gains: Vec<f32> = {
+            let gains: Vec<(f32, bool)> = {
                 let Some(track) = project.tracks.get(ti) else { continue };
                 let Some(lane) = track.effects.get(li) else { continue };
                 lane.ranges
                     .iter()
-                    .map(|r| normalize_gain(&r.effect, || render_track(project, track, r.start, span(r), li)))
+                    .map(|r| measured_gain(&r.effect, rate, || render_track(project, track, r.start, span(r), li)))
                     .collect()
             };
             if let Some(lane) = project.tracks.get_mut(ti).and_then(|t| t.effects.get_mut(li)) {
-                lane.ranges.iter_mut().zip(gains).for_each(|(r, g)| r.gain = g);
+                lane.ranges
+                    .iter_mut()
+                    .zip(gains)
+                    .for_each(|(r, g)| (r.gain, r.limited) = g);
             }
         }
     }
     for li in 0..project.mix_effects.len() {
-        let gains: Vec<f32> = {
+        let gains: Vec<(f32, bool)> = {
             let Some(lane) = project.mix_effects.get(li) else {
                 continue;
             };
             lane.ranges
                 .iter()
-                .map(|r| normalize_gain(&r.effect, || mix_upto(project, r.start, span(r), li)))
+                .map(|r| measured_gain(&r.effect, rate, || mix_upto(project, r.start, span(r), li)))
                 .collect()
         };
         if let Some(lane) = project.mix_effects.get_mut(li) {
-            lane.ranges.iter_mut().zip(gains).for_each(|(r, g)| r.gain = g);
+            lane.ranges
+                .iter_mut()
+                .zip(gains)
+                .for_each(|(r, g)| (r.gain, r.limited) = g);
         }
     }
 }
@@ -634,16 +654,93 @@ fn span(range: &EffectRange) -> usize {
     usize::try_from(range.end - range.start).unwrap_or(0)
 }
 
-/// The gain that brings the loudest sample to the target; silence is left alone. Other effects measure nothing.
-fn normalize_gain(effect: &Effect, audio: impl FnOnce() -> [Vec<f32>; 2]) -> f32 {
-    let Effect::Normalize { peak_db } = *effect else {
-        return 1.0;
+/// The gain for normalize and loudness, and whether the peak limit held it back. Silence is left alone.
+/// Other effects measure nothing.
+fn measured_gain(effect: &Effect, rate: u32, audio: impl FnOnce() -> [Vec<f32>; 2]) -> (f32, bool) {
+    let (target, peak_db) = match *effect {
+        Effect::Normalize { peak_db } => (None, peak_db),
+        Effect::Loudness { lufs, peak_db } => (Some(lufs), peak_db),
+        _ => return (1.0, false),
     };
-    let peak = audio().iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
+    let audio = audio();
+    let peak = audio.iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
     if peak <= 1e-6 {
-        return 1.0;
+        return (1.0, false);
     }
-    (db_to_amp(peak_db) / peak).clamp(db_to_amp(-80.0), db_to_amp(40.0))
+    let most = db_to_amp(peak_db) / peak;
+    let (gain, limited) = match target {
+        None => (most, false),
+        Some(lufs) => match loudness(&audio, rate) {
+            Some(now) => {
+                let wanted = db_to_amp(lufs - now as f32);
+                (wanted.min(most), wanted > most)
+            }
+            None => (1.0, false),
+        },
+    };
+    (gain.clamp(db_to_amp(-80.0), db_to_amp(40.0)), limited)
+}
+
+/// Integrated loudness in LUFS after ITU-R BS.1770: the sound is weighted like the ear hears it, its power
+/// taken in 400 ms blocks that overlap by 75 %, and blocks of near silence left out so pauses do not count.
+/// None when everything is that quiet.
+fn loudness(audio: &[Vec<f32>; 2], rate: u32) -> Option<f64> {
+    let len = audio[0].len();
+    // Running sum of the weighted power of both channels, so each block's power is one subtraction.
+    let mut sums = vec![0.0f64; len + 1];
+    for channel in audio {
+        let mut weighted = channel.clone();
+        for (biquad, mut memory) in k_weighting(rate).iter().zip([[0.0; 4]; 2]) {
+            biquad.run(&mut memory, &mut weighted);
+        }
+        let mut total = 0.0;
+        for (sum, s) in sums.iter_mut().skip(1).zip(&weighted) {
+            total += f64::from(*s) * f64::from(*s);
+            *sum += total;
+        }
+    }
+    // A range shorter than a block is measured as one block.
+    let block = (rate as usize * 4 / 10).clamp(1, len.max(1));
+    let powers: Vec<f64> = (0..)
+        .map(|i| i * (block / 4).max(1))
+        .take_while(|start| start + block <= len)
+        .filter_map(|start| Some((sums.get(start + block)? - sums.get(start)?) / block as f64))
+        .collect();
+    let lufs = |power: f64| -0.691 + 10.0 * power.max(1e-20).log10();
+    let mean = |powers: &[f64]| powers.iter().sum::<f64>() / powers.len().max(1) as f64;
+    let audible: Vec<f64> = powers.into_iter().filter(|&p| lufs(p) > -70.0).collect();
+    if audible.is_empty() {
+        return None;
+    }
+    let gate = lufs(mean(&audible)) - 10.0;
+    let kept: Vec<f64> = audible.iter().copied().filter(|&p| lufs(p) > gate).collect();
+    Some(lufs(mean(&kept)))
+}
+
+/// The two filters of BS.1770's weighting: a shelf that lifts the highs by 4 dB, as the head does, then a
+/// high-pass that ignores what is too low to hear well. The standard gives them for 48 kHz; these are the
+/// same filters for any rate.
+fn k_weighting(rate: u32) -> [Biquad; 2] {
+    let k = |hz: f64| (std::f64::consts::PI * hz / f64::from(rate.max(1))).tan();
+    let (k1, q1) = (k(1_681.974_450_955_533), 0.707_175_236_955_419_6);
+    let vh = 10f64.powf(3.999_843_853_973_347 / 20.0);
+    let vb = vh.powf(0.499_666_774_154_541_6);
+    let a0 = 1.0 + k1 / q1 + k1 * k1;
+    let shelf = Biquad {
+        b: [
+            (vh + vb * k1 / q1 + k1 * k1) / a0,
+            2.0 * (k1 * k1 - vh) / a0,
+            (vh - vb * k1 / q1 + k1 * k1) / a0,
+        ],
+        a: [2.0 * (k1 * k1 - 1.0) / a0, (1.0 - k1 / q1 + k1 * k1) / a0],
+    };
+    let (k2, q2) = (k(38.135_470_876_024_44), 0.500_327_037_323_877_3);
+    let a0 = 1.0 + k2 / q2 + k2 * k2;
+    let high_pass = Biquad {
+        b: [1.0, -2.0, 1.0],
+        a: [2.0 * (k2 * k2 - 1.0) / a0, (1.0 - k2 / q2 + k2 * k2) / a0],
+    };
+    [shelf, high_pass]
 }
 
 #[cfg(test)]
@@ -1087,5 +1184,68 @@ mod tests {
             assert_eq!(set.tail(RATE), repeats * 100, "{dragged}: {set:?}");
             assert!(set.check().is_ok());
         }
+    }
+
+    #[test]
+    fn loudness_weighting_matches_the_standard_at_48_khz() {
+        // The coefficients printed in ITU-R BS.1770-4, tables 1 and 2.
+        let [shelf, high_pass] = k_weighting(48_000);
+        let close = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-8);
+        assert!(close(
+            &shelf.b,
+            &[1.535_124_859_586_97, -2.691_696_189_406_38, 1.198_392_810_852_85]
+        ));
+        assert!(close(&shelf.a, &[-1.690_659_293_182_41, 0.732_480_774_215_85]));
+        assert!(close(&high_pass.a, &[-1.990_047_454_833_98, 0.990_072_250_366_21]));
+    }
+
+    #[test]
+    fn a_full_scale_tone_at_997_hz_measures_minus_3_lufs_per_channel() {
+        // The standard's check: this tone in one channel reads -3.01 LUFS; in both it is twice the power.
+        let rate = 48_000;
+        let tone: Vec<f32> = (0..rate * 2)
+            .map(|i| (i as f32 * 997.0 * std::f32::consts::TAU / rate as f32).sin())
+            .collect();
+        let one = loudness(&[tone.clone(), vec![0.0; tone.len()]], rate).unwrap();
+        assert!((one + 3.01).abs() < 0.05, "{one}");
+        let both = loudness(&[tone.clone(), tone.clone()], rate).unwrap();
+        assert!(both.abs() < 0.05, "{both}");
+        // A pause does not make it much quieter: its silent blocks are left out, only the blocks across
+        // the change from tone to silence count, with part of the power.
+        let mut paused = tone.clone();
+        paused.extend(vec![0.0; tone.len()]);
+        let with_pause = loudness(&[paused.clone(), paused], rate).unwrap();
+        assert!(with_pause < 0.0 && with_pause > -0.5, "{with_pause}");
+        assert_eq!(loudness(&[vec![0.0; 1000], vec![0.0; 1000]], rate), None);
+    }
+
+    #[test]
+    fn loudness_reaches_its_target_unless_the_peak_limit_holds_it_back() {
+        // The middle, away from the range's edges, where the gain fades in and out.
+        let lufs_of = |s: &Session| loudness(&render(s.project(), 12_000, 24_000), 48_000).unwrap();
+        let s = tone_session(
+            997.0,
+            Effect::Loudness {
+                lufs: -16.0,
+                peak_db: -1.0,
+            },
+        );
+        assert!((lufs_of(&s) + 16.0).abs() < 0.1, "{}", lufs_of(&s));
+        assert!(!s.project().tracks[0].effects[0].ranges[0].limited);
+
+        // The tone is at -6 dB, so 0 LUFS needs +6 dB, which would take the peak to 0 dB.
+        let s = tone_session(
+            997.0,
+            Effect::Loudness {
+                lufs: 0.0,
+                peak_db: -1.0,
+            },
+        );
+        let range = &s.project().tracks[0].effects[0].ranges[0];
+        assert!(range.limited);
+        let peak = render(s.project(), 0, 48_000)[0]
+            .iter()
+            .fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - db_to_amp(-1.0)).abs() < 1e-3, "{peak}");
     }
 }
