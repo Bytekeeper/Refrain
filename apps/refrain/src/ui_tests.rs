@@ -970,3 +970,20 @@ fn clicks_left_of_the_timeline_move_the_play_position_only_in_the_ruler() {
         "left of the time labels: the left edge shown"
     );
 }
+
+/// Clicking in the mix level row did not move the play position.
+#[test]
+fn a_click_in_the_mix_level_row_moves_the_play_position() {
+    let mut e = overlapping();
+    e.scroll = 20_000.0;
+    let mut h = harness(e);
+    click(&mut h, 400.0, 80.0);
+    let at = h.state().player.position();
+    assert!((30_000..40_000).contains(&at), "at {at}");
+    click(&mut h, 60.0, 80.0);
+    assert_eq!(
+        h.state().player.position(),
+        20_000,
+        "left of the bars: the left edge shown"
+    );
+}

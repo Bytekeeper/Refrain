@@ -12,7 +12,12 @@ use crate::{Editor, HEADER_W};
 /// The row's height; its bottom edge is dragged between these.
 pub(crate) const MIN_ROW_H: f32 = 26.0;
 pub(crate) const MAX_ROW_H: f32 = 160.0;
-const LEVEL: Color32 = Color32::from_rgb(150, 170, 190);
+/// The scale's sections, loudest first: where each ends in dB, and the bar colour in it. Brighter is louder.
+const SECTIONS: [(f32, Color32); 3] = [
+    (-6.0, Color32::from_rgb(205, 220, 235)),
+    (-20.0, Color32::from_rgb(150, 170, 190)),
+    (-FLOOR_DB, Color32::from_rgb(95, 110, 125)),
+];
 const OVER: Color32 = Color32::from_rgb(255, 80, 80);
 /// The bars show -60 dB at the bottom up to 0 dB at a line below the top; above the line a strip marks where
 /// the mix goes over, so overs show by place, not only by colour.
@@ -105,11 +110,15 @@ impl Editor {
     /// The row's place under the ruler. It is painted at the end of the frame, after the tracks took the mouse,
     /// so a drop shows in the row in the same frame.
     pub(crate) fn level_row_space(&self, ui: &mut Ui) -> (Rect, egui::Response) {
-        ui.allocate_exact_size(vec2(ui.available_width(), self.level_row.height), Sense::drag())
+        ui.allocate_exact_size(
+            vec2(ui.available_width(), self.level_row.height),
+            Sense::click_and_drag(),
+        )
     }
 
-    /// Dragging the bottom edge sets the row's height.
-    fn resize_level_row(&mut self, rect: Rect, response: &egui::Response) {
+    /// Dragging the bottom edge sets the row's height; a press or drag anywhere else moves the play position,
+    /// as in the ruler.
+    fn level_row_mouse(&mut self, rect: Rect, response: &egui::Response) {
         let on_edge = |y: f32| (rect.bottom() - y).abs() <= 4.0;
         if response.hover_pos().is_some_and(|p| on_edge(p.y)) || self.level_row.resizing {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
@@ -118,10 +127,13 @@ impl Editor {
         if response.drag_started() && origin.is_some_and(|p| on_edge(p.y)) {
             self.level_row.resizing = true;
         }
-        if self.level_row.resizing
-            && let Some(pos) = response.interact_pointer_pos()
-        {
-            self.level_row.height = (pos.y - rect.top()).clamp(MIN_ROW_H, MAX_ROW_H);
+        if let Some(pos) = response.interact_pointer_pos() {
+            if self.level_row.resizing {
+                self.level_row.height = (pos.y - rect.top()).clamp(MIN_ROW_H, MAX_ROW_H);
+            } else if !origin.is_some_and(|p| on_edge(p.y)) {
+                let lane_left = rect.left() + HEADER_W;
+                self.player.seek(self.frame_at(lane_left, pos.x.max(lane_left)));
+            }
         }
         if response.drag_stopped() {
             self.level_row.resizing = false;
@@ -130,7 +142,7 @@ impl Editor {
 
     pub(crate) fn draw_level_row(&mut self, ui: &Ui, (rect, response): (Rect, egui::Response)) {
         self.measure_levels(ui.ctx());
-        self.resize_level_row(rect, &response);
+        self.level_row_mouse(rect, &response);
         let lane_left = rect.left() + HEADER_W;
         let painter = ui.painter_at(rect);
         painter.text(
@@ -147,6 +159,16 @@ impl Editor {
         painter.rect_filled(area, 0.0, ui.visuals().extreme_bg_color);
         let zero = area.top() + OVER_H;
         let y_of = |peak: f32| zero + depth(peak) * (area.bottom() - zero);
+        let y_of_db = |db: f32| y_of(10f32.powf(db / 20.0));
+        // Each section gets its own shade, so it shows where no bar reaches as well.
+        let mut top = zero;
+        for (i, (db, _)) in SECTIONS.iter().enumerate() {
+            let shade = [0.10, 0.05, 0.0].get(i).copied().unwrap_or(0.0);
+            let band = Rect::from_x_y_ranges(area.x_range(), top..=y_of_db(*db));
+            let bg = ui.visuals().extreme_bg_color;
+            painter.rect_filled(band, 0.0, bg.lerp_to_gamma(ui.visuals().text_color(), shade));
+            top = band.bottom();
+        }
 
         if let Some((measured, levels)) = &self.level_row.shown {
             // Shown dimmed while the levels of the latest edit are still being measured.
@@ -158,10 +180,17 @@ impl Editor {
                 let (from, to) = (self.frame_at(lane_left, x).max(0), self.frame_at(lane_left, x + 1.0));
                 if from < end && to > 0 {
                     let peak = levels.peak(from, to.max(from + 1));
-                    painter.line_segment(
-                        [pos2(x, area.bottom()), pos2(x, y_of(peak))],
-                        Stroke::new(1.0, dim(LEVEL)),
-                    );
+                    // The bar in each section takes that section's colour.
+                    let reach = y_of(peak);
+                    let mut top = zero;
+                    for (db, color) in SECTIONS {
+                        let bottom = y_of_db(db);
+                        if reach < bottom {
+                            let segment = [pos2(x, bottom), pos2(x, reach.max(top))];
+                            painter.line_segment(segment, Stroke::new(1.0, dim(color)));
+                        }
+                        top = bottom;
+                    }
                     if peak > 1.0 {
                         let strip = [pos2(x, area.top()), pos2(x, zero - 1.0)];
                         painter.line_segment(strip, Stroke::new(1.0, dim(OVER)));
@@ -193,7 +222,7 @@ impl Editor {
         );
         // Faint lines at -6 and -20 dB over the bars, so the uneven scale can be read.
         for db in [-6.0f32, -20.0] {
-            let y = y_of(10f32.powf(db / 20.0));
+            let y = y_of_db(db);
             painter.line_segment(
                 [pos2(area.left(), y), pos2(area.right(), y)],
                 Stroke::new(1.0, Color32::from_black_alpha(70)),
