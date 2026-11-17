@@ -19,6 +19,10 @@ const SECTIONS: [(f32, Color32); 3] = [
     (-FLOOR_DB, Color32::from_rgb(95, 110, 125)),
 ];
 const OVER: Color32 = Color32::from_rgb(255, 80, 80);
+/// A bar above -1 dB is amber in its top section, because MP3, Ogg and M4A can push such peaks over 0 dB when
+/// they encode. The whole section, not only the last dB, so it shows in a small row too.
+const NEAR_DB: f32 = -1.0;
+const NEAR: Color32 = Color32::from_rgb(240, 170, 60);
 /// The bars show -60 dB at the bottom up to 0 dB at a line below the top; above the line a strip marks where
 /// the mix goes over, so overs show by place, not only by colour.
 const FLOOR_DB: f32 = 60.0;
@@ -183,7 +187,9 @@ impl Editor {
                     // The bar in each section takes that section's colour.
                     let reach = y_of(peak);
                     let mut top = zero;
-                    for (db, color) in SECTIONS {
+                    let near = peak > 10f32.powf(NEAR_DB / 20.0);
+                    for (i, (db, color)) in SECTIONS.into_iter().enumerate() {
+                        let color = if near && i == 0 { NEAR } else { color };
                         let bottom = y_of_db(db);
                         if reach < bottom {
                             let segment = [pos2(x, bottom), pos2(x, reach.max(top))];
