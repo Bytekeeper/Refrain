@@ -2,31 +2,61 @@
 
 use crate::effects::Biquad;
 
-/// Integrated loudness in LUFS after ITU-R BS.1770: the sound is weighted like the ear hears it, its power
-/// taken in 400 ms blocks that overlap by 75 %, and blocks of near silence left out so pauses do not count.
-/// None when everything is that quiet.
+/// Integrated loudness in LUFS after ITU-R BS.1770 of a whole piece of sound. None when it is all near silence.
+#[cfg(test)]
 pub(crate) fn loudness(audio: &[Vec<f32>; 2], rate: u32) -> Option<f64> {
+    from_slices(slices(audio, rate, 0, 0).iter())
+}
+
+/// The weighted power of the sound (weighted like the ear hears it) in slices on a 100 ms grid of the timeline,
+/// as (energy, frames). The audio starts `lead` frames before timeline frame `first`; the lead only settles the
+/// weighting filters. Slices at the ends may be shorter.
+pub(crate) fn slices(audio: &[Vec<f32>; 2], rate: u32, lead: usize, first: i64) -> Vec<(f64, usize)> {
+    let slice = slice_len(rate);
+    let weighted: Vec<Vec<f32>> = audio
+        .iter()
+        .map(|channel| {
+            let mut weighted = channel.clone();
+            for (biquad, mut memory) in k_weighting(rate).iter().zip([[0.0; 4]; 2]) {
+                biquad.run(&mut memory, &mut weighted);
+            }
+            weighted
+        })
+        .collect();
     let len = audio[0].len();
-    // Running sum of the weighted power of both channels, so each block's power is one subtraction.
-    let mut sums = vec![0.0f64; len + 1];
-    for channel in audio {
-        let mut weighted = channel.clone();
-        for (biquad, mut memory) in k_weighting(rate).iter().zip([[0.0; 4]; 2]) {
-            biquad.run(&mut memory, &mut weighted);
-        }
-        let mut total = 0.0;
-        for (sum, s) in sums.iter_mut().skip(1).zip(&weighted) {
-            total += f64::from(*s) * f64::from(*s);
-            *sum += total;
+    let mut out: Vec<(f64, usize)> = vec![];
+    for (i, at) in (lead..len).zip(first..) {
+        let energy: f64 = weighted
+            .iter()
+            .filter_map(|w| w.get(i))
+            .map(|s| f64::from(*s) * f64::from(*s))
+            .sum();
+        match out.last_mut() {
+            Some((sum, frames)) if at.rem_euclid(slice) != 0 => (*sum, *frames) = (*sum + energy, *frames + 1),
+            _ => out.push((energy, 1)),
         }
     }
-    // A range shorter than a block is measured as one block.
-    let block = (rate as usize * 4 / 10).clamp(1, len.max(1));
-    let powers: Vec<f64> = (0..)
-        .map(|i| i * (block / 4).max(1))
-        .take_while(|start| start + block <= len)
-        .filter_map(|start| Some((sums.get(start + block)? - sums.get(start)?) / block as f64))
-        .collect();
+    out
+}
+
+fn slice_len(rate: u32) -> i64 {
+    i64::from(rate / 10).max(1)
+}
+
+/// Integrated loudness in LUFS after ITU-R BS.1770 from consecutive [`slices`]: the power in 400 ms blocks
+/// that overlap by 75 % (four slices each), with blocks of near silence left out so pauses do not count.
+/// Fewer than four slices are one block. None when everything is that quiet.
+pub(crate) fn from_slices<'a>(slices: impl Iterator<Item = &'a (f64, usize)>) -> Option<f64> {
+    let all: Vec<(f64, usize)> = slices.copied().collect();
+    let power = |s: &[(f64, usize)]| {
+        let (energy, frames) = s.iter().fold((0.0, 0), |(e, f), (se, sf)| (e + se, f + sf));
+        energy / frames.max(1) as f64
+    };
+    let powers: Vec<f64> = if all.len() < 4 {
+        vec![power(&all)]
+    } else {
+        all.windows(4).map(power).collect()
+    };
     let lufs = |power: f64| -0.691 + 10.0 * power.max(1e-20).log10();
     let mean = |powers: &[f64]| powers.iter().sum::<f64>() / powers.len().max(1) as f64;
     let audible: Vec<f64> = powers.into_iter().filter(|&p| lufs(p) > -70.0).collect();

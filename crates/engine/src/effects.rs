@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::loudness::loudness;
+use crate::loudness::{from_slices, slices};
 use crate::mix::{db_to_amp, mix_upto, render_track};
 use crate::{Clip, Error, Frames, Project, Result};
 
@@ -730,8 +730,8 @@ pub(crate) fn measure(project: &mut Project, before: Option<&Project>) {
                 lane.ranges
                     .iter()
                     .map(|r| {
-                        measure_range(r, project, unchanged, || {
-                            render_track(project, track, r.start, span(r), li)
+                        measure_range(r, project, unchanged, |from, frames| {
+                            render_track(project, track, from, frames, li)
                         })
                     })
                     .collect()
@@ -760,7 +760,11 @@ pub(crate) fn measure(project: &mut Project, before: Option<&Project>) {
             });
             lane.ranges
                 .iter()
-                .map(|r| measure_range(r, project, unchanged, || mix_upto(project, r.start, span(r), li)))
+                .map(|r| {
+                    measure_range(r, project, unchanged, |from, frames| {
+                        mix_upto(project, from, frames, li)
+                    })
+                })
                 .collect()
         };
         if let Some(lane) = project.mix_effects.get_mut(li) {
@@ -809,25 +813,50 @@ fn span(range: &EffectRange) -> usize {
 
 type Measured = (f32, bool, Option<Reversed>, Option<Heard>);
 
-/// What a normalize or loudness range measured from the sound under it. Its settings only turn these into a
-/// gain, so changing them needs no new measuring.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// What a normalize or loudness range measured from the sound under it, in segments on a 30 s grid of the
+/// timeline. Its settings only turn these into a gain, so changing them needs no new measuring; moving an edge
+/// measures only the segment there.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Heard {
-    start: Frames,
-    end: Frames,
-    peak: f32,
-    /// Only measured for loudness.
-    lufs: Option<f64>,
+    /// Shared, so undo steps and a later measuring keep one copy of an unchanged segment.
+    segments: Vec<Arc<Segment>>,
 }
 
-/// What a range needs from the sound under it, which `audio` renders: the gain and whether the peak limit held
-/// it back, or a reversed effect's sound. `unchanged` says the sound under the range is as when it was last
-/// measured, if it was at the same place.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Segment {
+    from: Frames,
+    to: Frames,
+    /// How much sound before `from` settled the loudness weighting; none at the range start.
+    lead: Frames,
+    peak: f32,
+    /// Only measured for loudness.
+    slices: Option<Vec<(f64, usize)>>,
+}
+
+const SEGMENT_SECONDS: Frames = 30;
+
+/// The segments of a range as (from, to, lead).
+fn segment_spans(range: &EffectRange, rate: u32) -> Vec<(Frames, Frames, Frames)> {
+    let rate = Frames::from(rate.max(1));
+    let size = SEGMENT_SECONDS * rate;
+    let mut spans = vec![];
+    let mut from = range.start;
+    while from < range.end {
+        let to = ((from.div_euclid(size) + 1) * size).min(range.end);
+        spans.push((from, to, (from - range.start).min(rate / 2)));
+        from = to;
+    }
+    spans
+}
+
+/// What a range needs from the sound under it, which `render(from, frames)` renders: the gain and whether the
+/// peak limit held it back, or a reversed effect's sound. `unchanged` says the sound under the range is as when
+/// it was last measured, where it was measured.
 fn measure_range(
     range: &EffectRange,
     project: &Project,
     unchanged: bool,
-    audio: impl FnOnce() -> [Vec<f32>; 2],
+    render: impl Fn(Frames, usize) -> [Vec<f32>; 2] + Sync,
 ) -> Measured {
     if range.effect.reversed() {
         let kept = range
@@ -836,34 +865,68 @@ fn measure_range(
             .filter(|r| unchanged && r.made_for == made_for(range));
         let sound = match kept {
             Some(kept) => kept.clone(),
-            None => reversed_sound(range, project, audio()),
+            None => reversed_sound(range, project, render(range.start, span(range))),
         };
         return (1.0, false, Some(sound), None);
     }
+    if !matches!(range.effect, Effect::Normalize { .. } | Effect::Loudness { .. }) {
+        return (1.0, false, None, None);
+    }
     let loudness_too = matches!(range.effect, Effect::Loudness { .. });
-    let heard = match (range.effect, range.heard) {
-        (Effect::Normalize { .. } | Effect::Loudness { .. }, Some(h))
-            if unchanged && (h.start, h.end) == (range.start, range.end) && (h.lufs.is_some() || !loudness_too) =>
-        {
-            h
+    let rate = project.sample_rate;
+    let old = range
+        .heard
+        .as_ref()
+        .filter(|_| unchanged)
+        .map_or(&[][..], |h| &h.segments[..]);
+    let segments = in_parallel(&segment_spans(range, rate), |&(from, to, lead)| {
+        let kept = old
+            .iter()
+            .find(|s| (s.from, s.to, s.lead) == (from, to, lead) && (s.slices.is_some() || !loudness_too));
+        if let Some(kept) = kept {
+            return kept.clone();
         }
-        (Effect::Normalize { .. } | Effect::Loudness { .. }, _) => {
-            let audio = audio();
-            Heard {
-                start: range.start,
-                end: range.end,
-                peak: audio.iter().flatten().fold(0.0f32, |m, s| m.max(s.abs())),
-                lufs: if loudness_too {
-                    loudness(&audio, project.sample_rate)
-                } else {
-                    None
-                },
-            }
-        }
-        _ => return (1.0, false, None, None),
-    };
+        let audio = render(from - lead, usize::try_from(to - from + lead).unwrap_or(0));
+        let lead = usize::try_from(lead).unwrap_or(0);
+        Arc::new(Segment {
+            from,
+            to,
+            lead: lead as Frames,
+            peak: audio
+                .iter()
+                .flat_map(|c| c.iter().skip(lead))
+                .fold(0.0f32, |m, s| m.max(s.abs())),
+            slices: loudness_too.then(|| slices(&audio, rate, lead, from)),
+        })
+    });
+    let heard = Heard { segments };
     let (gain, limited) = gain_from(&range.effect, &heard);
     (gain, limited, None, Some(heard))
+}
+
+/// `work` on each item, spread over the processor's cores; the results in the items' order.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let per = items.len().div_ceil(cores).max(1);
+    let work = &work;
+    std::thread::scope(|scope| {
+        let started: Vec<_> = items
+            .chunks(per)
+            .map(|chunk| {
+                let thread =
+                    std::thread::Builder::new().spawn_scoped(scope, move || chunk.iter().map(work).collect::<Vec<R>>());
+                (chunk, thread)
+            })
+            .collect();
+        // A chunk whose thread could not start or failed is done here instead.
+        started
+            .into_iter()
+            .flat_map(|(chunk, thread)| {
+                let done = thread.ok().and_then(|t| t.join().ok());
+                done.unwrap_or_else(|| chunk.iter().map(work).collect())
+            })
+            .collect()
+    })
 }
 
 /// What a reversed sound depends on besides the sound under the range.
@@ -910,22 +973,32 @@ fn reversed_sound(range: &EffectRange, project: &Project, mut audio: [Vec<f32>; 
 
 /// The gain for normalize and loudness, and whether the peak limit held it back. Silence is left alone.
 fn gain_from(effect: &Effect, heard: &Heard) -> (f32, bool) {
-    if heard.peak <= 1e-6 {
+    let peak = heard.segments.iter().fold(0.0f32, |m, s| m.max(s.peak));
+    if peak <= 1e-6 {
         return (1.0, false);
     }
+    let most = db_to_amp(peak_db_of(effect)) / peak;
     let (gain, limited) = match *effect {
-        Effect::Normalize { peak_db } => (db_to_amp(peak_db) / heard.peak, false),
-        Effect::Loudness { lufs, peak_db } => match heard.lufs {
-            Some(now) => {
-                let most = db_to_amp(peak_db) / heard.peak;
-                let wanted = db_to_amp(lufs - now as f32);
-                (wanted.min(most), wanted > most)
+        Effect::Loudness { lufs, .. } => {
+            let slices = heard.segments.iter().flat_map(|s| s.slices.iter().flatten());
+            match from_slices(slices) {
+                Some(now) => {
+                    let wanted = db_to_amp(lufs - now as f32);
+                    (wanted.min(most), wanted > most)
+                }
+                None => (1.0, false),
             }
-            None => (1.0, false),
-        },
-        _ => (1.0, false),
+        }
+        _ => (most, false),
     };
     (gain.clamp(db_to_amp(-80.0), db_to_amp(40.0)), limited)
+}
+
+fn peak_db_of(effect: &Effect) -> f32 {
+    match *effect {
+        Effect::Normalize { peak_db } | Effect::Loudness { peak_db, .. } => peak_db,
+        _ => 0.0,
+    }
 }
 
 #[cfg(test)]
@@ -933,7 +1006,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{Command, GainPoint, Session, Source, TrackId, render};
+    use crate::loudness::loudness;
+    use crate::{Command, GainPoint, RangeId, Session, Source, TrackId, render};
 
     const RATE: u32 = 1000;
 
@@ -1500,6 +1574,93 @@ mod tests {
         s.execute(Command::SetTrackGain { track, db: -10.0 }).unwrap();
         check(&s);
         assert_ne!(after_curve, gains(s.project()));
+    }
+
+    /// A 70 s range at 8 kHz from 0.2 s: a 60 Hz hum the weighting filter must settle on, a tone with steps
+    /// in level, and a pause.
+    fn long_loudness_session() -> (Session, RangeId) {
+        let rate = 8000;
+        let samples = (0..70 * rate)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                let step = [0.5, 0.1, 0.0, 0.3][(i / (17 * rate)) as usize % 4];
+                0.2 * (t * 60.0 * std::f32::consts::TAU).sin() + step * (t * 1000.0 * std::f32::consts::TAU).sin()
+            })
+            .collect();
+        let source = Arc::new(Source {
+            path: None,
+            name: "long".into(),
+            sample_rate: rate,
+            channels: vec![samples],
+            generated: None,
+        });
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddClip {
+            track,
+            source,
+            start: 0,
+        })
+        .unwrap();
+        let effect = Effect::Loudness {
+            lufs: -16.0,
+            peak_db: 0.0,
+        };
+        s.execute(Command::AddEffectLane {
+            track: Some(track),
+            effect,
+        })
+        .unwrap();
+        let lane = s.project().tracks[0].effects[0].id;
+        s.execute(Command::AddEffectRange {
+            lane,
+            start: 1600,
+            end: 69 * 8000,
+        })
+        .unwrap();
+        let range = s.project().tracks[0].effects[0].ranges[0].id;
+        (s, range)
+    }
+
+    #[test]
+    fn loudness_measured_in_segments_matches_one_measurement() {
+        let (s, _) = long_loudness_session();
+        let p = s.project();
+        let range = &p.tracks[0].effects[0].ranges[0];
+        let heard = range.heard.as_ref().unwrap();
+        assert_eq!(heard.segments.len(), 3, "cut at 30 s and 60 s");
+        let segmented = from_slices(heard.segments.iter().flat_map(|s| s.slices.iter().flatten())).unwrap();
+        let audio = render_track(p, &p.tracks[0], range.start, span(range), 0);
+        let whole = from_slices(slices(&audio, 8000, 0, range.start).iter()).unwrap();
+        assert!((segmented - whole).abs() < 1e-4, "{segmented} against {whole}");
+        let peak = audio.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert_eq!(heard.segments.iter().fold(0.0f32, |m, s| m.max(s.peak)), peak);
+    }
+
+    #[test]
+    fn moving_a_range_end_measures_only_the_segment_there() {
+        let (mut s, range) = long_loudness_session();
+        let segments = |s: &Session| {
+            s.project().tracks[0].effects[0].ranges[0]
+                .heard
+                .clone()
+                .unwrap()
+                .segments
+        };
+        let before = segments(&s);
+        s.execute(Command::SetEffectRange {
+            range,
+            start: 1600,
+            end: 65 * 8000,
+        })
+        .unwrap();
+        let after = segments(&s);
+        assert!(Arc::ptr_eq(&before[0], &after[0]) && Arc::ptr_eq(&before[1], &after[1]));
+        assert!(!Arc::ptr_eq(&before[2], &after[2]));
+        let fresh = Session::open(Project::clone(s.project())).unwrap();
+        let gain = |s: &Session| s.project().tracks[0].effects[0].ranges[0].gain;
+        assert_eq!(gain(&s), gain(&fresh));
     }
 
     #[test]
