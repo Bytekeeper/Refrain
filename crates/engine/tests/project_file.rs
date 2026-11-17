@@ -157,6 +157,13 @@ fn edited_project(dir: &Path) -> Session {
         end: 30000,
     })
     .unwrap();
+    let range = s.project().mix_effects[0].ranges[0].id;
+    s.execute(Command::SetRangeFades {
+        range,
+        fade_in: 3000,
+        fade_out: 500,
+    })
+    .unwrap();
     s
 }
 
@@ -421,7 +428,10 @@ fn ranges_in_older_files_take_the_lane_settings() {
     for track in json["tracks"].as_array_mut().unwrap() {
         for lane in track["effects"].as_array_mut().unwrap() {
             for range in lane["ranges"].as_array_mut().unwrap() {
-                removed += usize::from(range.as_object_mut().unwrap().remove("effect").is_some());
+                let range = range.as_object_mut().unwrap();
+                removed += usize::from(range.remove("effect").is_some());
+                range.remove("fade_in");
+                range.remove("fade_out");
             }
         }
     }
@@ -431,6 +441,9 @@ fn ranges_in_older_files_take_the_lane_settings() {
     let (opened, _) = open_project(&file).unwrap();
     for lane in opened.project().tracks.iter().flat_map(|t| &t.effects) {
         assert!(lane.ranges.iter().all(|r| r.effect == lane.effect));
+        // The fade every range had before fades could be set: 10 ms.
+        let fade = i64::from(opened.project().sample_rate) / 100;
+        assert!(lane.ranges.iter().all(|r| (r.fade_in, r.fade_out) == (fade, fade)));
     }
     assert_same_sound(&s, &opened);
 }

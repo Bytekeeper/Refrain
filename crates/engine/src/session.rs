@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::effects::{measure, tidy_lane};
+use crate::effects::{default_fade, measure, tidy_lane};
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::{
@@ -97,6 +97,12 @@ pub enum Command {
     },
     RemoveEffectRange {
         range: RangeId,
+    },
+    /// How long a range's effect takes to come in and to go, in frames.
+    SetRangeFades {
+        range: RangeId,
+        fade_in: Frames,
+        fade_out: Frames,
     },
     /// A copy with the same trim, fades, volume points and channels, at `start` on `track`, or on a new track
     /// when `track` is `None`.
@@ -414,6 +420,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::AddEffectRange { lane, start, end } => {
             let id = RangeId(p.new_id());
+            let fade = default_fade(p.sample_rate);
             let lane = lane_mut(p, lane)?;
             lane.ranges.push(EffectRange {
                 id,
@@ -422,11 +429,21 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 effect: lane.effect,
                 gain: 1.0,
                 limited: false,
+                fade_in: fade,
+                fade_out: fade,
             });
         }
         Command::SetEffectRange { range, start, end } => {
             let r = range_mut(p, range)?;
             (r.start, r.end) = (start, end);
+        }
+        Command::SetRangeFades {
+            range,
+            fade_in,
+            fade_out,
+        } => {
+            let r = range_mut(p, range)?;
+            (r.fade_in, r.fade_out) = (fade_in, fade_out);
         }
         Command::RemoveEffectRange { range } => {
             let lanes = p
@@ -645,6 +662,8 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
     for range in lanes.flat_map(|l| &mut l.ranges) {
         range.start = scale(range.start);
         range.end = scale(range.end).max(range.start.saturating_add(1));
+        range.fade_in = scale(range.fade_in);
+        range.fade_out = scale(range.fade_out);
     }
     p.sample_rate = rate;
     Ok(())

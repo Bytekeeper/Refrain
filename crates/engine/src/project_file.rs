@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::effects::default_fade;
 use crate::io::write_atomic;
 use crate::session::check_db;
 use crate::{
@@ -65,6 +66,11 @@ struct RangeFile {
     /// Missing in files from before ranges had their own settings: then the lane's.
     #[serde(default)]
     effect: Option<Effect>,
+    /// Missing in files from before ranges had fades to set: then the fade every range had.
+    #[serde(default)]
+    fade_in: Option<Frames>,
+    #[serde(default)]
+    fade_out: Option<Frames>,
 }
 
 fn lanes_to_file(lanes: &[EffectLane]) -> Vec<LaneFile> {
@@ -80,6 +86,8 @@ fn lanes_to_file(lanes: &[EffectLane]) -> Vec<LaneFile> {
                     start: r.start,
                     end: r.end,
                     effect: Some(r.effect),
+                    fade_in: Some(r.fade_in),
+                    fade_out: Some(r.fade_out),
                 })
                 .collect(),
         })
@@ -99,6 +107,8 @@ fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<Ef
                 effect: r.effect.unwrap_or(file.effect),
                 gain: 1.0,
                 limited: false,
+                fade_in: r.fade_in.unwrap_or(default_fade(project.sample_rate)),
+                fade_out: r.fade_out.unwrap_or(default_fade(project.sample_rate)),
             });
         }
         out.push(lane);

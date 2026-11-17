@@ -190,6 +190,14 @@ pub struct EffectRange {
     pub gain: f32,
     /// Measured with the gain: the peak limit kept a loudness range quieter than its target.
     pub limited: bool,
+    /// How long the effect takes to come in after the start and to go before the end, so it does not click.
+    pub fade_in: Frames,
+    pub fade_out: Frames,
+}
+
+/// The fade a new range starts with: short enough not to be heard as a fade, long enough not to click.
+pub(crate) fn default_fade(rate: u32) -> Frames {
+    Frames::from(rate) / 100
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,10 +248,6 @@ impl EffectLane {
 }
 
 /// The fades between the plain and the processed sound at both edges of a range, so it never clicks.
-fn edge_frames(rate: u32, len: Frames) -> Frames {
-    (Frames::from(rate) / 100).min(len / 2).max(1)
-}
-
 /// Sorts a lane's ranges and refuses ranges that are empty, overlap, or break the loop rules.
 pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Result<()> {
     lane.ranges.sort_by_key(|r| r.start);
@@ -255,6 +259,14 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Resu
     }
     if lane.ranges.iter().any(|r| r.end <= r.start) {
         return Err(Error::Invalid("an effect range must end after it starts".into()));
+    }
+    if lane.ranges.iter().any(|r| r.fade_in < 0 || r.fade_out < 0) {
+        return Err(Error::Invalid("a fade cannot be shorter than nothing".into()));
+    }
+    // A range made shorter keeps its fades within it.
+    for r in &mut lane.ranges {
+        r.fade_in = r.fade_in.min(r.end - r.start);
+        r.fade_out = r.fade_out.min(r.end - r.start);
     }
     if let Some(l) = loop_end {
         if lane
@@ -376,16 +388,16 @@ pub(crate) fn apply_lane(
             memory.ranges.remove(&range.id);
             continue;
         }
-        let weights = range_weights(range, rate, loop_end, start, dry[0].len());
+        let weights = range_weights(range, loop_end, start, dry[0].len());
         apply_range(range, rate, &dry, &weights, out, memory.of(range, rate));
     }
 }
 
 /// How much of the processed sound each frame gets: 1 inside the range, fading over its edges, 0 outside.
-fn range_weights(range: &EffectRange, rate: u32, loop_end: Option<Frames>, start: Frames, frames: usize) -> Vec<f32> {
+fn range_weights(range: &EffectRange, loop_end: Option<Frames>, start: Frames, frames: usize) -> Vec<f32> {
     // A range round the whole loop has no edges: its end runs straight into its start.
     let whole_loop = loop_end.is_some_and(|l| range.end - range.start >= l);
-    let edge = edge_frames(rate, range.end - range.start) as f32;
+    let (fade_in, fade_out) = (range.fade_in.max(1) as f32, range.fade_out.max(1) as f32);
     (0..frames)
         .map(|i| {
             let t = start.saturating_add(i as Frames);
@@ -396,7 +408,7 @@ fn range_weights(range: &EffectRange, rate: u32, loop_end: Option<Frames>, start
             if whole_loop {
                 1.0
             } else {
-                ((into as f32 + 1.0) / edge).min(left_in / edge).min(1.0)
+                ((into as f32 + 1.0) / fade_in).min(left_in / fade_out).min(1.0)
             }
         })
         .collect()
@@ -810,6 +822,39 @@ mod tests {
         );
         assert!((left[1700] - 0.5).abs() < 1e-6, "after the range: untouched");
         assert!(left.iter().all(|v| *v <= target + 1e-4), "nothing goes past the peak");
+    }
+
+    #[test]
+    fn a_range_fades_its_effect_in_and_out_over_its_set_fades() {
+        let (mut s, track) = session(&[(0.25, 0)]);
+        let lane = add_lane(&mut s, Some(track), -6.0, &[(0, 1000)]);
+        let range = s.project().lane(lane).unwrap().ranges[0].id;
+        s.execute(Command::SetRangeFades {
+            range,
+            fade_in: 400,
+            fade_out: 200,
+        })
+        .unwrap();
+        let [left, _] = render(s.project(), 0, 1000);
+        let target = db_to_amp(-6.0);
+        let halfway = 0.25 + 0.5 * (target - 0.25);
+        assert!((left[199] - halfway).abs() < 1e-4, "half faded in: {}", left[199]);
+        assert!((left[600] - target).abs() < 1e-4, "{}", left[600]);
+        assert!(
+            (left[899] - (0.25 + 0.505 * (target - 0.25))).abs() < 1e-4,
+            "{}",
+            left[899]
+        );
+
+        // Shortening the range keeps the fades inside it.
+        s.execute(Command::SetEffectRange {
+            range,
+            start: 0,
+            end: 300,
+        })
+        .unwrap();
+        let r = &s.project().lane(lane).unwrap().ranges[0];
+        assert_eq!((r.fade_in, r.fade_out), (300, 200));
     }
 
     #[test]

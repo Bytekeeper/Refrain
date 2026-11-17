@@ -32,7 +32,16 @@ enum RangeDragKind {
     Tail {
         frames: Frames,
     },
+    FadeIn {
+        frames: Frames,
+    },
+    FadeOut {
+        frames: Frames,
+    },
 }
+
+/// Fade handles sit this far below the top of a range; the lower part of its edges resizes it.
+const FADE_Y: f32 = 4.0;
 
 /// A range as drawn: with a drag applied, or one being drawn (`id` `None`, nothing measured yet).
 struct ShownRange {
@@ -40,6 +49,8 @@ struct ShownRange {
     start: Frames,
     end: Frames,
     effect: Effect,
+    fade_in: Frames,
+    fade_out: Frames,
     /// The measured gain, and whether the peak limit held it back.
     gain: Option<(f32, bool)>,
 }
@@ -122,6 +133,42 @@ impl Editor {
         }
     }
 
+    /// The range's fades as shown, with a fade drag applied.
+    fn shown_fades(&self, range: &EffectRange) -> (Frames, Frames) {
+        match &self.range_drag {
+            Some(d) if d.range == Some(range.id) => match d.kind {
+                RangeDragKind::FadeIn { frames } => (frames, range.fade_out),
+                RangeDragKind::FadeOut { frames } => (range.fade_in, frames),
+                _ => (range.fade_in, range.fade_out),
+            },
+            _ => (range.fade_in, range.fade_out),
+        }
+    }
+
+    /// Where the fade handles of a range are; none for a range round the whole loop, which has no edges.
+    fn fade_handles(&self, lane_left: f32, start: Frames, end: Frames, fades: (Frames, Frames)) -> Option<(f32, f32)> {
+        let loop_end = self.session.project().loop_end.filter(|l| *l > 0);
+        if loop_end.is_some_and(|l| end - start >= l) {
+            return None;
+        }
+        // A range past the loop end goes on at the start.
+        let x = |frame: Frames| match loop_end {
+            Some(l) if frame >= l => self.x_of(lane_left, frame - l),
+            _ => self.x_of(lane_left, frame),
+        };
+        Some((x(start + fades.0), x(end - fades.1)))
+    }
+
+    /// How much of the effect a frame of the range gets, as the engine computes it: 0 at the edges, 1 past
+    /// the fades.
+    fn fade_weight(range: &ShownRange, frame: Frames) -> f32 {
+        let ramp = |done: Frames, fade: Frames| done as f32 / fade.max(1) as f32;
+        let (into, left) = (frame - range.start, range.end - frame);
+        ramp(into, range.fade_in)
+            .min(ramp(left, range.fade_out))
+            .clamp(0.0, 1.0)
+    }
+
     /// Where the tail after a range ending at `end` is drawn: with a loop it wraps into the start, and it is
     /// at most one loop long.
     fn tail_span(&self, end: Frames, tail: Frames) -> (Frames, Frames) {
@@ -155,7 +202,7 @@ impl Editor {
             && hover.x >= lane_left
             && matches!(
                 self.range_at(project, row, lane_left, hover),
-                Some((_, Edge::Start | Edge::End | Edge::Tail))
+                Some((_, Edge::Start | Edge::End | Edge::Tail | Edge::FadeIn | Edge::FadeOut))
             )
         {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -205,6 +252,8 @@ impl Editor {
                             Edge::Tail => RangeDragKind::Tail {
                                 frames: r.effect.tail(project.sample_rate),
                             },
+                            Edge::FadeIn => RangeDragKind::FadeIn { frames: r.fade_in },
+                            Edge::FadeOut => RangeDragKind::FadeOut { frames: r.fade_out },
                             Edge::Inside => RangeDragKind::Move {
                                 grab: at - r.start,
                                 len: r.end - r.start,
@@ -247,6 +296,17 @@ impl Editor {
                 }
                 RangeDragKind::Start => drag.start = snap.apply(frame, &mut guide).min(drag.end - 1),
                 RangeDragKind::End => drag.end = snap.apply(frame, &mut guide).max(drag.start + 1),
+                // With a loop the handle of a range past the loop end may sit at the start.
+                RangeDragKind::FadeIn { frames } => {
+                    let to = snap.apply(frame, &mut guide) - drag.start;
+                    let to = loop_end.map_or(to, |l| to.rem_euclid(l));
+                    *frames = to.clamp(0, drag.end - drag.start);
+                }
+                RangeDragKind::FadeOut { frames } => {
+                    let to = drag.end - snap.apply(frame, &mut guide);
+                    let to = loop_end.map_or(to, |l| to.rem_euclid(l));
+                    *frames = to.clamp(0, drag.end - drag.start);
+                }
                 RangeDragKind::Tail { frames } => {
                     let to = snap.apply(frame, &mut guide) - drag.end;
                     // With a loop the handle may sit before the range, one loop later.
@@ -275,6 +335,25 @@ impl Editor {
                     {
                         let effect = old.effect.with_tail(frames, rate);
                         self.run(Command::SetEffect { range, effect });
+                    }
+                }
+                (Some(range), kind @ (RangeDragKind::FadeIn { .. } | RangeDragKind::FadeOut { .. })) => {
+                    let old = project
+                        .lane(drag.lane)
+                        .and_then(|l| l.ranges.iter().find(|r| r.id == range));
+                    if let Some(old) = old {
+                        let (fade_in, fade_out) = match kind {
+                            RangeDragKind::FadeIn { frames } => (frames, old.fade_out),
+                            RangeDragKind::FadeOut { frames } => (old.fade_in, frames),
+                            _ => (old.fade_in, old.fade_out),
+                        };
+                        if (fade_in, fade_out) != (old.fade_in, old.fade_out) {
+                            self.run(Command::SetRangeFades {
+                                range,
+                                fade_in,
+                                fade_out,
+                            });
+                        }
                     }
                 }
                 (Some(range), _) => {
@@ -314,6 +393,23 @@ impl Editor {
                     .any(|(_, x)| (pos.x - x).abs() <= HANDLE))
             .then_some((r.id, Edge::Tail))
         };
+        let fade_y = row.rect.top() + 3.0 + FADE_Y;
+        let on_fade = (pos.y - fade_y).abs() <= HANDLE * 0.6;
+        let fade = lane.ranges.iter().find_map(|r| {
+            let (start, end) = self.shown_range(lane.id, r.id, r.start, r.end);
+            let (x_in, x_out) = self.fade_handles(lane_left, start, end, self.shown_fades(r))?;
+            // The nearer handle, for a range so short that both are under the mouse.
+            let (d_in, d_out) = ((pos.x - x_in).abs(), (pos.x - x_out).abs());
+            match (d_in <= HANDLE, d_out <= HANDLE) {
+                (true, true) if d_out < d_in => Some((r.id, Edge::FadeOut)),
+                (true, _) => Some((r.id, Edge::FadeIn)),
+                (false, true) => Some((r.id, Edge::FadeOut)),
+                _ => None,
+            }
+        });
+        if on_fade && fade.is_some() {
+            return fade;
+        }
         let on_range = lane.ranges.iter().find_map(|r| {
             let (start, end) = self.shown_range(lane.id, r.id, r.start, r.end);
             self.range_spans(lane_left, start, end)
@@ -399,6 +495,8 @@ impl Editor {
                     start,
                     end,
                     effect: self.shown_effect(r),
+                    fade_in: self.shown_fades(r).0,
+                    fade_out: self.shown_fades(r).1,
                     gain: Some((r.gain, r.limited)),
                 }
             })
@@ -413,24 +511,50 @@ impl Editor {
                 start: d.start,
                 end: d.end,
                 effect: lane.effect,
+                fade_in: 0,
+                fade_out: 0,
                 gain: None,
             });
         }
         for r in &ranges {
             self.draw_tail(&painter, lane_left, body, r.end, r.effect, color);
         }
-        for ShownRange {
-            id,
-            start,
-            end,
-            effect,
-            gain,
-        } in ranges
-        {
+        for range in &ranges {
+            let &ShownRange {
+                id,
+                start,
+                end,
+                effect,
+                gain,
+                ..
+            } = range;
             let selected = id.is_some() && id == self.selected_range;
-            for (x0, x1) in self.range_spans(lane_left, start, end) {
+            let handles = self.fade_handles(lane_left, start, end, (range.fade_in, range.fade_out));
+            let loop_end = self.session.project().loop_end.unwrap_or(0);
+            // The second span is the same range one loop earlier.
+            for ((x0, x1), shift) in self.range_spans(lane_left, start, end).into_iter().zip([0, loop_end]) {
                 let area = Rect::from_x_y_ranges(x0..=x1, body.y_range());
-                painter.rect_filled(area, 3.0, color.gamma_multiply(0.35));
+                // Filled as high as the effect is in: the fades slope.
+                let mut frames = [start, start + range.fade_in, end - range.fade_out, end];
+                frames.sort();
+                let mut outline = vec![area.left_bottom()];
+                outline.extend(frames.iter().map(|&frame| {
+                    let weight = if handles.is_some() {
+                        Self::fade_weight(range, frame)
+                    } else {
+                        1.0
+                    };
+                    pos2(
+                        self.x_of(lane_left, frame - shift),
+                        area.bottom() - weight * area.height(),
+                    )
+                }));
+                outline.push(area.right_bottom());
+                painter.add(egui::Shape::convex_polygon(
+                    outline,
+                    color.gamma_multiply(0.35),
+                    Stroke::NONE,
+                ));
                 let stroke = if selected {
                     Stroke::new(2.0, Color32::WHITE)
                 } else {
@@ -452,6 +576,14 @@ impl Editor {
                     (Effect::Echo { delay_ms, .. }, _) => format!("every {delay_ms:.0} ms"),
                     (Effect::Reverb { seconds, .. }, _) => format!("{seconds:.1} s room"),
                 };
+                for x in handles
+                    .into_iter()
+                    .flat_map(|(a, b)| [a, b])
+                    .filter(|x| (x0..=x1).contains(x))
+                {
+                    let handle = Rect::from_center_size(pos2(x, area.top() + FADE_Y), vec2(HANDLE, HANDLE));
+                    painter.rect_filled(handle, 1.0, Color32::from_gray(220));
+                }
                 if x1 - x0 > 50.0 {
                     painter.text(
                         pos2(x0.max(lane_left) + 6.0, area.center().y),
@@ -632,6 +764,8 @@ enum Edge {
     End,
     Inside,
     Tail,
+    FadeIn,
+    FadeOut,
 }
 
 fn hz_text(hz: f32) -> String {
