@@ -235,11 +235,15 @@ pub struct EffectRange {
 /// The sound of a reversed effect. It needs all of the range before its first frame, so it cannot be computed
 /// piece by piece while playing.
 #[derive(Clone, PartialEq)]
-pub struct Reversed(Arc<[Vec<f32>; 2]>);
+pub struct Reversed {
+    /// What the sound was computed from: the effect, the rate and the sound under the range.
+    key: u64,
+    sound: Arc<[Vec<f32>; 2]>,
+}
 
 impl std::fmt::Debug for Reversed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let [left, _] = &*self.0;
+        let [left, _] = &*self.sound;
         write!(f, "Reversed({} frames)", left.len())
     }
 }
@@ -428,7 +432,7 @@ pub(crate) fn apply_lane(
     let dry = out.clone();
     for range in &lane.ranges {
         if range.effect.reversed() {
-            if let Some(Reversed(sound)) = &range.reversed {
+            if let Some(Reversed { sound, .. }) = &range.reversed {
                 add_reversed(range.end, sound, loop_end, start, out);
             }
             continue;
@@ -760,14 +764,25 @@ fn measure_range(range: &EffectRange, project: &Project, audio: impl FnOnce() ->
 }
 
 /// Reverses the sound under the range, runs the effect over it and reverses the result, so the tail comes
-/// first. It ends at the range end and starts one tail before the range start.
+/// first. It ends at the range end and starts one tail before the range start. When nothing it is computed
+/// from changed, the range keeps the sound it has: undo steps then share it instead of each holding a copy.
 fn reversed_sound(range: &EffectRange, project: &Project, mut audio: [Vec<f32>; 2]) -> Reversed {
+    use std::hash::{Hash, Hasher};
     let rate = project.sample_rate;
     let len = audio[0].len();
     let weights = range_weights(range, project.loop_end.filter(|l| *l > 0), range.start, len);
-    let total = len.saturating_add(usize::try_from(range.effect.tail(rate)).unwrap_or(0));
     for channel in &mut audio {
         channel.iter_mut().zip(&weights).for_each(|(s, w)| *s *= w);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (format!("{:?}", range.effect), rate).hash(&mut hasher);
+    audio.iter().flatten().for_each(|s| s.to_bits().hash(&mut hasher));
+    let key = hasher.finish();
+    if let Some(kept) = range.reversed.as_ref().filter(|r| r.key == key) {
+        return kept.clone();
+    }
+    let total = len.saturating_add(usize::try_from(range.effect.tail(rate)).unwrap_or(0));
+    for channel in &mut audio {
         channel.reverse();
         channel.resize(total, 0.0);
     }
@@ -775,7 +790,10 @@ fn reversed_sound(range: &EffectRange, project: &Project, mut audio: [Vec<f32>; 
     let state = &mut State::new(range.effect, rate);
     apply_range(range, rate, &audio, &vec![1.0; total], &mut sound, state);
     sound.iter_mut().for_each(|c| c.reverse());
-    Reversed(Arc::new(sound))
+    Reversed {
+        key,
+        sound: Arc::new(sound),
+    }
 }
 
 /// The gain for normalize and loudness, and whether the peak limit held it back. Silence is left alone.
@@ -1456,5 +1474,33 @@ mod tests {
         let [left, _] = render(s.project(), 0, 600);
         let at = |i: usize, db: f32| (left[i] - db_to_amp(db)).abs() < 1e-4;
         assert!(at(40, -6.0) && at(580, -18.0) && at(520, -30.0));
+    }
+
+    #[test]
+    fn an_edit_elsewhere_keeps_the_reversed_sound_instead_of_a_new_copy_per_undo_step() {
+        let mut s = click_session(Effect::Reverb {
+            seconds: 0.5,
+            level_db: -6.0,
+            reversed: true,
+        });
+        let sound = |s: &Session| s.project().tracks[0].effects[0].ranges[0].reversed.clone().unwrap();
+        let before = sound(&s);
+        s.execute(Command::AddTrack { name: "other".into() }).unwrap();
+        assert!(
+            Arc::ptr_eq(&before.sound, &sound(&s).sound),
+            "shared with the undo step before"
+        );
+
+        let range = s.project().tracks[0].effects[0].ranges[0].id;
+        s.execute(Command::SetEffectRange {
+            range,
+            start: 0,
+            end: 150,
+        })
+        .unwrap();
+        assert!(
+            !Arc::ptr_eq(&before.sound, &sound(&s).sound),
+            "computed again for the new range"
+        );
     }
 }
