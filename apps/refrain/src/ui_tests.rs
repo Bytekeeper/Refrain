@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use refrain_engine::{Command, Session, Source};
 use egui::{Event, Modifiers, MouseWheelSource, MouseWheelUnit, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use refrain_engine::{Command, Session, Source};
 
 use super::Editor;
 
@@ -783,10 +783,7 @@ fn export_panel_and_overwriting_a_source() {
     h.run();
     assert!(!h.state().status_error, "{}", h.state().status);
     assert_eq!(refrain_engine::load_source(&wav).unwrap().frames(), 24_000);
-    assert_eq!(
-        refrain_engine::render(h.state().session.project(), 0, 40_000),
-        before
-    );
+    assert_eq!(refrain_engine::render(h.state().session.project(), 0, 40_000), before);
     assert!(h.state().session.can_undo());
     let kept = dir.join("editor/originals");
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);

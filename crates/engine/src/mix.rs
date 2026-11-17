@@ -1,8 +1,8 @@
 use std::f32::consts::FRAC_PI_2;
 
-use crate::{EffectLane, EffectRange};
 use crate::effects::{Memory, apply_lane};
 use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
+use crate::{EffectLane, EffectRange};
 
 /// Gain of a fade-in at progress `t` (0 = start, 1 = done).
 pub fn fade_gain(shape: FadeShape, t: f32) -> f32 {
@@ -100,7 +100,13 @@ impl Renderer {
             // are left out, as on a mixing desk.
             mix_warmup(project, lanes, start, frames).min(Frames::from(project.sample_rate) / 4)
         };
-        let out = mix_with(project, &mut self.memory, start - warmup, frames + warmup as usize, lanes);
+        let out = mix_with(
+            project,
+            &mut self.memory,
+            start - warmup,
+            frames + warmup as usize,
+            lanes,
+        );
         let end = start.saturating_add(Frames::try_from(frames).unwrap_or(0));
         self.next = Some(project.loop_end.filter(|l| *l > 0).map_or(end, |l| end.rem_euclid(l)));
         drop_warmup(out, warmup as usize)
@@ -110,7 +116,13 @@ impl Renderer {
 /// All tracks with their effects and volume, mixed, then the first `lanes` mix effects.
 pub(crate) fn mix_upto(project: &Project, start: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
     let warmup = mix_warmup(project, lanes, start, frames);
-    let out = mix_with(project, &mut Memory::default(), start - warmup, frames + warmup as usize, lanes);
+    let out = mix_with(
+        project,
+        &mut Memory::default(),
+        start - warmup,
+        frames + warmup as usize,
+        lanes,
+    );
     drop_warmup(out, warmup as usize)
 }
 
@@ -140,7 +152,14 @@ pub(crate) fn render_track(
 ) -> [Vec<f32>; 2] {
     let effects = track.effects.get(..lanes).unwrap_or(&track.effects);
     let warmup = lanes_warmup(project, effects, start, frames);
-    let out = track_with(project, track, &mut Memory::default(), start - warmup, frames + warmup as usize, lanes);
+    let out = track_with(
+        project,
+        track,
+        &mut Memory::default(),
+        start - warmup,
+        frames + warmup as usize,
+        lanes,
+    );
     drop_warmup(out, warmup as usize)
 }
 

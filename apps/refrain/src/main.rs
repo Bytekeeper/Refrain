@@ -12,13 +12,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
-use refrain_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
 use export::ExportTarget;
 use mouse::{Drag, Menu};
 use playback::Player;
 use recovery::Recovery;
+use refrain_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use timeline::SCROLLBAR_H;
 
 const HEADER_W: f32 = 110.0;

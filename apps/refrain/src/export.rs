@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use refrain_engine::{ExportFormat, ExportSettings, export};
 use egui::{Align2, Order, Ui, vec2};
+use refrain_engine::{ExportFormat, ExportSettings, export};
 
 use crate::{Editor, RATES, khz};
 

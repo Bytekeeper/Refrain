@@ -1,9 +1,9 @@
 //! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points.
 
+use egui::{Pos2, Rect, pos2};
 use refrain_engine::{
     ChannelMode, Clip, ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before,
 };
-use egui::{Pos2, Rect, pos2};
 
 use crate::timeline::{clip_area, db_of_y, db_to_amp, free_ends, trash_button, y_of_amp};
 use crate::{Editor, HANDLE, HEADER_W};
@@ -257,7 +257,11 @@ impl Editor {
                 targets.extend([clip.start, clip.end()]);
             }
             let dragged = self.range_drag.as_ref().and_then(|d| d.range);
-            let lanes = project.tracks.iter().flat_map(|t| &t.effects).chain(&project.mix_effects);
+            let lanes = project
+                .tracks
+                .iter()
+                .flat_map(|t| &t.effects)
+                .chain(&project.mix_effects);
             for range in lanes.flat_map(|l| &l.ranges).filter(|r| Some(r.id) != dragged) {
                 targets.extend([range.start, range.end]);
                 let tail = range.effect.tail(project.sample_rate);

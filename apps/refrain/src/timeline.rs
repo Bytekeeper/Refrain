@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
+use craft_audio::peaks::Peaks;
+use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use refrain_engine::{
     ChannelMode, Clip, Fade, FadeShape, Frames, MAX_DB, MIN_DB, Project, Source, TrackId, clip_amp, edge_fades,
     overlap_after, overlap_before, similarity,
 };
-use craft_audio::peaks::Peaks;
-use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::mouse::Drag;
 use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H, Wave};

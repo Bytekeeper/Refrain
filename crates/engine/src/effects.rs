@@ -289,7 +289,11 @@ impl Memory {
     }
 
     pub(crate) fn forget_removed(&mut self, project: &Project) {
-        let lanes = project.tracks.iter().flat_map(|t| &t.effects).chain(&project.mix_effects);
+        let lanes = project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.effects)
+            .chain(&project.mix_effects);
         let kept: Vec<RangeId> = lanes
             .filter(|l| l.enabled)
             .flat_map(|l| l.ranges.iter().map(|r| r.id))
@@ -302,7 +306,10 @@ enum State {
     Nothing,
     /// The last two inputs and outputs of each stage, per channel.
     Filter(Vec<[[f64; 4]; 2]>),
-    Echo { lines: [Vec<f32>; 2], at: usize },
+    Echo {
+        lines: [Vec<f32>; 2],
+        at: usize,
+    },
     Reverb(Box<Reverb>),
 }
 
@@ -529,7 +536,10 @@ impl Reverb {
         };
         let (left, left_passes) = side(0.0);
         let (right, right_passes) = side(SPREAD_MS);
-        let energy: f32 = left.iter().map(|c| 1.0 / (1.0 - c.feedback * c.feedback).max(1e-6)).sum();
+        let energy: f32 = left
+            .iter()
+            .map(|c| 1.0 / (1.0 - c.feedback * c.feedback).max(1e-6))
+            .sum();
         Reverb {
             combs: [left, right],
             passes: [left_passes, right_passes],
@@ -549,7 +559,9 @@ impl Reverb {
             for (sample, &input) in channel.iter_mut().zip(&feed) {
                 let mut room = 0.0;
                 for comb in combs.iter_mut() {
-                    let Some(slot) = comb.line.get_mut(comb.at) else { continue };
+                    let Some(slot) = comb.line.get_mut(comb.at) else {
+                        continue;
+                    };
                     let delayed = *slot;
                     comb.low = delayed * (1.0 - DAMPING) + comb.low * DAMPING;
                     *slot = input + comb.low * comb.feedback;
@@ -884,14 +896,24 @@ mod tests {
             sample_rate: RATE,
             channels: vec![samples],
         });
-        s.execute(Command::AddClip { track, source, start: 0 }).unwrap();
+        s.execute(Command::AddClip {
+            track,
+            source,
+            start: 0,
+        })
+        .unwrap();
         s.execute(Command::AddEffectLane {
             track: Some(track),
             effect,
         })
         .unwrap();
         let lane = s.project().tracks[0].effects[0].id;
-        s.execute(Command::AddEffectRange { lane, start: 0, end: 200 }).unwrap();
+        s.execute(Command::AddEffectRange {
+            lane,
+            start: 0,
+            end: 200,
+        })
+        .unwrap();
         s
     }
 
@@ -952,7 +974,12 @@ mod tests {
             })
             .unwrap();
             let lane = s.project().tracks[0].effects.last().unwrap().id;
-            s.execute(Command::AddEffectRange { lane, start: 50, end: 250 }).unwrap();
+            s.execute(Command::AddEffectRange {
+                lane,
+                start: 50,
+                end: 250,
+            })
+            .unwrap();
         }
         let differs = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
         let played = |s: &Session, from: usize, to: usize| {
@@ -972,7 +999,10 @@ mod tests {
         s.execute(Command::SetLoopEnd { at: Some(600) }).unwrap();
         let whole = render(s.project(), 0, 600)[0].clone();
         // The 8th echo comes at 660, which is 60 in the next loop.
-        assert!(whole[50..100].iter().any(|v| v.abs() > 1e-3), "the tail wraps into the start");
+        assert!(
+            whole[50..100].iter().any(|v| v.abs() > 1e-3),
+            "the tail wraps into the start"
+        );
         // Once playback has run longer than the echo's tail (1120 frames, almost two loops), each loop sounds
         // like the exported one.
         assert!(differs(&whole, &played(&s, 1800, 2400)) < 1e-3);
@@ -988,7 +1018,12 @@ mod tests {
         let mut s = click_session(echo(100.0));
         let lane = s.project().tracks[0].effects[0].id;
         let first = s.project().tracks[0].effects[0].ranges[0].id;
-        s.execute(Command::AddEffectRange { lane, start: 500, end: 600 }).unwrap();
+        s.execute(Command::AddEffectRange {
+            lane,
+            start: 500,
+            end: 600,
+        })
+        .unwrap();
         s.execute(Command::SetEffect {
             range: first,
             effect: echo(50.0),
@@ -996,9 +1031,18 @@ mod tests {
         .unwrap();
         let [left, _] = render(s.project(), 0, 300);
         assert!(left[150] > 0.4 && left[200] < 0.3, "the first range echoes after 50 ms");
-        s.execute(Command::AddEffectRange { lane, start: 800, end: 900 }).unwrap();
+        s.execute(Command::AddEffectRange {
+            lane,
+            start: 800,
+            end: 900,
+        })
+        .unwrap();
         let effects = |s: &Session| -> Vec<Effect> {
-            s.project().tracks[0].effects[0].ranges.iter().map(|r| r.effect).collect()
+            s.project().tracks[0].effects[0]
+                .ranges
+                .iter()
+                .map(|r| r.effect)
+                .collect()
         };
         assert_eq!(effects(&s), [echo(50.0), echo(100.0), echo(50.0)]);
         s.execute(Command::SetLaneEffect {
@@ -1024,7 +1068,13 @@ mod tests {
             level_db: -12.0,
         };
         let longer = reverb.with_tail(reverb.tail(48_000) + 24_000, 48_000);
-        assert_eq!(longer, Effect::Reverb { seconds: 2.0, level_db: -12.0 });
+        assert_eq!(
+            longer,
+            Effect::Reverb {
+                seconds: 2.0,
+                level_db: -12.0
+            }
+        );
 
         let echo = Effect::Echo {
             delay_ms: 100.0,

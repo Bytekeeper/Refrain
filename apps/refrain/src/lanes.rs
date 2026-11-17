@@ -1,7 +1,7 @@
 //! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
 
-use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, LaneId, Project, RangeId, TrackId};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
+use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, LaneId, Project, RangeId, TrackId};
 
 use crate::{Editor, HANDLE, HEADER_W};
 
@@ -19,12 +19,19 @@ pub(crate) struct RangeDrag {
 }
 
 enum RangeDragKind {
-    New { anchor: Frames },
-    Move { grab: Frames, len: Frames },
+    New {
+        anchor: Frames,
+    },
+    Move {
+        grab: Frames,
+        len: Frames,
+    },
     Start,
     End,
     /// The end of the tail, `frames` after the range end.
-    Tail { frames: Frames },
+    Tail {
+        frames: Frames,
+    },
 }
 
 /// A range as drawn: with a drag applied, or one being drawn (`id` `None`, nothing measured yet).
@@ -259,7 +266,9 @@ impl Editor {
             let rate = project.sample_rate;
             match (drag.range, drag.kind) {
                 (Some(range), RangeDragKind::Tail { frames }) => {
-                    let old = project.lane(drag.lane).and_then(|l| l.ranges.iter().find(|r| r.id == range));
+                    let old = project
+                        .lane(drag.lane)
+                        .and_then(|l| l.ranges.iter().find(|r| r.id == range));
                     if let Some(old) = old
                         && old.effect.with_tail(frames, rate) != old.effect
                     {
@@ -273,10 +282,10 @@ impl Editor {
                 (None, _)
                     if end > start
                         && self.run(Command::AddEffectRange {
-                        lane: drag.lane,
-                        start,
-                        end,
-                    }) =>
+                            lane: drag.lane,
+                            start,
+                            end,
+                        }) =>
                 {
                     let ranges = self.session.project().lane(drag.lane).map(|l| l.ranges.clone());
                     self.selected_range = ranges
@@ -297,8 +306,12 @@ impl Editor {
             let tail = self.shown_effect(r).tail(rate);
             let (_, end) = self.shown_range(lane.id, r.id, r.start, r.end);
             let (from, to) = self.tail_span(end, tail);
-            (tail > 0 && self.range_spans(lane_left, from, to).iter().any(|(_, x)| (pos.x - x).abs() <= HANDLE))
-                .then_some((r.id, Edge::Tail))
+            (tail > 0
+                && self
+                    .range_spans(lane_left, from, to)
+                    .iter()
+                    .any(|(_, x)| (pos.x - x).abs() <= HANDLE))
+            .then_some((r.id, Edge::Tail))
         };
         let on_range = lane.ranges.iter().find_map(|r| {
             let (start, end) = self.shown_range(lane.id, r.id, r.start, r.end);
@@ -446,7 +459,15 @@ impl Editor {
 
     /// How long the effect keeps sounding after a range, fading out, with a handle where it is done. An echo
     /// shows a mark at each repeat. With the loop on it wraps into the start, as it is heard.
-    fn draw_tail(&self, painter: &egui::Painter, lane_left: f32, body: Rect, end: Frames, effect: Effect, color: Color32) {
+    fn draw_tail(
+        &self,
+        painter: &egui::Painter,
+        lane_left: f32,
+        body: Rect,
+        end: Frames,
+        effect: Effect,
+        color: Color32,
+    ) {
         let rate = self.session.project().sample_rate;
         let tail = effect.tail(rate);
         if tail <= 0 {
@@ -460,7 +481,12 @@ impl Editor {
         for (x0, x1) in self.range_spans(lane_left, from, to) {
             let alpha = |x: f32| if x == x0 { 0.3 } else { 0.0 };
             let mut mesh = egui::Mesh::default();
-            for (x, y) in [(x0, body.top()), (x1, body.top()), (x1, body.bottom()), (x0, body.bottom())] {
+            for (x, y) in [
+                (x0, body.top()),
+                (x1, body.top()),
+                (x1, body.bottom()),
+                (x0, body.bottom()),
+            ] {
                 mesh.colored_vertex(pos2(x, y), color.gamma_multiply(alpha(x)));
             }
             mesh.add_triangle(0, 1, 2);
@@ -468,7 +494,9 @@ impl Editor {
             painter.add(mesh);
             if delay > 0 {
                 let per_px = (x1 - x0) / (to - from).max(1) as f32;
-                let marks = (1..).map(|k| x0 + (k * delay) as f32 * per_px).take_while(|x| *x < x1 - 1.0);
+                let marks = (1..)
+                    .map(|k| x0 + (k * delay) as f32 * per_px)
+                    .take_while(|x| *x < x1 - 1.0);
                 for x in marks {
                     painter.line_segment(
                         [pos2(x, body.center().y - 4.0), pos2(x, body.center().y + 4.0)],
@@ -606,7 +634,14 @@ fn hz_text(hz: f32) -> String {
     }
 }
 
-type NumberRow<'a> = (&'static str, &'a mut f32, std::ops::RangeInclusive<f32>, f64, &'static str, usize);
+type NumberRow<'a> = (
+    &'static str,
+    &'a mut f32,
+    std::ops::RangeInclusive<f32>,
+    f64,
+    &'static str,
+    usize,
+);
 
 /// One line per number: label and drag field. Returns whether one changed, and whether that change is finished.
 fn number_rows<const N: usize>(ui: &mut Ui, rows: [NumberRow<'_>; N]) -> (bool, bool) {

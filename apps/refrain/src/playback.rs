@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use refrain_engine::{Frames, Project, Renderer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use refrain_engine::{Frames, Project, Renderer};
 
 /// What the audio thread reads. The window swaps in each new project snapshot, so edits are heard at once.
 #[derive(Default)]

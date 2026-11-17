@@ -384,7 +384,11 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
             }
         }
         Command::SetEffect { range, effect } => {
-            let lanes = p.tracks.iter_mut().flat_map(|t| &mut t.effects).chain(&mut p.mix_effects);
+            let lanes = p
+                .tracks
+                .iter_mut()
+                .flat_map(|t| &mut t.effects)
+                .chain(&mut p.mix_effects);
             let mut lanes = lanes.filter(|l| l.ranges.iter().any(|r| r.id == range));
             let lane = lanes
                 .next()
