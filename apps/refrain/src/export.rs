@@ -1,33 +1,24 @@
 //! The export panel and "export again": one target per project, written with the same settings every time.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use egui::{Align2, Order, Ui, vec2};
-use refrain_engine::{ExportFormat, ExportSettings, export};
+use refrain_engine::{Command, ExportFormat, ExportSettings, ExportTarget};
 
 use crate::{Editor, RATES, khz};
 
 const KBPS: [u32; 6] = [96, 128, 160, 192, 256, 320];
 
-/// Where and how the mix is exported. Saved with the project.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ExportTarget {
-    pub(crate) file: Option<PathBuf>,
-    pub(crate) settings: ExportSettings,
-}
-
-impl ExportTarget {
-    /// For the status line and the tooltip, e.g. "Ogg Vorbis, 160 kbit/s, mono, 48 kHz".
-    fn summary(&self, rate: u32) -> String {
-        let s = &self.settings;
-        let quality = if s.format.is_lossy() {
-            format!("{} kbit/s", s.kbps)
-        } else {
-            depth_name(s.bits)
-        };
-        let channels = if s.mono { "mono" } else { "stereo" };
-        format!("{}, {quality}, {channels}, {}", s.format.name(), khz(rate))
-    }
+/// For the status line and the tooltip, e.g. "Ogg Vorbis, 160 kbit/s, mono, 48 kHz".
+fn summary(target: &ExportTarget, rate: u32) -> String {
+    let s = &target.settings;
+    let quality = if s.format.is_lossy() {
+        format!("{} kbit/s", s.kbps)
+    } else {
+        depth_name(s.bits)
+    };
+    let channels = if s.mono { "mono" } else { "stereo" };
+    format!("{}, {quality}, {channels}, {}", s.format.name(), khz(rate))
 }
 
 fn depth_name(bits: u16) -> String {
@@ -71,7 +62,8 @@ impl Editor {
         let project_rate = project.sample_rate;
         let looping = project.loop_end.is_some();
         let can_export = !project.is_empty();
-        let mut target = self.export_target.clone();
+        let old = project.export.clone();
+        let mut target = old.clone();
         let mut browse = false;
         let s = &mut target.settings;
         egui::Grid::new("export settings")
@@ -156,7 +148,7 @@ impl Editor {
                 ui.end_row();
             });
 
-        if target.settings.format != self.export_target.settings.format {
+        if target.settings.format != old.settings.format {
             fit_bits(&mut target.settings);
             if let Some(file) = &mut target.file {
                 file.set_extension(target.settings.format.extension());
@@ -188,12 +180,14 @@ impl Editor {
                  Ogg Vorbis is safer for loops.",
             );
         }
-        self.export_target = target;
+        if target != old {
+            self.run(Command::SetExportTarget { target });
+        }
         if browse {
             self.browse_export_file();
         }
         ui.add_space(4.0);
-        let ready = can_export && self.export_target.file.is_some();
+        let ready = can_export && self.session.project().export.file.is_some();
         if ui
             .add_enabled(ready, egui::Button::new("Export"))
             .on_hover_text("Ctrl+E exports again with these settings, also when this panel is closed")
@@ -204,8 +198,9 @@ impl Editor {
     }
 
     fn browse_export_file(&mut self) {
-        let format = self.export_target.settings.format;
-        let current = self.export_target.file.clone();
+        let mut target = self.session.project().export.clone();
+        let format = target.settings.format;
+        let current = target.file.clone();
         let name = current
             .as_deref()
             .and_then(Path::file_name)
@@ -230,79 +225,57 @@ impl Editor {
             .and_then(ExportFormat::from_extension);
         match chosen {
             Some(format) => {
-                self.export_target.settings.format = format;
-                fit_bits(&mut self.export_target.settings);
+                target.settings.format = format;
+                fit_bits(&mut target.settings);
             }
             None => {
                 path.set_extension(format.extension());
             }
         }
-        self.export_target.file = Some(path);
+        target.file = Some(path);
+        self.run(Command::SetExportTarget { target });
     }
 
     /// The toolbar button and Ctrl+E: writes the target again, or opens the panel when there is none.
     pub(crate) fn export_again(&mut self) {
-        match self.export_target.file.clone() {
-            Some(path) => self.write_export(&path),
-            None => self.export_open = true,
+        if self.session.project().export.file.is_some() {
+            self.write_export();
+        } else {
+            self.export_open = true;
         }
     }
 
     pub(crate) fn export_tooltip(&self) -> String {
-        match &self.export_target.file {
+        let project = self.session.project();
+        let target = &project.export;
+        match &target.file {
             Some(file) => {
-                let rate = self.export_target.settings.sample_rate;
-                let rate = self
-                    .export_target
-                    .settings
-                    .format
-                    .rate_for(rate.unwrap_or(self.session.project().sample_rate));
-                format!(
-                    "Export to {} ({}). Ctrl+E",
-                    file.display(),
-                    self.export_target.summary(rate)
-                )
+                let wanted = target.settings.sample_rate.unwrap_or(project.sample_rate);
+                let rate = target.settings.format.rate_for(wanted);
+                format!("Export to {} ({}). Ctrl+E", file.display(), summary(target, rate))
             }
             None => "Choose where and how to export. Ctrl+E".into(),
         }
     }
 
-    /// When the target is audio the project uses, that file is copied aside first, so the clips keep their
-    /// audio and every later export starts from the original again.
-    pub(crate) fn write_export(&mut self, path: &Path) {
-        let keeps_original = self.session.uses_file(path);
-        if keeps_original && let Err(e) = self.keep_original(path) {
-            self.fail(format!(
-                "Not exported: cannot keep a copy of the original {}: {e}",
-                path.display()
-            ));
-            return;
-        }
-        match export(self.session.project(), &self.export_target.settings, path) {
-            Ok(rate) => {
-                let summary = self.export_target.summary(rate);
-                let kept = if keeps_original {
+    /// Writes the project's export target. Audio the project uses is kept in this window's originals folder
+    /// first, so the clips keep their audio and every later export starts from the original again.
+    pub(crate) fn write_export(&mut self) {
+        let recovery = self.recovery.as_ref();
+        let keep_as = |name: &str| recovery.map(|r| r.kept_path(name));
+        match self.session.export(keep_as) {
+            Ok(done) => {
+                let target = &self.session.project().export;
+                let file = target.file.as_deref().map(Path::display).map(|p| p.to_string());
+                let kept = if done.kept_original {
                     " The project keeps using the original audio."
                 } else {
                     ""
                 };
-                self.info(format!("Exported {} ({summary}).{kept}", path.display()));
+                let summary = summary(target, done.rate);
+                self.info(format!("Exported {} ({summary}).{kept}", file.unwrap_or_default()));
             }
             Err(e) => self.fail(format!("Not exported: {e}")),
         }
-    }
-
-    fn keep_original(&mut self, path: &Path) -> std::io::Result<()> {
-        let recovery = self.recovery.as_ref();
-        let recovery = recovery.ok_or_else(|| std::io::Error::other("there is no folder for it"))?;
-        std::fs::create_dir_all(recovery.originals_dir())?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let copy = recovery.kept_path(&name);
-        std::fs::copy(path, &copy)?;
-        self.session.relocate(path, &copy);
-        Ok(())
     }
 }

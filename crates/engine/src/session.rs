@@ -1,18 +1,21 @@
 //! The open project with undo, and every command that changes it.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::effects::{default_fade, measure, tidy_lane};
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
+use crate::project_file::save_project;
 use crate::{
-    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, Generator,
-    LaneId, MAX_DB, MIN_DB, Project, RangeId, Result, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, ExportTarget, Fade, FadeShape, Frames,
+    GainPoint, Generator, LaneId, MAX_DB, MIN_DB, Project, RangeId, Result, Source, Track, TrackId,
 };
 
 const MAX_UNDO: usize = 500;
+/// The folder next to a project file that holds copies of audio an export overwrote.
+const ORIGINALS: &str = "originals";
 
 /// Every change to the project. The window, and later a CLI or an agent, only edit through these.
 #[derive(Debug, Clone)]
@@ -170,6 +173,19 @@ pub enum Command {
     SetSampleRate {
         rate: u32,
     },
+    /// Where and how [`Session::export`] writes the mix.
+    SetExportTarget {
+        target: ExportTarget,
+    },
+}
+
+/// What [`Session::export`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exported {
+    /// The rate the file was written at.
+    pub rate: u32,
+    /// The target was audio the project uses; a copy of it was kept and the project reads that now.
+    pub kept_original: bool,
 }
 
 /// The open project with its undo history. Snapshots share sample data, so they are cheap.
@@ -240,6 +256,85 @@ impl Session {
                 .iter()
                 .any(|s| p.file_of(s).is_some_and(|f| same_file(f, path)))
         })
+    }
+
+    /// Writes the mix to the project's export target. The only file the editor overwrites is that target, so
+    /// when it is audio the project or its undo history uses, the file is first copied to where `keep_as` says
+    /// for its name, and the project reads that copy from then on.
+    pub fn export(&mut self, keep_as: impl FnOnce(&str) -> Option<PathBuf>) -> Result<Exported> {
+        let target = self.project.export.clone();
+        let path = target
+            .file
+            .ok_or_else(|| Error::Invalid("no export file is chosen yet".into()))?;
+        let kept_original = self.uses_file(&path);
+        if kept_original {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let cannot = |e: &dyn std::fmt::Display| {
+                Error::Invalid(format!("cannot keep a copy of the original {}: {e}", path.display()))
+            };
+            let copy = keep_as(&name).ok_or_else(|| cannot(&"there is no folder for it"))?;
+            if let Some(dir) = copy.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| cannot(&e))?;
+            }
+            std::fs::copy(&path, &copy).map_err(|e| cannot(&e))?;
+            self.relocate(&path, &copy);
+        }
+        let rate = crate::export(&self.project, &target.settings, &path)?;
+        Ok(Exported { rate, kept_original })
+    }
+
+    /// Saves the project to `path` with the window's `view`. Copies of overwritten originals that lie in
+    /// `kept_dir` first move into an `originals` folder next to the project file, under the name the original
+    /// had, so the project stays complete wherever it is copied.
+    pub fn save(&mut self, path: &Path, view: Option<&serde_json::Value>, kept_dir: Option<&Path>) -> Result<()> {
+        if let Some(kept_dir) = kept_dir {
+            self.take_originals_along(path, kept_dir)
+                .map_err(|e| Error::Invalid(format!("cannot copy the kept original audio next to the project: {e}")))?;
+        }
+        save_project(&self.project, path, view)
+    }
+
+    fn take_originals_along(&mut self, project_file: &Path, kept_dir: &Path) -> std::io::Result<()> {
+        let project = self.project.clone();
+        // Each copy with the name of the file it was copied from.
+        let mut kept: Vec<(PathBuf, String)> = project
+            .sources()
+            .into_iter()
+            .filter_map(|s| {
+                let file = project.file_of(s).filter(|f| f.starts_with(kept_dir))?;
+                let name = s.path.as_deref().and_then(Path::file_name).unwrap_or(file.as_os_str());
+                Some((file.to_path_buf(), name.to_string_lossy().into_owned()))
+            })
+            .collect();
+        kept.sort();
+        kept.dedup_by(|a, b| a.0 == b.0);
+        let Some(dir) = std::path::absolute(project_file)?.parent().map(|d| d.join(ORIGINALS)) else {
+            return Ok(());
+        };
+        for (file, name) in kept {
+            std::fs::create_dir_all(&dir)?;
+            let mut target = dir.join(&name);
+            let mut n = 2;
+            while target.exists() {
+                let path = Path::new(&name);
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let ext = path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                target = dir.join(format!("{stem} ({n}){ext}"));
+                n += 1;
+            }
+            std::fs::copy(&file, &target)?;
+            self.relocate(&file, &target);
+        }
+        Ok(())
     }
 
     /// The audio stored in `from` is now stored in `to`, in the project and the whole undo history. Not an undo
@@ -631,6 +726,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::MatchCrossfade { clip, range } => match_crossfade(p, clip, range)?,
         Command::SetSampleRate { rate } => set_sample_rate(p, rate)?,
+        Command::SetExportTarget { target } => p.export = target,
         Command::SetChannels { clips, mode } => {
             for clip in clips {
                 clip_mut(p, clip)?.channels = mode;

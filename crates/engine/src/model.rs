@@ -189,6 +189,7 @@ pub struct Project {
     /// Audio whose file now lives elsewhere, because the file it was read from was overwritten. Keyed by the
     /// audio, not the path, so audio read later from the new file at the old path is not affected.
     pub(crate) relocated: Vec<(Arc<Source>, PathBuf)>,
+    pub export: crate::ExportTarget,
 }
 
 impl Project {

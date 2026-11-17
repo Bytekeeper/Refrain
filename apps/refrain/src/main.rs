@@ -19,7 +19,6 @@ use std::sync::{Arc, Weak};
 
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
-use export::ExportTarget;
 use mouse::{Drag, Menu};
 use playback::Player;
 use recovery::Recovery;
@@ -97,8 +96,6 @@ struct Editor {
     /// The project as last opened or saved; any other snapshot means unsaved changes.
     saved: Arc<Project>,
     saved_heights: Vec<f32>,
-    export_target: ExportTarget,
-    saved_export: ExportTarget,
     export_open: bool,
     /// The settings panel of a generated clip, when open.
     generate: Option<generate::Panel>,
@@ -125,8 +122,6 @@ impl Default for Editor {
         Editor {
             saved: session.project().clone(),
             saved_heights: vec![],
-            export_target: ExportTarget::default(),
-            saved_export: ExportTarget::default(),
             export_open: false,
             generate: None,
             last_generator: refrain_engine::Generator::Tone {

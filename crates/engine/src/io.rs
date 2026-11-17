@@ -135,6 +135,13 @@ impl ExportFormat {
     }
 }
 
+/// Where and how "export again" writes the mix. Saved with the project.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ExportTarget {
+    pub file: Option<std::path::PathBuf>,
+    pub settings: ExportSettings,
+}
+
 /// How the mix is written. Values may come from a project file, so `export` checks them.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExportSettings {

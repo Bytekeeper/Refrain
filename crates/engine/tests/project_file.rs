@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use refrain_engine::{
-    ChannelMode, Command, Effect, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Generator, NoiseColor,
-    Session, Source, export, load_source, open_project, render, save_project,
+    ChannelMode, Command, Effect, ExportFormat, ExportSettings, ExportTarget, Fade, FadeShape, GainPoint, Generator,
+    NoiseColor, Session, Source, export, load_source, open_project, render, save_project,
 };
 
 const RATE: u32 = 8000;
@@ -472,4 +472,65 @@ fn ranges_in_older_files_take_the_lane_settings() {
         assert!(lane.ranges.iter().all(|r| (r.fade_in, r.fade_out) == (fade, fade)));
     }
     assert_same_sound(&s, &opened);
+}
+
+/// What the window does around exporting and saving, done by the engine alone, as another program would.
+#[test]
+fn exporting_over_used_audio_keeps_it_and_saving_takes_it_along() {
+    let dir = folder("export_keeps");
+    let mut s = edited_project(&dir);
+    let audio = dir.join("audio/a.wav");
+    let before = render(s.project(), 0, 30_000);
+    let target = ExportTarget {
+        file: Some(audio.clone()),
+        settings: ExportSettings::default(),
+    };
+    s.execute(Command::SetExportTarget { target }).unwrap();
+
+    let kept_dir = dir.join("kept");
+    let done = s.export(|name| Some(kept_dir.join(format!("x-{name}")))).unwrap();
+    assert!(done.kept_original);
+    assert_eq!(
+        render(s.project(), 0, 30_000),
+        before,
+        "the clips still play the original"
+    );
+    assert!(
+        s.export(|_| None).is_ok_and(|d| !d.kept_original),
+        "the project no longer reads it"
+    );
+
+    let file = dir.join("song.refrain");
+    s.save(&file, None, Some(&kept_dir)).unwrap();
+    assert!(dir.join("originals/a.wav").exists(), "under the name it had");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("\"originals/a.wav\"") && text.contains("\"file\": \"audio/a.wav\""),
+        "{text}"
+    );
+    let (opened, _) = open_project(&file).unwrap();
+    assert_eq!(opened.project().export.file.as_deref(), Some(audio.as_path()));
+    assert_eq!(render(opened.project(), 0, 30_000), before);
+}
+
+/// Files saved before the export target was part of the project kept it with the window's view.
+#[test]
+fn an_export_target_in_an_older_view_is_read() {
+    let dir = folder("older_export");
+    let s = edited_project(&dir);
+    let file = dir.join("song.refrain");
+    save_project(s.project(), &file, None).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let object = json.as_object_mut().unwrap();
+    object.remove("export");
+    object.insert(
+        "view".into(),
+        serde_json::json!({"export": {"file": "mix.ogg", "settings": {
+            "format": "ogg", "bits": 16, "kbps": 160, "mono": true, "sample_rate": null}}}),
+    );
+    std::fs::write(&file, json.to_string()).unwrap();
+    let (opened, _) = open_project(&file).unwrap();
+    let export = &opened.project().export;
+    assert_eq!(export.file.as_deref(), Some(dir.join("mix.ogg").as_path()));
+    assert!(export.settings.mono);
 }

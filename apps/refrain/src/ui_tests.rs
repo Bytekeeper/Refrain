@@ -772,18 +772,31 @@ fn export_panel_and_overwriting_a_source() {
     };
     e.import_files(std::slice::from_ref(&wav));
     assert!(e.run(Command::SetLoopEnd { at: Some(24_000) }));
-    e.export_target.file = Some(wav.clone());
+    let target = |format| refrain_engine::ExportTarget {
+        file: Some(wav.clone()),
+        settings: refrain_engine::ExportSettings {
+            format,
+            ..Default::default()
+        },
+    };
+    assert!(e.run(Command::SetExportTarget {
+        target: target(refrain_engine::ExportFormat::Wav)
+    }));
     e.export_open = true;
     let mut h = harness_sized(e, 450.0);
     save(&mut h, "export_panel");
-    h.state_mut().export_target.settings.format = refrain_engine::ExportFormat::Mp3;
+    h.state_mut().run(Command::SetExportTarget {
+        target: target(refrain_engine::ExportFormat::Mp3),
+    });
     h.run();
     save(&mut h, "export_panel_mp3_loop");
-    h.state_mut().export_target.settings.format = refrain_engine::ExportFormat::Wav;
+    h.state_mut().run(Command::SetExportTarget {
+        target: target(refrain_engine::ExportFormat::Wav),
+    });
     h.run();
 
     let before = refrain_engine::render(h.state().session.project(), 0, 40_000);
-    h.state_mut().write_export(&wav);
+    h.state_mut().write_export();
     h.run();
     assert!(!h.state().status_error, "{}", h.state().status);
     assert_eq!(refrain_engine::load_source(&wav).unwrap().frames(), 24_000);
@@ -792,7 +805,7 @@ fn export_panel_and_overwriting_a_source() {
     let kept = dir.join("editor/originals");
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
     // A second export over it needs no new copy: the project no longer reads that file.
-    h.state_mut().write_export(&wav);
+    h.state_mut().write_export();
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
 
     let project = dir.join("song.refrain");
@@ -802,7 +815,7 @@ fn export_panel_and_overwriting_a_source() {
     assert!(text.contains("\"file\": \"engine.wav\""), "{text}");
     let mut other = Editor::default();
     assert!(other.open_from(&project));
-    assert_eq!(other.export_target.file.as_deref(), Some(wav.as_path()));
+    assert_eq!(other.session.project().export.file.as_deref(), Some(wav.as_path()));
     assert_eq!(refrain_engine::render(other.session.project(), 0, 40_000), before);
 }
 

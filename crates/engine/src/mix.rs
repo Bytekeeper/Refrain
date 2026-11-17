@@ -393,6 +393,7 @@ mod tests {
             loop_end: None,
             relocated: vec![],
             mix_effects: vec![],
+            export: Default::default(),
         }
     }
 

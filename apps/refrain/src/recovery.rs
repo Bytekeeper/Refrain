@@ -91,15 +91,6 @@ impl Recovery {
     }
 }
 
-/// The name a kept original had before it was kept.
-fn given_name(kept: &Path) -> String {
-    let name = kept
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    name.splitn(3, '-').nth(2).map_or(name.clone(), str::to_string)
-}
-
 /// The audio files a project file names, read without loading any audio.
 fn files_named_in(project_file: &Path) -> Vec<PathBuf> {
     let Ok(bytes) = std::fs::read(project_file) else {
@@ -151,7 +142,7 @@ impl Editor {
 
     fn write_recovery(&mut self, recovery: &mut Recovery) {
         recovery.last_write = Some(Instant::now());
-        let mut view = self.view(None);
+        let mut view = self.view();
         if let (Some(view), Some(file)) = (view.as_object_mut(), &self.file) {
             view.insert("file".into(), file.to_string_lossy().into());
         }
@@ -231,50 +222,6 @@ impl Editor {
 
     pub(crate) fn originals_dir(&self) -> Option<PathBuf> {
         self.recovery.as_ref().map(Recovery::originals_dir)
-    }
-
-    /// Kept originals the project uses move into an `originals` folder next to the project file, so the project
-    /// stays complete wherever it is copied.
-    pub(crate) fn take_originals_along(&mut self, project_file: &Path) -> std::io::Result<()> {
-        let Some(kept_dir) = self.originals_dir() else {
-            return Ok(());
-        };
-        let project = self.session.project().clone();
-        let mut kept: Vec<PathBuf> = project
-            .sources()
-            .iter()
-            .filter_map(|s| project.file_of(s))
-            .filter(|f| f.starts_with(&kept_dir))
-            .map(Path::to_path_buf)
-            .collect();
-        kept.sort();
-        kept.dedup();
-        let dir = std::path::absolute(project_file)?.parent().map(|d| d.join(ORIGINALS));
-        let Some(dir) = dir else {
-            return Ok(());
-        };
-        for file in kept {
-            std::fs::create_dir_all(&dir)?;
-            let name = given_name(&file);
-            let mut target = dir.join(&name);
-            let mut n = 2;
-            while target.exists() {
-                let path = Path::new(&name);
-                let stem = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let ext = path
-                    .extension()
-                    .map(|e| format!(".{}", e.to_string_lossy()))
-                    .unwrap_or_default();
-                target = dir.join(format!("{stem} ({n}){ext}"));
-                n += 1;
-            }
-            std::fs::copy(&file, &target)?;
-            self.session.relocate(&file, &target);
-        }
-        Ok(())
     }
 
     /// Opens a recovery copy as unsaved work of the project it came from, and deletes the copy.
