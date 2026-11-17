@@ -89,13 +89,6 @@ impl Editor {
                 0.0,
                 ui.visuals().faint_bg_color,
             );
-            painter.text(
-                row.min + vec2(8.0, 8.0),
-                Align2::LEFT_TOP,
-                &track.name,
-                FontId::proportional(13.0),
-                text,
-            );
             let bottom = row.bottom() + self.lanes_height(i);
             painter.line_segment(
                 [pos2(row.left(), bottom), pos2(row.right(), bottom)],
@@ -236,7 +229,47 @@ impl Editor {
     }
 
     /// Mute, volume and delete in the track's header.
+    /// The track's name, shortened with "…" when it does not fit; double-click to rename.
+    fn track_name(&mut self, ui: &mut Ui, row: Rect, track: &refrain_engine::Track) {
+        let place = Rect::from_min_size(row.min + vec2(6.0, 4.0), vec2(HEADER_W - 12.0, 22.0));
+        let left = egui::Layout::left_to_right(egui::Align::Center);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(place).layout(left), |ui| {
+            let editing = matches!(&self.name_edit, Some((t, _)) if *t == track.id);
+            if !editing {
+                let label = egui::Label::new(egui::RichText::new(&track.name).size(13.0))
+                    .truncate()
+                    .sense(Sense::click());
+                if ui
+                    .add(label)
+                    .on_hover_text(format!("{}\nDouble-click to rename", track.name))
+                    .double_clicked()
+                {
+                    self.name_edit = Some((track.id, track.name.clone()));
+                }
+                return;
+            }
+            let Some((_, text)) = &mut self.name_edit else { return };
+            let response = ui
+                .add(egui::TextEdit::singleline(text).desired_width(place.width()))
+                .accessible_name("Track name");
+            if !response.has_focus() && !response.lost_focus() {
+                response.request_focus();
+            }
+            if response.lost_focus() {
+                let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if let Some((track, name)) = self.name_edit.take()
+                    && !cancelled
+                    && !name.trim().is_empty()
+                    && name.trim() != track_name(&self.session, track)
+                {
+                    self.run(Command::RenameTrack { track, name });
+                }
+            }
+        });
+    }
+
     fn track_controls(&mut self, ui: &mut Ui, row: Rect, track: &refrain_engine::Track) {
+        self.track_name(ui, row, track);
         let mute = Rect::from_min_size(row.min + vec2(6.0, 30.0), vec2(24.0, 20.0));
         if ui
             .put(mute, egui::Button::selectable(track.muted, "M"))
@@ -704,8 +737,9 @@ impl Editor {
                     .snap_targets(&project, None, shift)
                     .apply(frame, &mut self.snap_guide);
                 self.loop_drag = Some(snapped.max(1));
-            } else if pos.x >= lane_left && !on_flag {
-                self.player.seek(frame);
+            } else if !on_flag {
+                // Left of the time labels is the left edge of what is shown.
+                self.player.seek(self.frame_at(lane_left, pos.x.max(lane_left)));
             }
         }
         if response.drag_stopped()
@@ -1005,4 +1039,12 @@ fn channel_label(clip: &Clip) -> String {
         ChannelMode::Left => format!("{name} · left only"),
         ChannelMode::Right => format!("{name} · right only"),
     }
+}
+
+fn track_name(session: &refrain_engine::Session, track: TrackId) -> String {
+    session
+        .project()
+        .track(track)
+        .map(|t| t.name.clone())
+        .unwrap_or_default()
 }

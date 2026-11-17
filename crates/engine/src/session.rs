@@ -21,6 +21,10 @@ pub enum Command {
     RemoveTrack {
         track: TrackId,
     },
+    RenameTrack {
+        track: TrackId,
+        name: String,
+    },
     SetTrackGain {
         track: TrackId,
         db: f32,
@@ -324,6 +328,13 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::SetTrackGain { track, db } => track_mut(p, track)?.gain_db = check_db(db)?,
         Command::SetTrackMute { track, muted } => track_mut(p, track)?.muted = muted,
+        Command::RenameTrack { track, name } => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(Error::Invalid("a track needs a name".into()));
+            }
+            track_mut(p, track)?.name = name.to_string();
+        }
         Command::AddClip { track, source, start } => {
             let len = source.frames();
             if len <= 0 {

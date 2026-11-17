@@ -145,7 +145,8 @@ impl Editor {
         let frame = self.frame_at(lane_left, pos.x);
         let hit = self.hit(project, rect, pos);
 
-        if response.clicked() {
+        // The header column holds the track controls: a click there between them does nothing.
+        if response.clicked() && pos.x >= lane_left {
             if let Some(Hit::Trash(clip)) = hit {
                 self.run(Command::DeleteClip { clip });
                 return;

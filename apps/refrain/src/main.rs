@@ -21,7 +21,7 @@ use recovery::Recovery;
 use refrain_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use timeline::SCROLLBAR_H;
 
-const HEADER_W: f32 = 110.0;
+const HEADER_W: f32 = 130.0;
 const TRACK_H: f32 = 110.0;
 const HANDLE: f32 = 6.0;
 /// The working rates offered for a project and for an export.
@@ -82,6 +82,8 @@ struct Editor {
     resizing: Option<TrackId>,
     /// A track volume being dragged, not yet in the project.
     gain_edit: Option<(TrackId, f32)>,
+    /// The track whose name is being typed, and the text so far.
+    name_edit: Option<(TrackId, String)>,
     /// Waveform overviews, keyed by source address and channel. The weak reference keeps the address
     /// from being reused by new audio while the entry exists.
     peaks: HashMap<(usize, usize), Wave>,
@@ -142,6 +144,7 @@ impl Default for Editor {
             effect_edit: None,
             fade_edit: None,
             gain_edit: None,
+            name_edit: None,
             peaks: HashMap::new(),
         }
     }

@@ -361,7 +361,7 @@ fn trimmed_edges_can_be_dragged_back_out() {
     let mut e = Editor::default();
     e.run(Command::AddTrack { name: "Track".into() });
     let track = e.session.project().tracks[0].id;
-    // 3 s at 1 s: x = 286..766 at 50 frames per pixel.
+    // 3 s at 1 s: x = 306..786 at 50 frames per pixel.
     e.run(Command::AddClip {
         track,
         source: tone(220.0, 3.0),
@@ -371,8 +371,8 @@ fn trimmed_edges_can_be_dragged_back_out() {
     let mut h = harness(e);
     let clip = || -> fn(&Editor) -> refrain_engine::Clip { |e| e.session.project().tracks[0].clips[0].clone() };
 
-    drag(&mut h, egui::pos2(764.0, 120.0), egui::pos2(616.0, 120.0));
-    drag(&mut h, egui::pos2(288.0, 120.0), egui::pos2(366.0, 120.0));
+    drag(&mut h, egui::pos2(784.0, 120.0), egui::pos2(636.0, 120.0));
+    drag(&mut h, egui::pos2(308.0, 120.0), egui::pos2(386.0, 120.0));
     let c = clip()(h.state());
     assert_eq!((c.start, c.end()), (12_000, 24_500));
     assert_eq!(c.hidden(), (4_000, 7_500));
@@ -385,16 +385,16 @@ fn trimmed_edges_can_be_dragged_back_out() {
         pressed,
         modifiers: Modifiers::NONE,
     };
-    let from = egui::pos2(614.0, 120.0);
+    let from = egui::pos2(634.0, 120.0);
     h.hover_at(from);
     h.run();
     h.event(press(from, true));
-    for x in [640.0, 720.0, 820.0, 880.0] {
+    for x in [660.0, 740.0, 840.0, 900.0] {
         h.hover_at(egui::pos2(x, 120.0));
         h.run();
     }
     save(&mut h, "trim_dragging_out");
-    h.event(press(egui::pos2(880.0, 120.0), false));
+    h.event(press(egui::pos2(900.0, 120.0), false));
     h.run();
     let c = clip()(h.state());
     assert_eq!(c.end(), 4 * RATE as i64);
@@ -448,7 +448,7 @@ fn dragging_the_loop_flag_wraps_the_end_onto_the_start() {
     let mut e = Editor::default();
     e.run(Command::AddTrack { name: "Track".into() });
     let track = e.session.project().tracks[0].id;
-    // 3 s at 0: x = 126..606 at 50 frames per pixel.
+    // 3 s at 0: x = 146..626 at 50 frames per pixel.
     e.run(Command::AddClip {
         track,
         source: tone(220.0, 3.0),
@@ -459,7 +459,7 @@ fn dragging_the_loop_flag_wraps_the_end_onto_the_start() {
     });
     e.frames_per_px = 50.0;
     let mut h = harness(e);
-    drag(&mut h, egui::pos2(604.0, 50.0), egui::pos2(526.0, 50.0));
+    drag(&mut h, egui::pos2(624.0, 50.0), egui::pos2(546.0, 50.0));
     assert_eq!(h.state().session.project().loop_end, Some(20_000));
     save(&mut h, "loop_wrapped");
 }
@@ -529,7 +529,7 @@ fn changing_the_sample_rate_keeps_the_view() {
 fn the_trash_can_on_a_clip_deletes_it() {
     let mut h = harness(overlapping());
     save(&mut h, "trash_on_selected");
-    click(&mut h, 591.0, 160.0);
+    click(&mut h, 611.0, 160.0);
     let clips = &h.state().session.project().tracks[0].clips;
     assert_eq!(clips.len(), 1);
     assert_eq!(clips[0].start, 2 * RATE as i64, "the first clip was deleted");
@@ -889,18 +889,18 @@ fn effect_ranges_are_edited_with_the_mouse() {
         lanes.flat_map(|l| l.ranges.iter().map(|r| (r.start, r.end))).collect()
     };
 
-    // The track lane is at y 188, the mix lane at y 236; x = 126 + frame / 50.
-    drag(&mut h, egui::pos2(206.0, 236.0), egui::pos2(446.0, 236.0));
+    // The track lane is at y 188, the mix lane at y 236; x = 146 + frame / 50.
+    drag(&mut h, egui::pos2(226.0, 236.0), egui::pos2(466.0, 236.0));
     assert_eq!(ranges(&h), [(8000, 32000), (4000, 16000)]);
-    drag(&mut h, egui::pos2(500.0, 188.0), egui::pos2(550.0, 188.0));
+    drag(&mut h, egui::pos2(520.0, 188.0), egui::pos2(570.0, 188.0));
     assert_eq!(ranges(&h), [(10_500, 34_500), (4000, 16000)]);
-    drag(&mut h, egui::pos2(816.0, 188.0), egui::pos2(786.0, 188.0));
+    drag(&mut h, egui::pos2(836.0, 188.0), egui::pos2(806.0, 188.0));
     assert_eq!(ranges(&h), [(10_500, 33_000), (4000, 16000)]);
     save(&mut h, "effect_lanes");
 
     click(&mut h, 40.0, 188.0);
     assert!(!h.state().session.project().tracks[0].effects[0].enabled);
-    click(&mut h, 300.0, 236.0);
+    click(&mut h, 320.0, 236.0);
     h.key_press(egui::Key::Delete);
     h.run();
     assert_eq!(ranges(&h), [(10_500, 33_000)]);
@@ -934,5 +934,22 @@ fn a_filter_is_added_and_set_from_the_menus() {
     assert_eq!(
         lane(&h).effect,
         refrain_engine::Effect::HighPass { hz: 80.0, steep: true }
+    );
+}
+
+/// Clicking between the track controls left the play position at the time left of the timeline.
+#[test]
+fn clicks_left_of_the_timeline_move_the_play_position_only_in_the_ruler() {
+    let mut e = overlapping();
+    e.scroll = 20_000.0;
+    let mut h = harness(e);
+    h.state().player.seek(30_000);
+    click(&mut h, 135.0, 110.0);
+    assert_eq!(h.state().player.position(), 30_000, "between the track controls");
+    click(&mut h, 60.0, 50.0);
+    assert_eq!(
+        h.state().player.position(),
+        20_000,
+        "left of the time labels: the left edge shown"
     );
 }
