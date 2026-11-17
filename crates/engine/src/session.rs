@@ -201,7 +201,7 @@ impl Session {
         if project.loop_end.is_some_and(|l| l <= 0) {
             return Err(Error::Invalid("the loop end must be after 0".into()));
         }
-        settle(&mut project)?;
+        settle(&mut project, None)?;
         Ok(Session {
             project: Arc::new(project),
             undo: vec![],
@@ -217,7 +217,7 @@ impl Session {
     pub fn execute(&mut self, command: Command) -> Result<()> {
         let mut next = Project::clone(&self.project);
         apply(&mut next, command)?;
-        settle(&mut next)?;
+        settle(&mut next, Some(&self.project))?;
         let previous = std::mem::replace(&mut self.project, Arc::new(next));
         self.undo.push(previous);
         if self.undo.len() > MAX_UNDO {
@@ -366,7 +366,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Checks the rules every project keeps after a change, then measures what the effects need from the audio.
-fn settle(p: &mut Project) -> Result<()> {
+fn settle(p: &mut Project, before: Option<&Project>) -> Result<()> {
     for track in &mut p.tracks {
         tidy(track, p.loop_end)?;
         for lane in &mut track.effects {
@@ -377,7 +377,7 @@ fn settle(p: &mut Project) -> Result<()> {
         tidy_lane(lane, p.loop_end)?;
     }
     refit(p)?;
-    measure(p);
+    measure(p, before);
     Ok(())
 }
 
@@ -626,6 +626,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 gain: 1.0,
                 limited: false,
                 reversed: None,
+                heard: None,
                 fade_in: fade,
                 fade_out: fade,
             });
