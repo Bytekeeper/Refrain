@@ -543,7 +543,7 @@ fn apply_range(
                         *slot = dry * weight + feedback * delayed;
                         *sample += level * delayed;
                     }
-                    i = (i + 1) % len;
+                    i = next(i, len);
                 }
             }
             *at = (*at + weights.len()) % len;
@@ -624,6 +624,11 @@ struct Comb {
 }
 
 /// A room after Schroeder: echo loops in parallel that lose highs, then all-pass diffusers in a row.
+/// The next place in a delay line of `len`. Not `%`: a division per sample made long reverbs slow.
+fn next(at: usize, len: usize) -> usize {
+    if at + 1 >= len { 0 } else { at + 1 }
+}
+
 struct Reverb {
     combs: [Vec<Comb>; 2],
     passes: [Vec<(Vec<f32>, usize)>; 2],
@@ -683,7 +688,7 @@ impl Reverb {
                     let delayed = *slot;
                     comb.low = delayed * (1.0 - DAMPING) + comb.low * DAMPING;
                     *slot = input + comb.low * comb.feedback;
-                    comb.at = (comb.at + 1) % comb.line.len();
+                    comb.at = next(comb.at, comb.line.len());
                     room += delayed;
                 }
                 for (line, at) in passes.iter_mut() {
@@ -691,7 +696,7 @@ impl Reverb {
                     let delayed = *slot;
                     let v = room + DIFFUSION * delayed;
                     *slot = v;
-                    *at = (*at + 1) % line.len();
+                    *at = next(*at, line.len());
                     room = delayed - DIFFUSION * v;
                 }
                 *sample += level * room;
