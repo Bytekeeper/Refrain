@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::effects::{default_fade, measure, tidy_lane};
+use crate::effects::{default_fade, tidy_lane};
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::project_file::save_project;
@@ -201,7 +201,7 @@ impl Session {
         if project.loop_end.is_some_and(|l| l <= 0) {
             return Err(Error::Invalid("the loop end must be after 0".into()));
         }
-        settle(&mut project, None)?;
+        settle(&mut project)?;
         Ok(Session {
             project: Arc::new(project),
             undo: vec![],
@@ -217,7 +217,7 @@ impl Session {
     pub fn execute(&mut self, command: Command) -> Result<()> {
         let mut next = Project::clone(&self.project);
         apply(&mut next, command)?;
-        settle(&mut next, Some(&self.project))?;
+        settle(&mut next)?;
         let previous = std::mem::replace(&mut self.project, Arc::new(next));
         self.undo.push(previous);
         if self.undo.len() > MAX_UNDO {
@@ -366,7 +366,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Checks the rules every project keeps after a change, then measures what the effects need from the audio.
-fn settle(p: &mut Project, before: Option<&Project>) -> Result<()> {
+fn settle(p: &mut Project) -> Result<()> {
     for track in &mut p.tracks {
         tidy(track, p.loop_end)?;
         for lane in &mut track.effects {
@@ -377,7 +377,6 @@ fn settle(p: &mut Project, before: Option<&Project>) -> Result<()> {
         tidy_lane(lane, p.loop_end)?;
     }
     refit(p)?;
-    measure(p, before);
     Ok(())
 }
 
@@ -623,10 +622,6 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 start,
                 end,
                 effect: lane.effect,
-                gain: 1.0,
-                limited: false,
-                reversed: None,
-                heard: None,
                 fade_in: fade,
                 fade_out: fade,
             });

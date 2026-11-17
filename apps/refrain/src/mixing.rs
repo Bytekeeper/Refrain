@@ -1,15 +1,17 @@
 //! The mixdown of the open project: the whole project as heard, made in the background after each edit, so
 //! editing never waits for it. Playback and the Mix level row use the latest one.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
-use refrain_engine::{Levels, Project};
+use refrain_engine::{Gain, Levels, Project, RangeId};
 
-/// The latest mixdown's levels, and the project it was made from.
+/// What the window shows of the latest mixdown, and the project it was made from.
 pub(crate) struct Mixed {
     pub(crate) project: Arc<Project>,
     pub(crate) levels: Levels,
+    pub(crate) gains: HashMap<RangeId, Gain>,
 }
 
 #[derive(Default)]
@@ -18,7 +20,7 @@ pub(crate) struct Mixer {
     working: Option<Working>,
 }
 
-type Mixdown = (Arc<[Vec<f32>; 2]>, Levels);
+type Mixdown = (Arc<[Vec<f32>; 2]>, Levels, HashMap<RangeId, Gain>);
 
 /// A mixdown being made in the background.
 struct Working {
@@ -28,9 +30,9 @@ struct Working {
 }
 
 fn make(project: &Project, keep_going: impl Fn() -> bool) -> Option<Mixdown> {
-    let sound = refrain_engine::mixdown(project, keep_going)?;
-    let levels = Levels::of(&sound);
-    Some((Arc::new(sound), levels))
+    let mixdown = refrain_engine::mixdown(project, keep_going)?;
+    let levels = Levels::of(&mixdown.sound);
+    Some((Arc::new(mixdown.sound), levels, mixdown.gains))
 }
 
 impl crate::Editor {
@@ -76,10 +78,10 @@ impl crate::Editor {
         }
     }
 
-    fn use_mixdown(&mut self, project: Arc<Project>, (sound, levels): Mixdown) {
+    fn use_mixdown(&mut self, project: Arc<Project>, (sound, levels, gains): Mixdown) {
         if let Err(e) = self.player.set_mix(&project, sound) {
             self.fail(e);
         }
-        self.mixer.latest = Some(Mixed { project, levels });
+        self.mixer.latest = Some(Mixed { project, levels, gains });
     }
 }

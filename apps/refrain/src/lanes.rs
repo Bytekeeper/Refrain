@@ -1,7 +1,7 @@
 //! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
-use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, LaneId, Project, RangeId};
+use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, Gain, LaneId, Project, RangeId};
 
 use crate::{Editor, HANDLE, HEADER_W};
 
@@ -51,8 +51,8 @@ struct ShownRange {
     effect: Effect,
     fade_in: Frames,
     fade_out: Frames,
-    /// The measured gain, and whether the peak limit held it back.
-    gain: Option<(f32, bool)>,
+    /// The measured gain from the latest mixdown, and whether the peak limit held it back.
+    gain: Option<Gain>,
 }
 
 /// One lane on screen.
@@ -504,7 +504,7 @@ impl Editor {
                     effect: self.shown_effect(r),
                     fade_in: self.shown_fades(r).0,
                     fade_out: self.shown_fades(r).1,
-                    gain: Some((r.gain, r.limited)),
+                    gain: self.mixer.latest.as_ref().and_then(|m| m.gains.get(&r.id)).copied(),
                 }
             })
             .collect();

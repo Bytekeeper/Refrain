@@ -2,9 +2,10 @@
 
 use std::f32::consts::FRAC_PI_2;
 
-use crate::effects::{Memory, apply_lane, lane_into};
-use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
-use crate::{EffectLane, EffectRange};
+use std::collections::HashMap;
+
+use crate::effects::{Gain, lane_into};
+use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, RangeId, Track};
 
 /// Gain of a fade-in at progress `t` (0 = start, 1 = done).
 pub fn fade_gain(shape: FadeShape, t: f32) -> f32 {
@@ -75,17 +76,41 @@ pub fn overlap_after(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Fram
     next_index(clips, i, loop_end).map_or(0, |n| overlap_before(clips, n, loop_end))
 }
 
-/// Mixes `frames` stereo frames from timeline position `start`. With a loop end, positions repeat
-/// every loop and audio past the loop end plays again from 0.
+/// `frames` stereo frames of the [`mixdown`] from timeline position `start`. With a loop end, positions repeat
+/// every loop.
 pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] {
-    mix_upto(project, start, frames, project.mix_effects.len())
+    let sound = mixdown(project, || true).map(|m| m.sound).unwrap_or_default();
+    read(&sound, project.loop_end, start, frames)
 }
 
-/// The whole project as heard (with the loop on: one loop): each track's clips, then its effect lanes from the
-/// top, at its volume; then the mix lanes. Every effect hears all of its input, before and after. Stops and
-/// returns `None` once `keep_going` says no.
-pub fn mixdown(project: &Project, keep_going: impl Fn() -> bool) -> Option<[Vec<f32>; 2]> {
+/// `n` frames of `sound`, which starts at timeline frame 0, from frame `from`; with a loop end, round the loop.
+/// Silence outside it.
+pub(crate) fn read(sound: &[Vec<f32>; 2], loop_end: Option<Frames>, from: Frames, n: usize) -> [Vec<f32>; 2] {
+    let loop_end = loop_end.filter(|l| *l > 0);
+    sound.each_ref().map(|c| {
+        (from..)
+            .take(n)
+            .map(|t| {
+                let at = loop_end.map_or(t, |l| t.rem_euclid(l));
+                usize::try_from(at).ok().and_then(|i| c.get(i)).copied().unwrap_or(0.0)
+            })
+            .collect()
+    })
+}
+
+/// The whole project as heard (with the loop on: one loop).
+pub struct Mixdown {
+    pub sound: [Vec<f32>; 2],
+    /// What each normalize and loudness range measured.
+    pub gains: HashMap<RangeId, Gain>,
+}
+
+/// Mixes the whole project: each track's clips, then its effect lanes from the top, at its volume; then the mix
+/// lanes. Every effect hears all of its input, before and after. Stops and returns `None` once `keep_going`
+/// says no.
+pub fn mixdown(project: &Project, keep_going: impl Fn() -> bool) -> Option<Mixdown> {
     let len = usize::try_from(project.len()).unwrap_or(0);
+    let mut gains = HashMap::new();
     let mut mix = [vec![0.0; len], vec![0.0; len]];
     let mut sound = [vec![0.0; len], vec![0.0; len]];
     for track in project.tracks.iter().filter(|t| !t.muted) {
@@ -95,7 +120,7 @@ pub fn mixdown(project: &Project, keep_going: impl Fn() -> bool) -> Option<[Vec<
             if !keep_going() {
                 return None;
             }
-            lane_into(lane, project, &mut sound);
+            lane_into(lane, project, &mut sound, &mut gains);
         }
         let amp = db_to_amp(track.gain_db);
         for (mix, sound) in mix.iter_mut().zip(&sound) {
@@ -106,43 +131,9 @@ pub fn mixdown(project: &Project, keep_going: impl Fn() -> bool) -> Option<[Vec<
         if !keep_going() {
             return None;
         }
-        lane_into(lane, project, &mut mix);
+        lane_into(lane, project, &mut mix, &mut gains);
     }
-    Some(mix)
-}
-
-/// Renders the mix piece after piece for playback. The effects keep their memory of the sound between pieces,
-/// so echo and reverb do not have to render seconds of the past again for each piece.
-#[derive(Default)]
-pub struct Renderer {
-    memory: Memory,
-    /// Where the last piece ended: a piece starting there goes on from the memory.
-    next: Option<Frames>,
-}
-
-impl Renderer {
-    pub fn render(&mut self, project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] {
-        let lanes = project.mix_effects.len();
-        let warmup = if self.next == Some(start) {
-            self.memory.forget_removed(project);
-            0
-        } else {
-            self.memory = Memory::default();
-            // After a jump, a full warm-up for a long reverb would stall the sound, so the tails before the jump
-            // are left out, as on a mixing desk.
-            mix_warmup(project, lanes, start, frames).min(Frames::from(project.sample_rate) / 4)
-        };
-        let out = mix_with(
-            project,
-            &mut self.memory,
-            start - warmup,
-            frames + warmup as usize,
-            lanes,
-        );
-        let end = start.saturating_add(Frames::try_from(frames).unwrap_or(0));
-        self.next = Some(project.loop_end.filter(|l| *l > 0).map_or(end, |l| end.rem_euclid(l)));
-        drop_warmup(out, warmup as usize)
-    }
+    Some(Mixdown { sound: mix, gains })
 }
 
 /// The loudest sample of the mix, both sides, in each block of [`Levels::BLOCK`] frames of the whole project.
@@ -170,152 +161,6 @@ impl Levels {
             .get(blocks)
             .map_or(0.0, |p| p.iter().fold(0.0, |m, v| m.max(*v)))
     }
-}
-
-/// [`Levels`] of the whole project (with the loop on: one loop). Renders piece by piece, keeping the effects'
-/// memory between pieces as playback does; stops and returns `None` once `keep_going` says no.
-pub fn levels(project: &Project, keep_going: impl Fn() -> bool) -> Option<Levels> {
-    const PIECE: usize = Levels::BLOCK * 256;
-    let len = usize::try_from(project.len()).unwrap_or(0);
-    let lanes = project.mix_effects.len();
-    let mut memory = Memory::default();
-    let mut peaks = Vec::with_capacity(len.div_ceil(Levels::BLOCK));
-    let mut start = 0;
-    while start < len {
-        if !keep_going() {
-            return None;
-        }
-        let frames = PIECE.min(len - start);
-        let at = Frames::try_from(start).unwrap_or(Frames::MAX);
-        // The first piece hears the past it needs; later ones go on from the memory.
-        let warmup = if start == 0 {
-            mix_warmup(project, lanes, at, frames)
-        } else {
-            0
-        };
-        let out = mix_with(project, &mut memory, at - warmup, frames + warmup as usize, lanes);
-        let [left, right] = drop_warmup(out, warmup as usize);
-        for (l, r) in left.chunks(Levels::BLOCK).zip(right.chunks(Levels::BLOCK)) {
-            peaks.push(l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs())));
-        }
-        start += frames;
-    }
-    Some(Levels { peaks })
-}
-
-/// All tracks with their effects and volume, mixed, then the first `lanes` mix effects.
-pub(crate) fn mix_upto(project: &Project, start: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
-    let warmup = mix_warmup(project, lanes, start, frames);
-    let out = mix_with(
-        project,
-        &mut Memory::default(),
-        start - warmup,
-        frames + warmup as usize,
-        lanes,
-    );
-    drop_warmup(out, warmup as usize)
-}
-
-fn mix_with(project: &Project, memory: &mut Memory, from: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
-    let mut out = [vec![0.0; frames], vec![0.0; frames]];
-    for track in project.tracks.iter().filter(|t| !t.muted) {
-        let amp = db_to_amp(track.gain_db);
-        let [left, right] = track_with(project, track, memory, from, frames, track.effects.len());
-        let [out_left, out_right] = &mut out;
-        for (o, s) in out_left.iter_mut().zip(left).chain(out_right.iter_mut().zip(right)) {
-            *o += s * amp;
-        }
-    }
-    for lane in project.mix_effects.iter().take(lanes) {
-        apply_lane(lane, project, &mut out, from, memory);
-    }
-    out
-}
-
-/// One track's clips and crossfades, then its first `lanes` effects. Without the track volume.
-pub(crate) fn render_track(
-    project: &Project,
-    track: &Track,
-    start: Frames,
-    frames: usize,
-    lanes: usize,
-) -> [Vec<f32>; 2] {
-    let effects = track.effects.get(..lanes).unwrap_or(&track.effects);
-    let warmup = lanes_warmup(project, effects, start, frames);
-    let out = track_with(
-        project,
-        track,
-        &mut Memory::default(),
-        start - warmup,
-        frames + warmup as usize,
-        lanes,
-    );
-    drop_warmup(out, warmup as usize)
-}
-
-fn track_with(
-    project: &Project,
-    track: &Track,
-    memory: &mut Memory,
-    from: Frames,
-    frames: usize,
-    lanes: usize,
-) -> [Vec<f32>; 2] {
-    let mut out = [vec![0.0; frames], vec![0.0; frames]];
-    match project.loop_end.filter(|l| *l > 0) {
-        None => clips_into(project, track, &mut out, 0, from, frames),
-        Some(l) => {
-            let mut done = 0;
-            while done < frames {
-                let at = from.saturating_add(done as Frames).rem_euclid(l);
-                let n = usize::try_from(l - at).unwrap_or(usize::MAX).min(frames - done);
-                clips_into(project, track, &mut out, done, at, n);
-                done += n;
-            }
-        }
-    }
-    for lane in track.effects.iter().take(lanes) {
-        apply_lane(lane, project, &mut out, from, memory);
-    }
-    out
-}
-
-/// How much earlier to start rendering so every effect that sounds in the piece has heard enough of the past.
-/// Stacked lanes add up: a lane needs its input to be right already from its own warm-up on.
-fn lanes_warmup(project: &Project, lanes: &[EffectLane], start: Frames, frames: usize) -> Frames {
-    let end = start.saturating_add(Frames::try_from(frames).unwrap_or(Frames::MAX));
-    let rate = project.sample_rate;
-    // With a loop every range counts: what comes before 0 is the end of the loop.
-    let sounds = |r: &EffectRange| {
-        project.loop_end.is_some() || (r.start < end && r.end.saturating_add(r.effect.tail(rate)) > start)
-    };
-    lanes
-        .iter()
-        .filter(|l| l.enabled)
-        .map(|l| {
-            let ranges = l.ranges.iter().filter(|r| sounds(r));
-            ranges.map(|r| r.effect.warmup(rate)).max().unwrap_or(0)
-        })
-        .fold(0, Frames::saturating_add)
-}
-
-fn mix_warmup(project: &Project, lanes: usize, start: Frames, frames: usize) -> Frames {
-    let mix = project.mix_effects.get(..lanes).unwrap_or(&project.mix_effects);
-    let after = lanes_warmup(project, mix, start, frames);
-    let longer = frames.saturating_add(usize::try_from(after).unwrap_or(0));
-    let tracks = project
-        .tracks
-        .iter()
-        .map(|t| lanes_warmup(project, &t.effects, start - after, longer))
-        .max()
-        .unwrap_or(0);
-    after.saturating_add(tracks)
-}
-
-fn drop_warmup([mut left, mut right]: [Vec<f32>; 2], warmup: usize) -> [Vec<f32>; 2] {
-    left.drain(..warmup.min(left.len()));
-    right.drain(..warmup.min(right.len()));
-    [left, right]
 }
 
 /// Adds the track's timeline frames `from..from + n` to `out` from index `at`. With a loop end, this range must

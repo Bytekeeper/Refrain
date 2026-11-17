@@ -187,7 +187,9 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
     }
     let format = settings.format;
     let rate = format.rate_for(settings.sample_rate.unwrap_or(project.sample_rate));
-    let [left, right] = mixdown(project, || true).ok_or_else(|| Error::Invalid("the mix was stopped".into()))?;
+    let [left, right] = mixdown(project, || true)
+        .ok_or_else(|| Error::Invalid("the mix was stopped".into()))?
+        .sound;
     let mut channels = if settings.mono {
         vec![left.iter().zip(&right).map(|(l, r)| (l + r) * 0.5).collect()]
     } else {

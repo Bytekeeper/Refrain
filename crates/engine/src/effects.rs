@@ -1,11 +1,10 @@
 //! Effects in lanes: each lane is one effect applied in its time ranges, lanes in order from the top.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::loudness::{from_slices, slices};
-use crate::mix::{db_to_amp, mix_upto, render_track};
-use crate::{Clip, Error, Frames, Project, Result};
+use std::collections::HashMap;
+
+use crate::mix::{db_to_amp, read};
+use crate::{Error, Frames, Project, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LaneId(pub u64);
@@ -148,16 +147,9 @@ impl Effect {
         }
     }
 
-    /// How much audio before a frame the effect needs to compute it. Rendering starts this much earlier, so a
-    /// render from the middle sounds like one from the start. For a filter its memory of the past fades to
-    /// -80 dB in this time. A reversed effect is computed in advance and needs none.
+    /// How much sound before a range a filter hears, so it is settled where the range starts: its memory of the
+    /// past fades to -80 dB in this time. The other effects start from silence at the range start.
     pub(crate) fn warmup(&self, rate: u32) -> Frames {
-        if self.reversed() {
-            return 0;
-        }
-        if let Effect::Echo { .. } | Effect::Reverb { .. } = self {
-            return self.tail(rate);
-        }
         let Some((hz, stages)) = self.filter() else { return 0 };
         let w0 = std::f64::consts::TAU * f64::from(cutoff(hz, rate)) / f64::from(rate.max(1));
         // The slowest stage decays by exp(-w0 / (2 q)) per frame.
@@ -222,37 +214,15 @@ pub struct EffectRange {
     pub end: Frames,
     /// Of the lane's kind.
     pub effect: Effect,
-    /// Measured from the audio under the range whenever the project changes; for normalize and loudness the gain.
-    pub gain: f32,
-    /// Measured with the gain: the peak limit kept a loudness range quieter than its target.
-    pub limited: bool,
     /// How long the effect takes to come in after the start and to go before the end, so it does not click.
     pub fade_in: Frames,
     pub fade_out: Frames,
-    /// Measured with the gain for a reversed echo or reverb: its whole sound, which ends at the range end.
-    pub reversed: Option<Reversed>,
-    /// What normalize or loudness measured, kept so a change of their settings needs no new measuring.
-    pub(crate) heard: Option<Heard>,
-}
-
-/// The sound of a reversed effect. It needs all of the range before its first frame, so it cannot be computed
-/// piece by piece while playing.
-#[derive(Clone, PartialEq)]
-pub struct Reversed {
-    /// What the sound was computed from: the effect, the rate and the sound under the range.
-    key: u64,
-    made_for: (Frames, Frames, Frames, Frames, Effect),
-    sound: Arc<[Vec<f32>; 2]>,
-}
-
-impl std::fmt::Debug for Reversed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let [left, _] = &*self.sound;
-        write!(f, "Reversed({} frames)", left.len())
-    }
 }
 
 /// The fade a new range starts with: short enough not to be heard as a fade, long enough not to click.
+/// What normalize or loudness measured: its gain, and whether the peak limit held it back.
+pub type Gain = (f32, bool);
+
 pub(crate) fn default_fade(rate: u32) -> Frames {
     Frames::from(rate) / 100
 }
@@ -359,38 +329,6 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Resu
     Ok(())
 }
 
-/// What each effect remembers of the sound before the current piece, by range. Playback keeps it from one
-/// piece to the next, so a reverb does not have to hear seconds of the past again for every piece.
-#[derive(Default)]
-pub struct Memory {
-    ranges: HashMap<RangeId, (Effect, u32, State)>,
-}
-
-impl Memory {
-    /// The memory of this range; empty when the range is new or its settings changed.
-    fn of(&mut self, range: &EffectRange, rate: u32) -> &mut State {
-        let fresh = || (range.effect, rate, State::new(range.effect, rate));
-        let entry = self.ranges.entry(range.id).or_insert_with(fresh);
-        if entry.0 != range.effect || entry.1 != rate {
-            *entry = fresh();
-        }
-        &mut entry.2
-    }
-
-    pub(crate) fn forget_removed(&mut self, project: &Project) {
-        let lanes = project
-            .tracks
-            .iter()
-            .flat_map(|t| &t.effects)
-            .chain(&project.mix_effects);
-        let kept: Vec<RangeId> = lanes
-            .filter(|l| l.enabled)
-            .flat_map(|l| l.ranges.iter().map(|r| r.id))
-            .collect();
-        self.ranges.retain(|id, _| kept.contains(id));
-    }
-}
-
 enum State {
     Nothing,
     /// The last two inputs and outputs of each stage, per channel.
@@ -421,57 +359,28 @@ impl State {
     }
 }
 
-/// Applies the lane to `out`, which holds timeline frames from `start`. Inside its ranges the processed sound
-/// replaces the plain one, with short fades between them at the edges. Echo and reverb add to the plain sound
-/// instead and keep sounding after the range. Every range works on the sound that came into the lane.
-pub(crate) fn apply_lane(
-    lane: &EffectLane,
-    project: &Project,
-    out: &mut [Vec<f32>; 2],
-    start: Frames,
-    memory: &mut Memory,
-) {
-    if !lane.enabled {
-        return;
-    }
-    let rate = project.sample_rate;
-    let loop_end = project.loop_end.filter(|l| *l > 0);
-    let end = start.saturating_add(out[0].len() as Frames);
-    let dry = out.clone();
-    for range in &lane.ranges {
-        if range.effect.reversed() {
-            if let Some(Reversed { sound, .. }) = &range.reversed {
-                add_reversed(range.end, sound, loop_end, start, out);
-            }
-            continue;
-        }
-        // A filter needs its warm-up before the range; echo and reverb sound until their tail ends.
-        let before = if range.effect.filter().is_some() {
-            range.effect.warmup(rate)
-        } else {
-            0
-        };
-        let near = loop_end.is_some()
-            || (range.start.saturating_sub(before) < end && range.end.saturating_add(range.effect.tail(rate)) > start);
-        if !near {
-            // Silent by now: a later piece starts it again from silence, which is the same.
-            memory.ranges.remove(&range.id);
-            continue;
-        }
-        let weights = range_weights(range, loop_end, start, dry[0].len());
-        apply_range(range, rate, &dry, &weights, out, memory.of(range, rate));
-    }
-}
-
 /// Applies the lane to `sound`: the whole project from frame 0, with a loop one loop. Each range works out
 /// what it changes over its span (the range with its tail) from the sound that came into the lane; then all
 /// changes are added, so a lane costs what its ranges cover. With a loop a change past the loop end goes on at
 /// the start, as in a loop that has always been playing.
-pub(crate) fn lane_into(lane: &EffectLane, project: &Project, sound: &mut [Vec<f32>; 2]) {
+/// Normalize and loudness ranges put what they measured into `gains`.
+pub(crate) fn lane_into(
+    lane: &EffectLane,
+    project: &Project,
+    sound: &mut [Vec<f32>; 2],
+    gains: &mut HashMap<RangeId, Gain>,
+) {
     if !lane.enabled {
         return;
     }
-    let changes: Vec<(Frames, [Vec<f32>; 2])> = lane.ranges.iter().map(|r| range_change(r, project, sound)).collect();
+    let mut changes = vec![];
+    for range in &lane.ranges {
+        let (from, change, gain) = range_change(range, project, sound);
+        if let Some(gain) = gain {
+            gains.insert(range.id, gain);
+        }
+        changes.push((from, change));
+    }
     let loop_end = project.loop_end.filter(|l| *l > 0);
     for (from, change) in changes {
         for (channel, change) in sound.iter_mut().zip(&change) {
@@ -485,21 +394,14 @@ pub(crate) fn lane_into(lane: &EffectLane, project: &Project, sound: &mut [Vec<f
     }
 }
 
-/// What one range adds to `sound`, from the frame returned on.
-fn range_change(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) -> (Frames, [Vec<f32>; 2]) {
+/// What one range adds to `sound`, from the frame returned on; and for normalize and loudness the gain.
+fn range_change(
+    range: &EffectRange,
+    project: &Project,
+    sound: &[Vec<f32>; 2],
+) -> (Frames, [Vec<f32>; 2], Option<Gain>) {
     let rate = project.sample_rate;
     let loop_end = project.loop_end.filter(|l| *l > 0);
-    let read = |from: Frames, n: usize| {
-        sound.clone().map(|c| {
-            (from..)
-                .take(n)
-                .map(|t| {
-                    let at = loop_end.map_or(t, |l| t.rem_euclid(l));
-                    usize::try_from(at).ok().and_then(|i| c.get(i)).copied().unwrap_or(0.0)
-                })
-                .collect::<Vec<f32>>()
-        })
-    };
     // A range round the whole loop has no edges: its end runs straight into its start.
     let whole_loop = loop_end.is_some_and(|l| range.end - range.start >= l);
     let (fade_in, fade_out) = (range.fade_in.max(1) as f32, range.fade_out.max(1) as f32);
@@ -516,7 +418,7 @@ fn range_change(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) -
     let state = &mut State::new(range.effect, rate);
     if range.effect.reversed() {
         // Backwards through the range, so the tail comes before it.
-        let mut dry = read(range.start, len);
+        let mut dry = read(sound, loop_end, range.start, len);
         let mut weights: Vec<f32> = (range.start..range.end).map(weight).collect();
         weights.reverse();
         weights.resize(len + tail, 0.0);
@@ -525,91 +427,50 @@ fn range_change(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) -
             channel.resize(len + tail, 0.0);
         }
         let mut change = [vec![0.0; len + tail], vec![0.0; len + tail]];
-        apply_range(range, rate, &dry, &weights, &mut change, state);
+        apply_range(range, 1.0, rate, &dry, &weights, &mut change, state);
         change.iter_mut().for_each(|c| c.reverse());
-        return (range.start - tail as Frames, change);
+        return (range.start - tail as Frames, change, None);
     }
-    let before = usize::try_from(if range.effect.filter().is_some() {
-        range.effect.warmup(rate)
-    } else {
-        0
-    })
-    .unwrap_or(0);
+    let before = usize::try_from(range.effect.warmup(rate)).unwrap_or(0);
     let from = range.start - before as Frames;
     let n = before + len + tail;
-    let dry = read(from, n);
+    let dry = read(sound, loop_end, from, n);
     let weights: Vec<f32> = (from..).take(n).map(weight).collect();
     let gain = match range.effect {
         Effect::Normalize { .. } | Effect::Loudness { .. } => {
             let under = dry
                 .clone()
                 .map(|c| c.into_iter().skip(before).take(len).collect::<Vec<f32>>());
-            measured_gain(&range.effect, &under, rate, range.start)
+            Some(measured_gain(&range.effect, &under, rate, range.start))
         }
-        _ => 1.0,
+        _ => None,
     };
-    let range = EffectRange { gain, ..range.clone() };
     let mut change = [vec![0.0; n], vec![0.0; n]];
-    apply_range(&range, rate, &dry, &weights, &mut change, state);
-    (from, change)
+    apply_range(
+        range,
+        gain.map_or(1.0, |g| g.0),
+        rate,
+        &dry,
+        &weights,
+        &mut change,
+        state,
+    );
+    (from, change, gain)
 }
 
 /// The gain normalize or loudness gives `audio`, the sound under a range that starts at timeline frame `start`.
-fn measured_gain(effect: &Effect, audio: &[Vec<f32>; 2], rate: u32, start: Frames) -> f32 {
+fn measured_gain(effect: &Effect, audio: &[Vec<f32>; 2], rate: u32, start: Frames) -> Gain {
     let peak = audio.iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
     let lufs = match effect {
-        Effect::Loudness { .. } => from_slices(slices(audio, rate, 0, start).iter()),
+        Effect::Loudness { .. } => from_slices(slices(audio, rate, start).iter()),
         _ => None,
     };
-    gain_for(effect, peak, lufs).0
-}
-
-/// Adds a reversed effect's sound, which ends at `end`, to `out`, which holds timeline frames from `start`.
-fn add_reversed(end: Frames, sound: &[Vec<f32>; 2], loop_end: Option<Frames>, start: Frames, out: &mut [Vec<f32>; 2]) {
-    let len = sound[0].len() as Frames;
-    let from = end - len;
-    if loop_end.is_none() && (from >= start.saturating_add(out[0].len() as Frames) || end <= start) {
-        return;
-    }
-    for (channel, sound) in out.iter_mut().zip(sound) {
-        for (i, sample) in channel.iter_mut().enumerate() {
-            let t = start.saturating_add(i as Frames) - from;
-            // With a loop it is heard in every loop; one longer than the loop overlaps itself.
-            let (mut k, step) = match loop_end {
-                Some(l) => (t.rem_euclid(l), l),
-                None => (t, len.max(1)),
-            };
-            while let Some(s) = usize::try_from(k).ok().and_then(|k| sound.get(k)) {
-                *sample += s;
-                k += step;
-            }
-        }
-    }
-}
-
-/// How much of the processed sound each frame gets: 1 inside the range, fading over its edges, 0 outside.
-fn range_weights(range: &EffectRange, loop_end: Option<Frames>, start: Frames, frames: usize) -> Vec<f32> {
-    // A range round the whole loop has no edges: its end runs straight into its start.
-    let whole_loop = loop_end.is_some_and(|l| range.end - range.start >= l);
-    let (fade_in, fade_out) = (range.fade_in.max(1) as f32, range.fade_out.max(1) as f32);
-    (0..frames)
-        .map(|i| {
-            let t = start.saturating_add(i as Frames);
-            let Some(into) = position_in(range, t, loop_end) else {
-                return 0.0;
-            };
-            let left_in = (range.end - range.start - into) as f32;
-            if whole_loop {
-                1.0
-            } else {
-                ((into as f32 + 1.0) / fade_in).min(left_in / fade_out).min(1.0)
-            }
-        })
-        .collect()
+    gain_for(effect, peak, lufs)
 }
 
 fn apply_range(
     range: &EffectRange,
+    gain: f32,
     rate: u32,
     dry: &[Vec<f32>; 2],
     weights: &[f32],
@@ -617,7 +478,7 @@ fn apply_range(
     state: &mut State,
 ) {
     let wet: [Vec<f32>; 2] = match state {
-        State::Nothing => dry.clone().map(|c| c.iter().map(|s| s * range.gain).collect()),
+        State::Nothing => dry.clone().map(|c| c.iter().map(|s| s * gain).collect()),
         State::Filter(stages) => {
             let mut wet = dry.clone();
             if let Some((hz, qs)) = range.effect.filter() {
@@ -806,290 +667,9 @@ impl Reverb {
     }
 }
 
-/// How far into the range timeline frame `t` is, if it is in it. With a loop, a range past the loop end
-/// also covers the start of the next loop.
-fn position_in(range: &EffectRange, t: Frames, loop_end: Option<Frames>) -> Option<Frames> {
-    let t = loop_end.map_or(t, |l| t.rem_euclid(l));
-    let shifts = [0, loop_end.unwrap_or(0)];
-    shifts
-        .iter()
-        .take(if loop_end.is_some() { 2 } else { 1 })
-        .map(|s| t + s)
-        .find(|&t| t >= range.start && t < range.end)
-        .map(|t| t - range.start)
-}
-
-/// Measures what the effects need from the audio under them, lane by lane from the top, so each lane
-/// measures what the lanes above it produce. Where the sound under a range is the same as in `before`, the
-/// project before the edit, the range keeps what it measured: rendering long audio takes seconds.
-pub(crate) fn measure(project: &mut Project, before: Option<&Project>) {
-    let before = before.filter(|b| b.sample_rate == project.sample_rate && b.loop_end == project.loop_end);
-    for ti in 0..project.tracks.len() {
-        let lanes = project.tracks.get(ti).map_or(0, |t| t.effects.len());
-        for li in 0..lanes {
-            let measured: Vec<Measured> = {
-                let Some(track) = project.tracks.get(ti) else { continue };
-                let Some(lane) = track.effects.get(li) else { continue };
-                let unchanged = before.and_then(|b| b.track(track.id)).is_some_and(|old| {
-                    same_clips(&old.clips, &track.clips) && same_lanes(&old.effects, &track.effects, li)
-                });
-                lane.ranges
-                    .iter()
-                    .map(|r| {
-                        measure_range(r, project, unchanged, |from, frames| {
-                            render_track(project, track, from, frames, li)
-                        })
-                    })
-                    .collect()
-            };
-            if let Some(lane) = project.tracks.get_mut(ti).and_then(|t| t.effects.get_mut(li)) {
-                lane.ranges
-                    .iter_mut()
-                    .zip(measured)
-                    .for_each(|(r, m)| (r.gain, r.limited, r.reversed, r.heard) = m);
-            }
-        }
-    }
-    for li in 0..project.mix_effects.len() {
-        let measured: Vec<Measured> = {
-            let Some(lane) = project.mix_effects.get(li) else {
-                continue;
-            };
-            let unchanged = before.is_some_and(|b| {
-                b.tracks.len() == project.tracks.len()
-                    && b.tracks.iter().zip(&project.tracks).all(|(old, new)| {
-                        (old.id, old.gain_db, old.muted) == (new.id, new.gain_db, new.muted)
-                            && same_clips(&old.clips, &new.clips)
-                            && same_lanes(&old.effects, &new.effects, new.effects.len().max(old.effects.len()))
-                    })
-                    && same_lanes(&b.mix_effects, &project.mix_effects, li)
-            });
-            lane.ranges
-                .iter()
-                .map(|r| {
-                    measure_range(r, project, unchanged, |from, frames| {
-                        mix_upto(project, from, frames, li)
-                    })
-                })
-                .collect()
-        };
-        if let Some(lane) = project.mix_effects.get_mut(li) {
-            lane.ranges
-                .iter_mut()
-                .zip(measured)
-                .for_each(|(r, m)| (r.gain, r.limited, r.reversed, r.heard) = m);
-        }
-    }
-}
-
-/// Whether the clips play the same sound. The same audio is the same shared source, so no sample is read.
-fn same_clips(a: &[Clip], b: &[Clip]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(a, b)| {
-            Arc::ptr_eq(&a.source, &b.source)
-                && (a.id, a.start, a.offset, a.len) == (b.id, b.start, b.offset, b.len)
-                && (a.fade_in, a.fade_out, a.crossfade_shape, a.channels)
-                    == (b.fade_in, b.fade_out, b.crossfade_shape, b.channels)
-                && a.gain == b.gain
-        })
-}
-
-/// Whether the first `count` lanes change the sound in the same way.
-fn same_lanes(a: &[EffectLane], b: &[EffectLane], count: usize) -> bool {
-    let (Some(a), Some(b)) = (a.get(..count), b.get(..count)) else {
-        return false;
-    };
-    a.iter().zip(b).all(|(a, b)| {
-        (a.id, a.enabled) == (b.id, b.enabled)
-            && a.ranges.len() == b.ranges.len()
-            && a.ranges.iter().zip(&b.ranges).all(|(a, b)| {
-                (a.id, a.start, a.end, a.fade_in, a.fade_out) == (b.id, b.start, b.end, b.fade_in, b.fade_out)
-                    && (a.effect, a.gain, a.limited) == (b.effect, b.gain, b.limited)
-                    && match (&a.reversed, &b.reversed) {
-                        (Some(a), Some(b)) => Arc::ptr_eq(&a.sound, &b.sound),
-                        (a, b) => a.is_none() && b.is_none(),
-                    }
-            })
-    })
-}
-
-fn span(range: &EffectRange) -> usize {
-    usize::try_from(range.end - range.start).unwrap_or(0)
-}
-
-type Measured = (f32, bool, Option<Reversed>, Option<Heard>);
-
-/// What a normalize or loudness range measured from the sound under it, in segments on a 30 s grid of the
-/// timeline. Its settings only turn these into a gain, so changing them needs no new measuring; moving an edge
-/// measures only the segment there.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Heard {
-    /// Shared, so undo steps and a later measuring keep one copy of an unchanged segment.
-    segments: Vec<Arc<Segment>>,
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) struct Segment {
-    from: Frames,
-    to: Frames,
-    /// How much sound before `from` settled the loudness weighting; none at the range start.
-    lead: Frames,
-    peak: f32,
-    /// Only measured for loudness.
-    slices: Option<Vec<(f64, usize)>>,
-}
-
-const SEGMENT_SECONDS: Frames = 30;
-
-/// The segments of a range as (from, to, lead).
-fn segment_spans(range: &EffectRange, rate: u32) -> Vec<(Frames, Frames, Frames)> {
-    let rate = Frames::from(rate.max(1));
-    let size = SEGMENT_SECONDS * rate;
-    let mut spans = vec![];
-    let mut from = range.start;
-    while from < range.end {
-        let to = ((from.div_euclid(size) + 1) * size).min(range.end);
-        spans.push((from, to, (from - range.start).min(rate / 2)));
-        from = to;
-    }
-    spans
-}
-
-/// What a range needs from the sound under it, which `render(from, frames)` renders: the gain and whether the
-/// peak limit held it back, or a reversed effect's sound. `unchanged` says the sound under the range is as when
-/// it was last measured, where it was measured.
-fn measure_range(
-    range: &EffectRange,
-    project: &Project,
-    unchanged: bool,
-    render: impl Fn(Frames, usize) -> [Vec<f32>; 2] + Sync,
-) -> Measured {
-    if range.effect.reversed() {
-        let kept = range
-            .reversed
-            .as_ref()
-            .filter(|r| unchanged && r.made_for == made_for(range));
-        let sound = match kept {
-            Some(kept) => kept.clone(),
-            None => reversed_sound(range, project, render(range.start, span(range))),
-        };
-        return (1.0, false, Some(sound), None);
-    }
-    if !matches!(range.effect, Effect::Normalize { .. } | Effect::Loudness { .. }) {
-        return (1.0, false, None, None);
-    }
-    let loudness_too = matches!(range.effect, Effect::Loudness { .. });
-    let rate = project.sample_rate;
-    let old = range
-        .heard
-        .as_ref()
-        .filter(|_| unchanged)
-        .map_or(&[][..], |h| &h.segments[..]);
-    let segments = in_parallel(&segment_spans(range, rate), |&(from, to, lead)| {
-        let kept = old
-            .iter()
-            .find(|s| (s.from, s.to, s.lead) == (from, to, lead) && (s.slices.is_some() || !loudness_too));
-        if let Some(kept) = kept {
-            return kept.clone();
-        }
-        let audio = render(from - lead, usize::try_from(to - from + lead).unwrap_or(0));
-        let lead = usize::try_from(lead).unwrap_or(0);
-        Arc::new(Segment {
-            from,
-            to,
-            lead: lead as Frames,
-            peak: audio
-                .iter()
-                .flat_map(|c| c.iter().skip(lead))
-                .fold(0.0f32, |m, s| m.max(s.abs())),
-            slices: loudness_too.then(|| slices(&audio, rate, lead, from)),
-        })
-    });
-    let heard = Heard { segments };
-    let (gain, limited) = gain_from(&range.effect, &heard);
-    (gain, limited, None, Some(heard))
-}
-
-/// `work` on each item, spread over the processor's cores; the results in the items' order.
-fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let cores = std::thread::available_parallelism().map_or(1, usize::from);
-    let per = items.len().div_ceil(cores).max(1);
-    let work = &work;
-    std::thread::scope(|scope| {
-        let started: Vec<_> = items
-            .chunks(per)
-            .map(|chunk| {
-                let thread =
-                    std::thread::Builder::new().spawn_scoped(scope, move || chunk.iter().map(work).collect::<Vec<R>>());
-                (chunk, thread)
-            })
-            .collect();
-        // A chunk whose thread could not start or failed is done here instead.
-        started
-            .into_iter()
-            .flat_map(|(chunk, thread)| {
-                let done = thread.ok().and_then(|t| t.join().ok());
-                done.unwrap_or_else(|| chunk.iter().map(work).collect())
-            })
-            .collect()
-    })
-}
-
-/// What a reversed sound depends on besides the sound under the range.
-fn made_for(range: &EffectRange) -> (Frames, Frames, Frames, Frames, Effect) {
-    (range.start, range.end, range.fade_in, range.fade_out, range.effect)
-}
-
-/// Reverses the sound under the range, runs the effect over it and reverses the result, so the tail comes
-/// first. It ends at the range end and starts one tail before the range start. When nothing it is computed
-/// from changed, the range keeps the sound it has: undo steps then share it instead of each holding a copy.
-fn reversed_sound(range: &EffectRange, project: &Project, mut audio: [Vec<f32>; 2]) -> Reversed {
-    use std::hash::{Hash, Hasher};
-    let rate = project.sample_rate;
-    let len = audio[0].len();
-    let weights = range_weights(range, project.loop_end.filter(|l| *l > 0), range.start, len);
-    for channel in &mut audio {
-        channel.iter_mut().zip(&weights).for_each(|(s, w)| *s *= w);
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (format!("{:?}", range.effect), rate).hash(&mut hasher);
-    audio.iter().flatten().for_each(|s| s.to_bits().hash(&mut hasher));
-    let key = hasher.finish();
-    if let Some(kept) = range.reversed.as_ref().filter(|r| r.key == key) {
-        return Reversed {
-            made_for: made_for(range),
-            ..kept.clone()
-        };
-    }
-    let total = len.saturating_add(usize::try_from(range.effect.tail(rate)).unwrap_or(0));
-    for channel in &mut audio {
-        channel.reverse();
-        channel.resize(total, 0.0);
-    }
-    let mut sound = [vec![0.0; total], vec![0.0; total]];
-    let state = &mut State::new(range.effect, rate);
-    apply_range(range, rate, &audio, &vec![1.0; total], &mut sound, state);
-    sound.iter_mut().for_each(|c| c.reverse());
-    Reversed {
-        key,
-        made_for: made_for(range),
-        sound: Arc::new(sound),
-    }
-}
-
-/// The gain for normalize and loudness, and whether the peak limit held it back.
-fn gain_from(effect: &Effect, heard: &Heard) -> (f32, bool) {
-    let peak = heard.segments.iter().fold(0.0f32, |m, s| m.max(s.peak));
-    let lufs = match effect {
-        Effect::Loudness { .. } => from_slices(heard.segments.iter().flat_map(|s| s.slices.iter().flatten())),
-        _ => None,
-    };
-    gain_for(effect, peak, lufs)
-}
-
 /// The gain for normalize and loudness from the loudest sample and, for loudness, the loudness of the sound
 /// under the range; and whether the peak limit held it back. Silence is left alone.
-fn gain_for(effect: &Effect, peak: f32, lufs: Option<f64>) -> (f32, bool) {
+fn gain_for(effect: &Effect, peak: f32, lufs: Option<f64>) -> Gain {
     if peak <= 1e-6 {
         return (1.0, false);
     }
@@ -1118,7 +698,7 @@ mod tests {
 
     use super::*;
     use crate::loudness::loudness;
-    use crate::{Command, GainPoint, RangeId, Session, Source, TrackId, mixdown, render};
+    use crate::{Command, Session, Source, TrackId, render};
 
     const RATE: u32 = 1000;
 
@@ -1356,41 +936,6 @@ mod tests {
         assert!(steep < gentle / 8.0, "{steep} {gentle}");
     }
 
-    /// Playback renders in pieces; with the warm-up they join like one long render, also over the loop seam.
-    #[test]
-    fn rendering_in_pieces_matches_one_render() {
-        let mut s = tone_session(3000.0, Effect::LowPass { hz: 500.0, steep: true });
-        let whole = render(s.project(), 0, 48_000);
-        let mut pieces = vec![];
-        for start in (0..48_000).step_by(512) {
-            pieces.extend(render(s.project(), start, 512.min(48_000 - start as usize))[0].clone());
-        }
-        let most = whole[0]
-            .iter()
-            .zip(&pieces)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f32::max);
-        assert!(most < 1e-3, "{most}");
-
-        let range = s.project().tracks[0].effects[0].ranges[0].id;
-        s.execute(Command::SetEffectRange {
-            range,
-            start: 0,
-            end: 30_000,
-        })
-        .unwrap();
-        s.execute(Command::SetLoopEnd { at: Some(30_000) }).unwrap();
-        let across = render(s.project(), 29_744, 512);
-        let mut joined = render(s.project(), 29_744, 256)[0].clone();
-        joined.extend(render(s.project(), 0, 256)[0].clone());
-        let most = across[0]
-            .iter()
-            .zip(&joined)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f32::max);
-        assert!(most < 1e-3, "{most}");
-    }
-
     /// One click at frame 100 on a track, with a lane of `effect` over 0..200.
     fn click_session(effect: Effect) -> Session {
         let mut samples = vec![0.0; 300];
@@ -1460,70 +1005,6 @@ mod tests {
         assert!(early > 0.01, "the room sounds after the range: {early}");
         assert!(peak(700, 800) < early / 100.0, "{}", peak(700, 800));
         assert_ne!(left[250], right[250], "left and right differ, so it sounds wide");
-    }
-
-    /// Playback goes on from the effects' memory instead of rendering the past again; the result is the
-    /// same as one render, and with the loop on, the tail runs over the seam into the start.
-    #[test]
-    fn playback_in_pieces_matches_one_render() {
-        let mut s = click_session(Effect::Echo {
-            delay_ms: 70.0,
-            fade_db: 4.0,
-            level_db: -3.0,
-            reversed: false,
-        });
-        let track = s.project().tracks[0].id;
-        for effect in [
-            Effect::Reverb {
-                seconds: 0.3,
-                level_db: -6.0,
-                reversed: false,
-            },
-            Effect::LowPass { hz: 200.0, steep: true },
-            Effect::Reverb {
-                seconds: 0.2,
-                level_db: -6.0,
-                reversed: true,
-            },
-        ] {
-            s.execute(Command::AddEffectLane {
-                track: Some(track),
-                effect,
-            })
-            .unwrap();
-            let lane = s.project().tracks[0].effects.last().unwrap().id;
-            s.execute(Command::AddEffectRange {
-                lane,
-                start: 50,
-                end: 250,
-            })
-            .unwrap();
-        }
-        let differs = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
-        let played = |s: &Session, from: usize, to: usize| {
-            let mut renderer = crate::Renderer::default();
-            let mut out = vec![];
-            for start in (0..to).step_by(64) {
-                let at = s.project().loop_end.map_or(start as Frames, |l| start as Frames % l);
-                let piece = renderer.render(s.project(), at, 64)[0].clone();
-                out.extend(piece);
-            }
-            out[from..to].to_vec()
-        };
-        // Playback stops an echo once it is 60 dB down; one render keeps going, so they match to -60 dB.
-        let whole = render(s.project(), 0, 1500)[0].clone();
-        assert!(differs(&whole, &played(&s, 0, 1500)) < 1e-3);
-
-        s.execute(Command::SetLoopEnd { at: Some(600) }).unwrap();
-        let whole = render(s.project(), 0, 600)[0].clone();
-        // The 8th echo comes at 660, which is 60 in the next loop.
-        assert!(
-            whole[50..100].iter().any(|v| v.abs() > 1e-3),
-            "the tail wraps into the start"
-        );
-        // Once playback has run longer than the echo's tail (1120 frames, almost two loops), each loop sounds
-        // like the exported one.
-        assert!(differs(&whole, &played(&s, 1800, 2400)) < 1e-3);
     }
 
     #[test]
@@ -1623,7 +1104,6 @@ mod tests {
             },
         );
         assert!((lufs_of(&s) + 16.0).abs() < 0.1, "{}", lufs_of(&s));
-        assert!(!s.project().tracks[0].effects[0].ranges[0].limited);
 
         // The tone is at -6 dB, so 0 LUFS needs +6 dB, which would take the peak to 0 dB.
         let s = tone_session(
@@ -1633,215 +1113,11 @@ mod tests {
                 peak_db: -1.0,
             },
         );
-        let range = &s.project().tracks[0].effects[0].ranges[0];
-        assert!(range.limited);
+        assert!(lufs_of(&s) < -0.5, "held back: {}", lufs_of(&s));
         let peak = render(s.project(), 0, 48_000)[0]
             .iter()
             .fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - db_to_amp(-1.0)).abs() < 1e-3, "{peak}");
-    }
-
-    /// Measuring the audio under a range took seconds on every edit; now it is kept while that audio stays the
-    /// same. What is kept must always match a fresh measurement.
-    #[test]
-    fn kept_measurements_match_fresh_ones() {
-        let gains = |p: &Project| -> Vec<(f32, bool)> {
-            let lanes = p.tracks.iter().flat_map(|t| &t.effects).chain(&p.mix_effects);
-            lanes.flat_map(|l| &l.ranges).map(|r| (r.gain, r.limited)).collect()
-        };
-        let check = |s: &Session| {
-            let fresh = Session::open(Project::clone(s.project())).unwrap();
-            assert_eq!(gains(s.project()), gains(fresh.project()));
-        };
-        let mut s = tone_session(
-            997.0,
-            Effect::Loudness {
-                lufs: -16.0,
-                peak_db: -1.0,
-            },
-        );
-        let track = s.project().tracks[0].id;
-        add_lane(&mut s, None, -3.0, &[(0, 48_000)]);
-        let before = gains(s.project());
-        let range = s.project().tracks[0].effects[0].ranges[0].id;
-        let louder = Effect::Loudness {
-            lufs: -12.0,
-            peak_db: -1.0,
-        };
-        s.execute(Command::SetEffect { range, effect: louder }).unwrap();
-        check(&s);
-        let after_settings = gains(s.project());
-        assert_ne!(before, after_settings);
-
-        // Under the track's range: the clip gets quieter.
-        let clip = s.project().tracks[0].clips[0].id;
-        let points = vec![GainPoint { at: 0, db: -20.0 }];
-        s.execute(Command::SetGainCurve { clip, points }).unwrap();
-        check(&s);
-        assert_ne!(after_settings, gains(s.project()));
-
-        // Only under the mix range: the track volume comes after the track's effects.
-        let after_curve = gains(s.project());
-        s.execute(Command::SetTrackGain { track, db: -10.0 }).unwrap();
-        check(&s);
-        assert_ne!(after_curve, gains(s.project()));
-    }
-
-    /// A 70 s range at 8 kHz from 0.2 s: a 60 Hz hum the weighting filter must settle on, a tone with steps
-    /// in level, and a pause.
-    fn long_loudness_session() -> (Session, RangeId) {
-        let rate = 8000;
-        let samples = (0..70 * rate)
-            .map(|i| {
-                let t = i as f32 / rate as f32;
-                let step = [0.5, 0.1, 0.0, 0.3][(i / (17 * rate)) as usize % 4];
-                0.2 * (t * 60.0 * std::f32::consts::TAU).sin() + step * (t * 1000.0 * std::f32::consts::TAU).sin()
-            })
-            .collect();
-        let source = Arc::new(Source {
-            path: None,
-            name: "long".into(),
-            sample_rate: rate,
-            channels: vec![samples],
-            generated: None,
-        });
-        let mut s = Session::default();
-        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
-        let track = s.project().tracks[0].id;
-        s.execute(Command::AddClip {
-            track,
-            source,
-            start: 0,
-        })
-        .unwrap();
-        let effect = Effect::Loudness {
-            lufs: -16.0,
-            peak_db: 0.0,
-        };
-        s.execute(Command::AddEffectLane {
-            track: Some(track),
-            effect,
-        })
-        .unwrap();
-        let lane = s.project().tracks[0].effects[0].id;
-        s.execute(Command::AddEffectRange {
-            lane,
-            start: 1600,
-            end: 69 * 8000,
-        })
-        .unwrap();
-        let range = s.project().tracks[0].effects[0].ranges[0].id;
-        (s, range)
-    }
-
-    #[test]
-    fn loudness_measured_in_segments_matches_one_measurement() {
-        let (s, _) = long_loudness_session();
-        let p = s.project();
-        let range = &p.tracks[0].effects[0].ranges[0];
-        let heard = range.heard.as_ref().unwrap();
-        assert_eq!(heard.segments.len(), 3, "cut at 30 s and 60 s");
-        let segmented = from_slices(heard.segments.iter().flat_map(|s| s.slices.iter().flatten())).unwrap();
-        let audio = render_track(p, &p.tracks[0], range.start, span(range), 0);
-        let whole = from_slices(slices(&audio, 8000, 0, range.start).iter()).unwrap();
-        assert!((segmented - whole).abs() < 1e-4, "{segmented} against {whole}");
-        let peak = audio.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert_eq!(heard.segments.iter().fold(0.0f32, |m, s| m.max(s.peak)), peak);
-    }
-
-    #[test]
-    fn moving_a_range_end_measures_only_the_segment_there() {
-        let (mut s, range) = long_loudness_session();
-        let segments = |s: &Session| {
-            s.project().tracks[0].effects[0].ranges[0]
-                .heard
-                .clone()
-                .unwrap()
-                .segments
-        };
-        let before = segments(&s);
-        s.execute(Command::SetEffectRange {
-            range,
-            start: 1600,
-            end: 65 * 8000,
-        })
-        .unwrap();
-        let after = segments(&s);
-        assert!(Arc::ptr_eq(&before[0], &after[0]) && Arc::ptr_eq(&before[1], &after[1]));
-        assert!(!Arc::ptr_eq(&before[2], &after[2]));
-        let fresh = Session::open(Project::clone(s.project())).unwrap();
-        let gain = |s: &Session| s.project().tracks[0].effects[0].ranges[0].gain;
-        assert_eq!(gain(&s), gain(&fresh));
-    }
-
-    /// The whole-project mixdown sounds like the renderer that plays piece by piece, for every effect, reversed,
-    /// stacked, across tracks, and round a loop.
-    #[test]
-    fn mixdown_matches_the_piece_renderer() {
-        let echo = |reversed| Effect::Echo {
-            delay_ms: 30.0,
-            fade_db: 6.0,
-            level_db: -6.0,
-            reversed,
-        };
-        let reverb = |reversed| Effect::Reverb {
-            seconds: 0.3,
-            level_db: -6.0,
-            reversed,
-        };
-        let filters = [
-            Effect::HighPass { hz: 200.0, steep: true },
-            Effect::LowPass {
-                hz: 400.0,
-                steep: false,
-            },
-        ];
-        let mut sessions: Vec<(&str, Session)> = vec![];
-        for (name, effect) in [
-            ("echo", echo(false)),
-            ("reversed echo", echo(true)),
-            ("reverb", reverb(false)),
-            ("reversed reverb", reverb(true)),
-        ] {
-            sessions.push((name, click_session(effect)));
-            let mut looped = click_session(effect);
-            looped.execute(Command::SetLoopEnd { at: Some(600) }).unwrap();
-            sessions.push((name, looped));
-        }
-        for effect in filters.into_iter().chain([Effect::Loudness {
-            lufs: -20.0,
-            peak_db: -1.0,
-        }]) {
-            sessions.push(("tone", tone_session(997.0, effect)));
-        }
-        let (mut stacked, track) = session(&[(0.25, 0), (0.5, 1500)]);
-        add_lane(&mut stacked, Some(track), -6.0, &[(200, 900), (1200, 2400)]);
-        stacked.execute(Command::AddTrack { name: "u".into() }).unwrap();
-        let other = stacked.project().tracks[1].id;
-        stacked
-            .execute(Command::AddClip {
-                track: other,
-                source: level(0.1, 1000),
-                start: 300,
-            })
-            .unwrap();
-        add_lane(&mut stacked, None, -3.0, &[(0, 2500)]);
-        sessions.push(("stacked", stacked));
-        let (mut round, track) = session(&[(0.25, 0)]);
-        round.execute(Command::SetLoopEnd { at: Some(1000) }).unwrap();
-        add_lane(&mut round, Some(track), -6.0, &[(800, 1200)]);
-        sessions.push(("normalize round the loop", round));
-
-        for (name, s) in sessions {
-            let p = s.project();
-            let len = p.len() as usize;
-            let (new, old) = (mixdown(p, || true).unwrap(), render(p, 0, len));
-            for (new, old) in new.iter().zip(&old) {
-                assert_eq!(new.len(), old.len(), "{name}");
-                let off = new.iter().zip(old).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
-                assert!(off < 1e-3, "{name}: off by {off}");
-            }
-        }
     }
 
     #[test]
@@ -1875,33 +1151,5 @@ mod tests {
         let [left, _] = render(s.project(), 0, 600);
         let at = |i: usize, db: f32| (left[i] - db_to_amp(db)).abs() < 1e-4;
         assert!(at(40, -6.0) && at(580, -18.0) && at(520, -30.0));
-    }
-
-    #[test]
-    fn an_edit_elsewhere_keeps_the_reversed_sound_instead_of_a_new_copy_per_undo_step() {
-        let mut s = click_session(Effect::Reverb {
-            seconds: 0.5,
-            level_db: -6.0,
-            reversed: true,
-        });
-        let sound = |s: &Session| s.project().tracks[0].effects[0].ranges[0].reversed.clone().unwrap();
-        let before = sound(&s);
-        s.execute(Command::AddTrack { name: "other".into() }).unwrap();
-        assert!(
-            Arc::ptr_eq(&before.sound, &sound(&s).sound),
-            "shared with the undo step before"
-        );
-
-        let range = s.project().tracks[0].effects[0].ranges[0].id;
-        s.execute(Command::SetEffectRange {
-            range,
-            start: 0,
-            end: 150,
-        })
-        .unwrap();
-        assert!(
-            !Arc::ptr_eq(&before.sound, &sound(&s).sound),
-            "computed again for the new range"
-        );
     }
 }

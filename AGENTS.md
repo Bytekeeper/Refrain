@@ -11,7 +11,8 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   main.rs          editor state, toolbar, shortcuts
   timeline.rs      the timeline: track rows and headers, ruler, scrollbar, layout
   clips.rs         drawing one clip and the overlap zone of a crossfade
-  levels.rs        the Mix level row: the mix's peaks over the whole project, measured in the background
+  mixing.rs        the mixdown of the project, made in the background after each edit
+  levels.rs        the Mix level row: the mixdown's peaks over the whole project
   mouse.rs         mouse editing: hit-testing, drags, snapping, and the clip, fade and channel menus
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
@@ -19,7 +20,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   files.rs         open, save, import, unsaved-changes question
   export.rs        export panel and "export again" to the project's export target
   recovery.rs      copies of unsaved work, restored after a crash
-  playback.rs      audio output (cpal)
+  playback.rs      audio output (cpal): plays the latest mixdown
 crates/engine      project model, commands, undo, mixing, effects, generated sound, project files,
                    import and export.
                    No UI or OS audio crates.
@@ -48,19 +49,19 @@ Every edit stays editable. Trims, fades, volume curves, crossfades, channels and
 stored in the project; the audio is computed from the files (or a generator's settings) whenever it
 plays or is exported. Nothing
 is ever applied to the audio for good, so a trim can be dragged back out and an effect changed or
-removed later. Results that depend on the audio (a normalize gain, a match) are measured again when
-the audio under them changes, never stored as a fixed number.
+removed later. Results that depend on the audio (a normalize gain, a match) are measured from the audio
+each time, never stored as a fixed number.
 Sound the editor makes (tone, noise, blips) is stored as its settings, never as samples, and made again
 for a new length, loop length or sample rate.
 
 Effects live in lanes below a track, or below the mix for effects across all tracks. A lane is one kind
 of effect and the time ranges where it applies, each range with its own settings; lanes apply from the
 top down.
-Effects that need the sound before a frame (filters, echo, reverb) get it by starting the render earlier,
-so a render from any point sounds like one from the start. Playback instead keeps their memory from one
-piece to the next (`engine::Renderer`), because a reverb cannot hear seconds of the past again every 10 ms.
-A reversed echo or reverb needs the sound after a frame, which playback has not reached yet, so its sound is
-computed once per range when the project changes and kept with the range, like a normalize gain.
+The project is heard through its mixdown (`engine::mixdown`): the whole project rendered layer by layer,
+each track's clips, then its lanes, then the mix lanes. Every effect hears all of its input, before and
+after, so a reversed echo or reverb is the same effect run backwards. A range changes only its span (the
+range and its tail); with a loop a span past the loop end goes on at the start. The window makes the
+mixdown in the background after each edit; playback, the level row and export use it.
 
 ## 3. Clean room
 

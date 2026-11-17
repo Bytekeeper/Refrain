@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use refrain_engine::{
     ChannelMode, Command, Effect, ExportFormat, ExportSettings, ExportTarget, Fade, FadeShape, GainPoint, Generator,
-    Levels, NoiseColor, Session, Source, export, levels, load_source, open_project, render, save_project,
+    NoiseColor, Session, Source, export, load_source, open_project, render, save_project,
 };
 
 const RATE: u32 = 8000;
@@ -536,27 +536,6 @@ fn an_export_target_in_an_older_view_is_read() {
 }
 
 /// The level row's peaks are those of one render of the whole mix, effects and all.
-#[test]
-fn levels_match_one_render_of_the_mix() {
-    let dir = folder("levels");
-    let s = edited_project(&dir);
-    let row = levels(s.project(), || true).unwrap();
-    let len = s.project().len() as usize;
-    let [left, right] = render(s.project(), 0, len);
-    assert_eq!(row.peaks.len(), len.div_ceil(Levels::BLOCK));
-    for (i, peak) in row.peaks.iter().enumerate() {
-        let from = i * Levels::BLOCK;
-        let to = (from + Levels::BLOCK).min(len);
-        let expected = left[from..to]
-            .iter()
-            .chain(&right[from..to])
-            .fold(0.0f32, |m, v| m.max(v.abs()));
-        // Playback-style pieces let an effect's memory go once it is 60 dB down.
-        assert!((peak - expected).abs() < 1e-3, "block {i}: {peak} vs {expected}");
-    }
-    assert!(levels(s.project(), || false).is_none(), "stops when asked");
-}
-
 #[test]
 fn an_export_reports_the_samples_over_0_db() {
     let dir = folder("overs");

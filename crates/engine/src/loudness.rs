@@ -5,13 +5,12 @@ use crate::effects::Biquad;
 /// Integrated loudness in LUFS after ITU-R BS.1770 of a whole piece of sound. None when it is all near silence.
 #[cfg(test)]
 pub(crate) fn loudness(audio: &[Vec<f32>; 2], rate: u32) -> Option<f64> {
-    from_slices(slices(audio, rate, 0, 0).iter())
+    from_slices(slices(audio, rate, 0).iter())
 }
 
 /// The weighted power of the sound (weighted like the ear hears it) in slices on a 100 ms grid of the timeline,
-/// as (energy, frames). The audio starts `lead` frames before timeline frame `first`; the lead only settles the
-/// weighting filters. Slices at the ends may be shorter.
-pub(crate) fn slices(audio: &[Vec<f32>; 2], rate: u32, lead: usize, first: i64) -> Vec<(f64, usize)> {
+/// as (energy, frames). The audio starts at timeline frame `first`. Slices at the ends may be shorter.
+pub(crate) fn slices(audio: &[Vec<f32>; 2], rate: u32, first: i64) -> Vec<(f64, usize)> {
     let slice = slice_len(rate);
     let weighted: Vec<Vec<f32>> = audio
         .iter()
@@ -23,9 +22,8 @@ pub(crate) fn slices(audio: &[Vec<f32>; 2], rate: u32, lead: usize, first: i64) 
             weighted
         })
         .collect();
-    let len = audio[0].len();
     let mut out: Vec<(f64, usize)> = vec![];
-    for (i, at) in (lead..len).zip(first..) {
+    for (i, at) in (0..audio[0].len()).zip(first..) {
         let energy: f64 = weighted
             .iter()
             .filter_map(|w| w.get(i))

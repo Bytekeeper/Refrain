@@ -69,7 +69,7 @@ struct TrackFile {
     effects: Vec<LaneFile>,
 }
 
-/// What the effect measures from the audio is not stored: it is measured again when the project opens.
+/// What the effect measures from the audio is not stored: every mixdown measures it.
 #[derive(Serialize, Deserialize)]
 struct LaneFile {
     effect: Effect,
@@ -123,10 +123,6 @@ fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<Ef
                 start: r.start,
                 end: r.end,
                 effect: r.effect.unwrap_or(file.effect),
-                gain: 1.0,
-                limited: false,
-                reversed: None,
-                heard: None,
                 fade_in: r.fade_in.unwrap_or(default_fade(project.sample_rate)),
                 fade_out: r.fade_out.unwrap_or(default_fade(project.sample_rate)),
             });
