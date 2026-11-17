@@ -272,8 +272,30 @@ impl Editor {
                 } else {
                     ""
                 };
-                let summary = summary(target, done.rate);
-                self.info(format!("Exported {} ({summary}).{kept}", file.unwrap_or_default()));
+                let written = done.written;
+                let text = format!(
+                    "Exported {} ({}).{kept}",
+                    file.unwrap_or_default(),
+                    summary(target, written.rate)
+                );
+                if written.over == 0 {
+                    self.info(text);
+                    return;
+                }
+                let float = target.settings.format == ExportFormat::Wav && target.settings.bits == 32;
+                let fate = if float {
+                    "stay over in the file, and most game engines cut them off"
+                } else {
+                    "were cut off"
+                };
+                let warning = format!(
+                    "{text} But {} samples were over 0 dB and {fate}: the loudest {:+.1} dB at {}. \
+                     Lower a volume, or the target of a normalize. The Mix level row shows where.",
+                    written.over,
+                    20.0 * written.peak.log10(),
+                    self.time_text(written.peak_at)
+                );
+                self.fail(warning);
             }
             Err(e) => self.fail(format!("Not exported: {e}")),
         }

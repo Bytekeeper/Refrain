@@ -6,6 +6,7 @@ mod export;
 mod files;
 mod generate;
 mod lanes;
+mod levels;
 mod mouse;
 mod playback;
 mod recovery;
@@ -97,6 +98,7 @@ struct Editor {
     saved: Arc<Project>,
     saved_heights: Vec<f32>,
     export_open: bool,
+    level_row: levels::LevelRow,
     /// The settings panel of a generated clip, when open.
     generate: Option<generate::Panel>,
     /// What "Add generator" makes: the settings last set.
@@ -124,6 +126,7 @@ impl Default for Editor {
             saved_heights: vec![],
             export_open: false,
             generate: None,
+            level_row: levels::LevelRow::default(),
             last_generator: refrain_engine::Generator::Tone {
                 wave: refrain_engine::Wave::Sine,
                 hz: 440.0,
@@ -200,11 +203,13 @@ impl Editor {
         egui::CentralPanel::default().show(ui, |ui| {
             self.snap_guide = None;
             self.ruler(ui);
+            let level_row = self.level_row_space(ui);
             let max_height = (ui.available_height() - SCROLLBAR_H - ui.spacing().item_spacing.y).max(0.0);
             egui::ScrollArea::vertical()
                 .max_height(max_height)
                 .show(ui, |ui| self.timeline(ui));
             self.scrollbar(ui);
+            self.draw_level_row(ui, level_row);
         });
         if let Err(e) = self.player.set_project(self.session.project()) {
             self.fail(e);

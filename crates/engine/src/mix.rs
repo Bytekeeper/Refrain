@@ -115,6 +115,56 @@ impl Renderer {
     }
 }
 
+/// The loudest sample of the mix, both sides, in each block of [`Levels::BLOCK`] frames of the whole project.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Levels {
+    pub peaks: Vec<f32>,
+}
+
+impl Levels {
+    pub const BLOCK: usize = 256;
+
+    /// The loudest sample in timeline frames `from..to`.
+    pub fn peak(&self, from: Frames, to: Frames) -> f32 {
+        let block = |f: Frames| usize::try_from(f.max(0)).unwrap_or(0) / Self::BLOCK;
+        let blocks = block(from)..=block(to.saturating_sub(1)).min(self.peaks.len().saturating_sub(1));
+        self.peaks
+            .get(blocks)
+            .map_or(0.0, |p| p.iter().fold(0.0, |m, v| m.max(*v)))
+    }
+}
+
+/// [`Levels`] of the whole project (with the loop on: one loop). Renders piece by piece, keeping the effects'
+/// memory between pieces as playback does; stops and returns `None` once `keep_going` says no.
+pub fn levels(project: &Project, keep_going: impl Fn() -> bool) -> Option<Levels> {
+    const PIECE: usize = Levels::BLOCK * 256;
+    let len = usize::try_from(project.len()).unwrap_or(0);
+    let lanes = project.mix_effects.len();
+    let mut memory = Memory::default();
+    let mut peaks = Vec::with_capacity(len.div_ceil(Levels::BLOCK));
+    let mut start = 0;
+    while start < len {
+        if !keep_going() {
+            return None;
+        }
+        let frames = PIECE.min(len - start);
+        let at = Frames::try_from(start).unwrap_or(Frames::MAX);
+        // The first piece hears the past it needs; later ones go on from the memory.
+        let warmup = if start == 0 {
+            mix_warmup(project, lanes, at, frames)
+        } else {
+            0
+        };
+        let out = mix_with(project, &mut memory, at - warmup, frames + warmup as usize, lanes);
+        let [left, right] = drop_warmup(out, warmup as usize);
+        for (l, r) in left.chunks(Levels::BLOCK).zip(right.chunks(Levels::BLOCK)) {
+            peaks.push(l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs())));
+        }
+        start += frames;
+    }
+    Some(Levels { peaks })
+}
+
 /// All tracks with their effects and volume, mixed, then the first `lanes` mix effects.
 pub(crate) fn mix_upto(project: &Project, start: Frames, frames: usize, lanes: usize) -> [Vec<f32>; 2] {
     let warmup = mix_warmup(project, lanes, start, frames);

@@ -243,17 +243,17 @@ fn clip_can_be_dragged_past_the_start() {
 fn track_header_controls() {
     let mut h = harness(overlapping());
     let track = |h: &Harness<'_, Editor>| h.state().session.project().tracks.first().map(|t| (t.muted, t.gain_db));
-    click(&mut h, 34.0, 107.0);
+    click(&mut h, 34.0, 137.0);
     assert_eq!(track(&h), Some((true, 0.0)));
 
-    drag(&mut h, egui::pos2(84.0, 107.0), egui::pos2(124.0, 107.0));
+    drag(&mut h, egui::pos2(84.0, 137.0), egui::pos2(124.0, 137.0));
     let (_, db) = track(&h).unwrap();
     assert!((3.0..=5.0).contains(&db), "{db} dB");
     save(&mut h, "track_header");
     h.state_mut().undo();
     assert_eq!(track(&h), Some((true, 0.0)), "the whole drag is one undo step");
 
-    click(&mut h, 40.0, 160.0);
+    click(&mut h, 40.0, 190.0);
     assert!(h.state().session.project().tracks.is_empty());
     assert_eq!(h.state().selected, None);
 }
@@ -294,7 +294,7 @@ fn dropping_below_the_tracks_makes_a_new_track() {
 fn add_track_button() {
     let mut h = harness_sized(overlapping(), 420.0);
     // The button sits at the top of the row below the last track.
-    click(&mut h, 50.0, 190.0);
+    click(&mut h, 50.0, 220.0);
     assert_eq!(h.state().session.project().tracks.len(), 2);
     save(&mut h, "after_add_track");
 }
@@ -502,7 +502,7 @@ fn dragging_the_line_below_a_track_changes_its_height() {
             .collect()
     };
     let before = starts(&h);
-    drag(&mut h, egui::pos2(500.0, 176.0), egui::pos2(500.0, 386.0));
+    drag(&mut h, egui::pos2(500.0, 206.0), egui::pos2(500.0, 416.0));
     let track = h.state().session.project().tracks[0].id;
     let height = h.state().track_heights.get(&track).copied().unwrap_or(0.0);
     assert!((300.0..=330.0).contains(&height), "height {height}");
@@ -532,7 +532,7 @@ fn changing_the_sample_rate_keeps_the_view() {
 fn the_trash_can_on_a_clip_deletes_it() {
     let mut h = harness(overlapping());
     save(&mut h, "trash_on_selected");
-    click(&mut h, 611.0, 160.0);
+    click(&mut h, 611.0, 190.0);
     let clips = &h.state().session.project().tracks[0].clips;
     assert_eq!(clips.len(), 1);
     assert_eq!(clips[0].start, 2 * RATE as i64, "the first clip was deleted");
@@ -594,13 +594,13 @@ fn channels_of_a_clip_and_of_a_whole_track() {
     };
     use refrain_engine::ChannelMode::{Left, Mono, Stereo};
 
-    right_click(&mut h, 200.0, 110.0);
+    right_click(&mut h, 200.0, 140.0);
     h.get_by_label("Left only").click();
     h.run();
     assert_eq!(modes(&h), [Left, Stereo]);
     save(&mut h, "channels_left_only");
 
-    right_click(&mut h, 60.0, 135.0);
+    right_click(&mut h, 60.0, 165.0);
     save(&mut h, "channels_track_menu");
     h.get_by_label("Mono (mix of both)").click();
     h.run();
@@ -676,7 +676,7 @@ fn a_dropped_clip_is_drawn_at_its_new_place_at_once() {
     let mut h = harness(e);
     // A second layout pass would hide the stale frame here, but the real window does not always run one.
     h.ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::MIN);
-    let (from, to) = (egui::pos2(300.0, 120.0), egui::pos2(500.0, 120.0));
+    let (from, to) = (egui::pos2(300.0, 150.0), egui::pos2(500.0, 150.0));
     let press = |pos, pressed| Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
@@ -906,18 +906,18 @@ fn effect_ranges_are_edited_with_the_mouse() {
         lanes.flat_map(|l| l.ranges.iter().map(|r| (r.start, r.end))).collect()
     };
 
-    // The track lane is at y 188, the mix lane at y 236; x = 146 + frame / 50.
-    drag(&mut h, egui::pos2(226.0, 236.0), egui::pos2(466.0, 236.0));
+    // The track lane is at y 218, the mix lane at y 266; x = 146 + frame / 50.
+    drag(&mut h, egui::pos2(226.0, 266.0), egui::pos2(466.0, 266.0));
     assert_eq!(ranges(&h), [(8000, 32000), (4000, 16000)]);
-    drag(&mut h, egui::pos2(520.0, 188.0), egui::pos2(570.0, 188.0));
+    drag(&mut h, egui::pos2(520.0, 218.0), egui::pos2(570.0, 218.0));
     assert_eq!(ranges(&h), [(10_500, 34_500), (4000, 16000)]);
-    drag(&mut h, egui::pos2(836.0, 188.0), egui::pos2(806.0, 188.0));
+    drag(&mut h, egui::pos2(836.0, 218.0), egui::pos2(806.0, 218.0));
     assert_eq!(ranges(&h), [(10_500, 33_000), (4000, 16000)]);
     save(&mut h, "effect_lanes");
 
-    click(&mut h, 40.0, 188.0);
+    click(&mut h, 40.0, 218.0);
     assert!(!h.state().session.project().tracks[0].effects[0].enabled);
-    click(&mut h, 320.0, 236.0);
+    click(&mut h, 320.0, 266.0);
     h.key_press(egui::Key::Delete);
     h.run();
     assert_eq!(ranges(&h), [(10_500, 33_000)]);
@@ -942,9 +942,9 @@ fn a_filter_is_added_and_set_from_the_menus() {
         refrain_engine::Effect::HighPass { hz: 80.0, steep: false }
     );
 
-    drag(&mut h, egui::pos2(206.0, 188.0), egui::pos2(606.0, 188.0));
+    drag(&mut h, egui::pos2(206.0, 218.0), egui::pos2(606.0, 218.0));
     assert_eq!(lane(&h).ranges.len(), 1);
-    right_click(&mut h, 400.0, 188.0);
+    right_click(&mut h, 400.0, 218.0);
     save(&mut h, "filter_menu");
     h.get_by_label("24 dB/octave").click();
     h.run();

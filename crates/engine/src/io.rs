@@ -7,7 +7,7 @@ use rubato::audioadapter::Adapter;
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
 
-use crate::{Error, Project, Result, Source, render};
+use crate::{Error, Frames, Project, Result, Source, render};
 
 /// About 50 minutes of 48 kHz stereo in memory. Streaming from disk is a later step.
 const MAX_SAMPLES: u64 = 300_000_000;
@@ -168,8 +168,20 @@ impl Default for ExportSettings {
     }
 }
 
-/// Writes the whole mix (with the loop on: exactly one loop). Returns the sample rate the file was written at.
-pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Result<u32> {
+/// What [`export`] wrote.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Written {
+    /// The sample rate of the file.
+    pub rate: u32,
+    /// Samples over 0 dB. The integer formats cut them off; float WAV keeps them, but game engines cut them.
+    pub over: usize,
+    /// The loudest sample, as an amplitude (1 is 0 dB), and where it is in project frames.
+    pub peak: f32,
+    pub peak_at: Frames,
+}
+
+/// Writes the whole mix (with the loop on: exactly one loop).
+pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Result<Written> {
     if project.is_empty() {
         return Err(Error::Invalid("the project has no audio to export".into()));
     }
@@ -192,6 +204,17 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
         };
         channels = resample(&mix, rate)?.channels;
     }
+    // Measured on what is written, after the mono mix and the rate change.
+    let (mut over, mut peak, mut peak_index) = (0, 0.0f32, 0);
+    for channel in &channels {
+        for (i, s) in channel.iter().enumerate() {
+            over += usize::from(s.abs() > 1.0);
+            if s.abs() > peak {
+                (peak, peak_index) = (s.abs(), i);
+            }
+        }
+    }
+    let peak_at = (peak_index as f64 * f64::from(project.sample_rate) / f64::from(rate.max(1))).round() as Frames;
     let mut options = EncodeOptions::new(match format {
         ExportFormat::Wav => EncodeFormat::Wav,
         ExportFormat::Flac => EncodeFormat::Flac,
@@ -223,7 +246,12 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
         &options,
     )?;
     write_atomic(path, &bytes)?;
-    Ok(rate)
+    Ok(Written {
+        rate,
+        over,
+        peak,
+        peak_at,
+    })
 }
 
 /// Writes next to the target and renames, so a full disk never leaves a half-written file behind.

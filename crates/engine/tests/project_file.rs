@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use refrain_engine::{
     ChannelMode, Command, Effect, ExportFormat, ExportSettings, ExportTarget, Fade, FadeShape, GainPoint, Generator,
-    NoiseColor, Session, Source, export, load_source, open_project, render, save_project,
+    Levels, NoiseColor, Session, Source, export, levels, load_source, open_project, render, save_project,
 };
 
 const RATE: u32 = 8000;
@@ -390,7 +390,7 @@ fn every_export_format_reads_back() {
         let written = export(s.project(), &settings, &file).unwrap();
         let back = load_source(&file).unwrap();
         let expected = if format == ExportFormat::Mp3 { 48_000 } else { rate };
-        assert_eq!((written, back.sample_rate), (expected, expected), "{format:?}");
+        assert_eq!((written.rate, back.sample_rate), (expected, expected), "{format:?}");
         assert_eq!(back.channels.len(), 2, "{format:?}");
         if format == ExportFormat::Mp3 {
             // The silence MP3 adds at the ends: why a loop exported as MP3 gets a gap.
@@ -533,4 +533,42 @@ fn an_export_target_in_an_older_view_is_read() {
     let export = &opened.project().export;
     assert_eq!(export.file.as_deref(), Some(dir.join("mix.ogg").as_path()));
     assert!(export.settings.mono);
+}
+
+/// The level row's peaks are those of one render of the whole mix, effects and all.
+#[test]
+fn levels_match_one_render_of_the_mix() {
+    let dir = folder("levels");
+    let s = edited_project(&dir);
+    let row = levels(s.project(), || true).unwrap();
+    let len = s.project().len() as usize;
+    let [left, right] = render(s.project(), 0, len);
+    assert_eq!(row.peaks.len(), len.div_ceil(Levels::BLOCK));
+    for (i, peak) in row.peaks.iter().enumerate() {
+        let from = i * Levels::BLOCK;
+        let to = (from + Levels::BLOCK).min(len);
+        let expected = left[from..to]
+            .iter()
+            .chain(&right[from..to])
+            .fold(0.0f32, |m, v| m.max(v.abs()));
+        // Playback-style pieces let an effect's memory go once it is 60 dB down.
+        assert!((peak - expected).abs() < 1e-3, "block {i}: {peak} vs {expected}");
+    }
+    assert!(levels(s.project(), || false).is_none(), "stops when asked");
+}
+
+#[test]
+fn an_export_reports_the_samples_over_0_db() {
+    let dir = folder("overs");
+    let mut s = edited_project(&dir);
+    let track = s.project().tracks[0].id;
+    s.execute(Command::SetTrackGain { track, db: 12.0 }).unwrap();
+    let [left, right] = render(s.project(), 0, s.project().len() as usize);
+    let over = left.iter().chain(&right).filter(|v| v.abs() > 1.0).count();
+    let peak = left.iter().chain(&right).fold(0.0f32, |m, v| m.max(v.abs()));
+    let written = export(s.project(), &ExportSettings::default(), &dir.join("loud.wav")).unwrap();
+    assert!(over > 0);
+    assert_eq!((written.over, written.peak), (over, peak));
+    let at = written.peak_at as usize;
+    assert!(left[at].abs() == peak || right[at].abs() == peak);
 }

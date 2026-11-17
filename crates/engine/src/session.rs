@@ -180,10 +180,9 @@ pub enum Command {
 }
 
 /// What [`Session::export`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Exported {
-    /// The rate the file was written at.
-    pub rate: u32,
+    pub written: crate::Written,
     /// The target was audio the project uses; a copy of it was kept and the project reads that now.
     pub kept_original: bool,
 }
@@ -282,8 +281,8 @@ impl Session {
             std::fs::copy(&path, &copy).map_err(|e| cannot(&e))?;
             self.relocate(&path, &copy);
         }
-        let rate = crate::export(&self.project, &target.settings, &path)?;
-        Ok(Exported { rate, kept_original })
+        let written = crate::export(&self.project, &target.settings, &path)?;
+        Ok(Exported { written, kept_original })
     }
 
     /// Saves the project to `path` with the window's `view`. Copies of overwritten originals that lie in
