@@ -24,6 +24,8 @@ const SNAP: Color32 = Color32::from_rgb(120, 220, 255);
 const WAVE: Color32 = Color32::from_rgb(150, 200, 240);
 /// The later clip's waveform where two clips overlap.
 const WAVE_LATER: Color32 = Color32::from_rgb(245, 175, 110);
+/// Generated sound is rose instead of blue, and has an icon for those who cannot tell the colours apart.
+const GENERATED_WAVE: Color32 = Color32::from_rgb(240, 175, 215);
 
 /// How a clip is drawn.
 #[derive(Clone, Copy, PartialEq)]
@@ -396,10 +398,13 @@ impl Editor {
         look: Look,
     ) {
         let start = clip.start;
-        let fill = match look {
-            Look::Normal => Color32::from_rgb(44, 66, 92),
-            Look::Selected => Color32::from_rgb(52, 92, 140),
-            Look::Wrapped => Color32::from_rgb(40, 70, 58),
+        let generated = clip.source.generated.is_some();
+        let fill = match (look, generated) {
+            (Look::Normal, false) => Color32::from_rgb(44, 66, 92),
+            (Look::Selected, false) => Color32::from_rgb(52, 92, 140),
+            (Look::Normal, true) => Color32::from_rgb(84, 48, 76),
+            (Look::Selected, true) => Color32::from_rgb(122, 62, 110),
+            (Look::Wrapped, _) => Color32::from_rgb(40, 70, 58),
         };
         painter.rect_filled(area, 3.0, fill);
         if look == Look::Wrapped {
@@ -428,7 +433,8 @@ impl Editor {
         for (i, &channel) in bands.iter().enumerate() {
             let top = area.top() + 2.0 + band * i as f32;
             let rows = Rect::from_x_y_ranges(visible.x_range(), top..=top + band);
-            self.draw_wave(painter, lane_left, clip, channel, rows, WAVE);
+            let color = if generated { GENERATED_WAVE } else { WAVE };
+            self.draw_wave(painter, lane_left, clip, channel, rows, color);
         }
         if bands.len() == 2 {
             let y = area.top() + 2.0 + band;
@@ -448,9 +454,15 @@ impl Editor {
         }
         painter.add(egui::Shape::line(line, Stroke::new(1.5, CURVE)));
 
+        let title = visible.left_top() + vec2(14.0, 2.0);
+        let title = if generated {
+            generated_icon(painter, title)
+        } else {
+            title
+        };
         if look == Look::Wrapped {
             painter.with_clip_rect(visible.intersect(painter.clip_rect())).text(
-                visible.left_top() + vec2(14.0, 2.0),
+                title,
                 Align2::LEFT_TOP,
                 format!("from loop end: {}", clip.source.name),
                 FontId::proportional(11.0),
@@ -490,7 +502,7 @@ impl Editor {
             painter.add(egui::Shape::convex_polygon(tip, arrow, Stroke::NONE));
         }
         painter.text(
-            visible.left_top() + vec2(14.0, 2.0),
+            title,
             Align2::LEFT_TOP,
             channel_label(clip),
             FontId::proportional(11.0),
@@ -1039,4 +1051,17 @@ fn channel_label(clip: &Clip) -> String {
         ChannelMode::Left => format!("{name} · left only"),
         ChannelMode::Right => format!("{name} · right only"),
     }
+}
+
+/// A small wave before a generated clip's title. Returns where the title goes after it.
+fn generated_icon(painter: &egui::Painter, at: Pos2) -> Pos2 {
+    let (width, middle) = (12.0, at.y + 7.0);
+    let wave: Vec<Pos2> = (0..=12)
+        .map(|i| {
+            let t = i as f32 / 12.0;
+            pos2(at.x + t * width, middle - 3.5 * (t * std::f32::consts::TAU).sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(wave, Stroke::new(1.5, Color32::WHITE)));
+    at + vec2(width + 4.0, 0.0)
 }
