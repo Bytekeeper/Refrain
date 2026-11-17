@@ -2,7 +2,7 @@
 
 use std::f32::consts::FRAC_PI_2;
 
-use crate::effects::{Memory, apply_lane};
+use crate::effects::{Memory, apply_lane, lane_into};
 use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, Track};
 use crate::{EffectLane, EffectRange};
 
@@ -79,6 +79,29 @@ pub fn overlap_after(clips: &[Clip], i: usize, loop_end: Option<Frames>) -> Fram
 /// every loop and audio past the loop end plays again from 0.
 pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] {
     mix_upto(project, start, frames, project.mix_effects.len())
+}
+
+/// The whole project as heard (with the loop on: one loop): each track's clips, then its effect lanes from the
+/// top, at its volume; then the mix lanes. Every effect hears all of its input, before and after.
+pub fn mixdown(project: &Project) -> [Vec<f32>; 2] {
+    let len = usize::try_from(project.len()).unwrap_or(0);
+    let mut mix = [vec![0.0; len], vec![0.0; len]];
+    let mut sound = [vec![0.0; len], vec![0.0; len]];
+    for track in project.tracks.iter().filter(|t| !t.muted) {
+        sound.iter_mut().for_each(|c| c.fill(0.0));
+        clips_into(project, track, &mut sound, 0, 0, len);
+        for lane in &track.effects {
+            lane_into(lane, project, &mut sound);
+        }
+        let amp = db_to_amp(track.gain_db);
+        for (mix, sound) in mix.iter_mut().zip(&sound) {
+            mix.iter_mut().zip(sound).for_each(|(m, s)| *m += s * amp);
+        }
+    }
+    for lane in &project.mix_effects {
+        lane_into(lane, project, &mut mix);
+    }
+    mix
 }
 
 /// Renders the mix piece after piece for playback. The effects keep their memory of the sound between pieces,
