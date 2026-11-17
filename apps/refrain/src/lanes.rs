@@ -405,7 +405,9 @@ impl Editor {
         };
         let fade_y = row.rect.top() + 3.0 + FADE_Y;
         let on_fade = (pos.y - fade_y).abs() <= HANDLE * 0.6;
-        let fade = lane.ranges.iter().find_map(|r| {
+        // Only the selected range has fade handles, so the others keep their corners for resizing.
+        let mut selected = lane.ranges.iter().filter(|r| Some(r.id) == self.selected_range);
+        let fade = selected.find_map(|r| {
             let (start, end) = self.shown_range(lane.id, r.id, r.start, r.end);
             let (x_in, x_out) = self.fade_handles(lane_left, start, end, self.shown_fades(r))?;
             // The nearer handle, for a range so short that both are under the mouse.
@@ -587,6 +589,7 @@ impl Editor {
                     (Effect::Reverb { seconds, .. }, _) => format!("{seconds:.1} s room"),
                 };
                 for x in handles
+                    .filter(|_| selected)
                     .into_iter()
                     .flat_map(|(a, b)| [a, b])
                     .filter(|x| (x0..=x1).contains(x))
