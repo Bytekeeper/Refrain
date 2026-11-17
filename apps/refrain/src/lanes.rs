@@ -486,11 +486,14 @@ impl Editor {
             );
             self.draw_ranges(&painter, lane, row, lane_left);
             let mut enabled = lane.enabled;
+            // Left-aligned: `put` would center each name, so names of different length start at different places.
+            let place = Rect::from_min_size(header.min + vec2(4.0, 2.0), vec2(HEADER_W - 8.0, LANE_H - 4.0));
+            let left = egui::Layout::left_to_right(egui::Align::Center);
             let response = ui
-                .put(
-                    Rect::from_min_size(header.min + vec2(4.0, 2.0), vec2(HEADER_W - 8.0, LANE_H - 4.0)),
-                    egui::Checkbox::new(&mut enabled, lane.effect.name()),
-                )
+                .scope_builder(egui::UiBuilder::new().max_rect(place).layout(left), |ui| {
+                    ui.checkbox(&mut enabled, lane.effect.name())
+                })
+                .inner
                 .on_hover_text("On or off, to compare. Right-click: settings, order, remove");
             if response.changed() {
                 self.run(Command::SetEffectEnabled { lane: lane.id, enabled });
