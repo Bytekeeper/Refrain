@@ -9,19 +9,43 @@ use refrain_engine::{Levels, Project};
 
 use crate::{Editor, HEADER_W};
 
-const ROW_H: f32 = 26.0;
+/// The row's height; its bottom edge is dragged between these.
+pub(crate) const MIN_ROW_H: f32 = 26.0;
+pub(crate) const MAX_ROW_H: f32 = 160.0;
 const LEVEL: Color32 = Color32::from_rgb(150, 170, 190);
 const OVER: Color32 = Color32::from_rgb(255, 80, 80);
 /// The bars show -60 dB at the bottom up to 0 dB at a line below the top; above the line a strip marks where
 /// the mix goes over, so overs show by place, not only by colour.
-const FLOOR_DB: f32 = -60.0;
+const FLOOR_DB: f32 = 60.0;
 const OVER_H: f32 = 5.0;
+/// How the dB below 0 are spread: the logarithm of them, so the loud end, where levels are judged, gets the most
+/// room and quiet parts still show. Larger is closer to a plain dB scale.
+const SPREAD_DB: f32 = 6.0;
 
-#[derive(Default)]
 pub(crate) struct LevelRow {
     /// The levels, and the project they were measured from.
     shown: Option<(Arc<Project>, Arc<Levels>)>,
     measuring: Option<Measuring>,
+    /// A view setting, saved with the project like the zoom.
+    pub(crate) height: f32,
+    resizing: bool,
+}
+
+impl Default for LevelRow {
+    fn default() -> Self {
+        LevelRow {
+            shown: None,
+            measuring: None,
+            height: MIN_ROW_H,
+            resizing: false,
+        }
+    }
+}
+
+/// How far down from the 0 dB line a level is drawn: 0 at 0 dB (or more), 1 at -60 dB (or less).
+fn depth(peak: f32) -> f32 {
+    let below = (-20.0 * peak.max(1e-9).log10()).clamp(0.0, FLOOR_DB);
+    (1.0 + below / SPREAD_DB).ln() / (1.0 + FLOOR_DB / SPREAD_DB).ln()
 }
 
 /// A measurement running in the background.
@@ -81,11 +105,32 @@ impl Editor {
     /// The row's place under the ruler. It is painted at the end of the frame, after the tracks took the mouse,
     /// so a drop shows in the row in the same frame.
     pub(crate) fn level_row_space(&self, ui: &mut Ui) -> (Rect, egui::Response) {
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover())
+        ui.allocate_exact_size(vec2(ui.available_width(), self.level_row.height), Sense::drag())
+    }
+
+    /// Dragging the bottom edge sets the row's height.
+    fn resize_level_row(&mut self, rect: Rect, response: &egui::Response) {
+        let on_edge = |y: f32| (rect.bottom() - y).abs() <= 4.0;
+        if response.hover_pos().is_some_and(|p| on_edge(p.y)) || self.level_row.resizing {
+            response.ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        let origin = response.ctx.input(|i| i.pointer.press_origin());
+        if response.drag_started() && origin.is_some_and(|p| on_edge(p.y)) {
+            self.level_row.resizing = true;
+        }
+        if self.level_row.resizing
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            self.level_row.height = (pos.y - rect.top()).clamp(MIN_ROW_H, MAX_ROW_H);
+        }
+        if response.drag_stopped() {
+            self.level_row.resizing = false;
+        }
     }
 
     pub(crate) fn draw_level_row(&mut self, ui: &Ui, (rect, response): (Rect, egui::Response)) {
         self.measure_levels(ui.ctx());
+        self.resize_level_row(rect, &response);
         let lane_left = rect.left() + HEADER_W;
         let painter = ui.painter_at(rect);
         painter.text(
@@ -101,10 +146,8 @@ impl Editor {
         );
         painter.rect_filled(area, 0.0, ui.visuals().extreme_bg_color);
         let zero = area.top() + OVER_H;
-        let y_of = |peak: f32| {
-            let db = (20.0 * peak.max(1e-9).log10()).clamp(FLOOR_DB, 0.0);
-            area.bottom() - (db - FLOOR_DB) / -FLOOR_DB * (area.bottom() - zero)
-        };
+        let y_of = |peak: f32| zero + depth(peak) * (area.bottom() - zero);
+
         if let Some((measured, levels)) = &self.level_row.shown {
             // Shown dimmed while the levels of the latest edit are still being measured.
             let fresh = Arc::ptr_eq(measured, self.session.project());
@@ -148,6 +191,14 @@ impl Editor {
             [pos2(area.left(), zero), pos2(area.right(), zero)],
             Stroke::new(1.0, Color32::from_gray(110)),
         );
+        // Faint lines at -6 and -20 dB over the bars, so the uneven scale can be read.
+        for db in [-6.0f32, -20.0] {
+            let y = y_of(10f32.powf(db / 20.0));
+            painter.line_segment(
+                [pos2(area.left(), y), pos2(area.right(), y)],
+                Stroke::new(1.0, Color32::from_black_alpha(70)),
+            );
+        }
         let play = self.x_of(lane_left, self.player.position());
         if play >= area.left() {
             painter.line_segment(

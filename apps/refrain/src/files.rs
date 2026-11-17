@@ -16,6 +16,8 @@ struct View {
     scroll: f64,
     /// In track order.
     track_heights: Vec<f32>,
+    #[serde(default)]
+    level_row_height: Option<f32>,
 }
 
 impl Editor {
@@ -111,6 +113,7 @@ impl Editor {
             frames_per_px: self.frames_per_px,
             scroll: self.scroll,
             track_heights: self.heights(),
+            level_row_height: Some(self.level_row.height),
         };
         serde_json::to_value(view).unwrap_or_default()
     }
@@ -125,6 +128,9 @@ impl Editor {
         }
         if view.scroll.is_finite() {
             self.scroll = view.scroll.max(0.0);
+        }
+        if let Some(height) = view.level_row_height.filter(|h| h.is_finite()) {
+            self.level_row.height = height.clamp(crate::levels::MIN_ROW_H, crate::levels::MAX_ROW_H);
         }
         let tracks = self.session.project().tracks.iter();
         for (track, height) in tracks.zip(view.track_heights) {
