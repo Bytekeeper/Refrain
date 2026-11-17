@@ -623,12 +623,12 @@ struct Comb {
     low: f32,
 }
 
-/// A room after Schroeder: echo loops in parallel that lose highs, then all-pass diffusers in a row.
 /// The next place in a delay line of `len`. Not `%`: a division per sample made long reverbs slow.
 fn next(at: usize, len: usize) -> usize {
     if at + 1 >= len { 0 } else { at + 1 }
 }
 
+/// A room after Schroeder: echo loops in parallel that lose highs, then all-pass diffusers in a row.
 struct Reverb {
     combs: [Vec<Comb>; 2],
     passes: [Vec<(Vec<f32>, usize)>; 2],
