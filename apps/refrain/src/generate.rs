@@ -1,4 +1,4 @@
-//! The Generate panel: makes a tone, noise or blips as a new clip, or changes the settings of one.
+//! Generated clips: adding one, and the panel with its settings.
 
 use egui::{Align2, Order, Ui, vec2};
 use refrain_engine::{ClipId, Command, Frames, Generator, NoiseColor, Wave, color_name, played_hz, wave_name};
@@ -6,77 +6,81 @@ use refrain_engine::{ClipId, Command, Frames, Generator, NoiseColor, Wave, color
 use crate::Editor;
 use crate::effect_menu::number_rows;
 
+/// The settings of one generated clip.
 pub(crate) struct Panel {
-    /// The generated clip being changed; `None` while making a new one.
-    clip: Option<ClipId>,
+    clip: ClipId,
     generator: Generator,
     /// While a value is dragged, the project only changes when it is let go, as one undo step.
     dragging: bool,
-    seconds: f32,
 }
 
 impl Panel {
-    pub(crate) fn new() -> Panel {
+    pub(crate) fn new(clip: ClipId, generator: Generator) -> Panel {
         Panel {
-            clip: None,
-            generator: Generator::Tone {
-                wave: Wave::Sine,
-                hz: 440.0,
-                level_db: -12.0,
-            },
-            dragging: false,
-            seconds: 10.0,
-        }
-    }
-
-    pub(crate) fn edit(clip: ClipId, generator: Generator) -> Panel {
-        Panel {
-            clip: Some(clip),
+            clip,
             generator,
             dragging: false,
-            seconds: 0.0,
         }
     }
 }
 
+/// Seconds a new generated clip lasts without a loop; with one it lasts one loop.
+const NEW_SECONDS: f64 = 10.0;
+
 impl Editor {
+    /// Adds a clip of the generator last set, or a tone, on a new track at the play position, and opens its
+    /// settings. Its length is changed by dragging its edges.
+    pub(crate) fn add_generator(&mut self) {
+        let project = self.session.project();
+        let rate = if project.sample_rate == 0 {
+            48_000
+        } else {
+            project.sample_rate
+        };
+        let at = self.player.position();
+        let (start, len) = match project.loop_end {
+            // A clip starts inside the loop; one loop long it repeats without a seam.
+            Some(l) => (if at < l { at } else { 0 }, l),
+            None => (at, (NEW_SECONDS * f64::from(rate)).round() as Frames),
+        };
+        let generator = self.last_generator;
+        if self.run(Command::AddGeneratedClip {
+            track: None,
+            generator,
+            start,
+            len,
+        }) {
+            let added = self.session.project().tracks.last().and_then(|t| t.clips.first());
+            self.selected = added.map(|c| c.id);
+            self.generate = self.selected.map(|clip| Panel::new(clip, generator));
+        }
+    }
+
     pub(crate) fn generate_panel(&mut self, ctx: &egui::Context) {
         let Some(mut panel) = self.generate.take() else { return };
-        if let Some(clip) = panel.clip {
-            // Undo or a delete may have changed or removed the clip.
-            let Some(generated) = self
-                .session
-                .project()
-                .clip(clip)
-                .and_then(|(_, c)| c.source.generated.clone())
-            else {
-                return;
-            };
-            if !panel.dragging {
-                panel.generator = generated.generator;
-            }
+        // Undo or a delete may have changed or removed the clip.
+        let generated = self.session.project().clip(panel.clip);
+        let Some(generated) = generated.and_then(|(_, c)| c.source.generated.clone()) else {
+            return;
+        };
+        if !panel.dragging {
+            panel.generator = generated.generator;
         }
         let mut open = true;
-        let mut added = false;
-        egui::Window::new(if panel.clip.is_some() {
-            "Generated sound"
-        } else {
-            "Generate"
-        })
-        .open(&mut open)
-        .order(Order::Foreground)
-        .pivot(Align2::RIGHT_TOP)
-        .default_pos(ctx.content_rect().right_top() + vec2(-16.0, 70.0))
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| added = self.generate_ui(ui, &mut panel));
-        if open && !added {
+        egui::Window::new("Generator")
+            .open(&mut open)
+            .order(Order::Foreground)
+            .pivot(Align2::RIGHT_TOP)
+            .default_pos(ctx.content_rect().right_top() + vec2(-16.0, 70.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| self.generate_ui(ui, &mut panel));
+        if open {
             self.generate = Some(panel);
         }
     }
 
-    /// Returns whether a clip was added, which closes the panel.
-    fn generate_ui(&mut self, ui: &mut Ui, panel: &mut Panel) -> bool {
+    fn generate_ui(&mut self, ui: &mut Ui, panel: &mut Panel) {
         let (mut changed, mut done) = (false, false);
         ui.horizontal(|ui| {
             for kind in Generator::defaults() {
@@ -91,53 +95,19 @@ impl Editor {
         let (c, d) = generator_settings(ui, &mut panel.generator);
         (changed, done) = (changed || c, done || d);
         let project = self.session.project();
-        let rate = if project.sample_rate == 0 {
-            48_000
-        } else {
-            project.sample_rate
-        };
         if let Some(l) = project.loop_end {
-            ui.weak(loop_note(panel.generator, rate, l));
+            ui.weak(loop_note(panel.generator, project.sample_rate, l));
         }
-        match panel.clip {
-            Some(clip) => {
-                panel.dragging |= changed;
-                if done {
-                    panel.dragging = false;
-                    let generator = panel.generator;
-                    self.run(Command::SetGenerator { clip, generator });
-                }
-                false
-            }
-            None => {
-                number_rows(ui, [("Length", &mut panel.seconds, 0.01..=3600.0, 0.05, " s", 2)]);
-                if !ui
-                    .button("Add")
-                    .on_hover_text("On a new track, at the play position")
-                    .clicked()
-                {
-                    return false;
-                }
-                let len = (f64::from(panel.seconds) * f64::from(rate)).round() as Frames;
-                // With the loop on, a clip starts inside the loop.
-                let at = self.player.position();
-                let start = project.loop_end.filter(|l| at >= *l).map_or(at, |_| 0);
-                let added = self.run(Command::AddGeneratedClip {
-                    track: None,
-                    generator: panel.generator,
-                    start,
-                    len,
-                });
-                if added {
-                    self.selected = self
-                        .session
-                        .project()
-                        .tracks
-                        .last()
-                        .and_then(|t| t.clips.first())
-                        .map(|c| c.id);
-                }
-                added
+        ui.weak("Drag the clip's edges to change its length.");
+        panel.dragging |= changed;
+        if done {
+            panel.dragging = false;
+            let generator = panel.generator;
+            if self.run(Command::SetGenerator {
+                clip: panel.clip,
+                generator,
+            }) {
+                self.last_generator = generator;
             }
         }
     }

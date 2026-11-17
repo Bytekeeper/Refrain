@@ -453,7 +453,7 @@ impl Editor {
                 if let Some(g) = generated
                     && ui.button("Generator settings…").clicked()
                 {
-                    self.generate = Some(crate::generate::Panel::edit(clip, g.generator));
+                    self.generate = Some(crate::generate::Panel::new(clip, g.generator));
                     ui.close();
                 }
                 ui.separator();

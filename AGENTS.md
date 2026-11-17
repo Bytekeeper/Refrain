@@ -12,7 +12,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   mouse.rs         mouse editing: hit-testing and drags
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
-  generate.rs      the Generate panel: tone, noise and blips as new clips, and their settings
+  generate.rs      adding a generated clip (tone, noise, blips) and its settings panel
   files.rs         open, save, import, unsaved-changes question
   export.rs        export panel and "export again" to the project's export target
   recovery.rs      copies of unsaved work, restored after a crash

@@ -451,8 +451,14 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
             let Some(g) = &c.source.generated else {
                 return Err(Error::Invalid("this clip plays a file, not generated sound".into()));
             };
+            let old_name = g.generator.describe();
             let source = generator.make(c.source.sample_rate, loop_end, g.first, c.source.frames())?;
             c.source = Arc::new(source);
+            // A track still named after the old sound is named after the new one; a name typed in stays.
+            let track = p.tracks.iter_mut().find(|t| t.clips.iter().any(|c| c.id == clip));
+            if let Some(track) = track.filter(|t| t.name == old_name) {
+                track.name = generator.describe();
+            }
         }
         Command::MoveClip { clip, track, start } => {
             track_mut(p, track)?;

@@ -458,6 +458,45 @@ mod tests {
     }
 
     #[test]
+    fn new_settings_rename_the_track_unless_its_name_was_typed_in() {
+        let mut s = Session::default();
+        let tone = Generator::Tone {
+            wave: Wave::Sine,
+            hz: 440.0,
+            level_db: -12.0,
+        };
+        let add = Command::AddGeneratedClip {
+            track: None,
+            generator: tone,
+            start: 0,
+            len: 1000,
+        };
+        s.execute(add.clone()).unwrap();
+        s.execute(add).unwrap();
+        let typed = s.project().tracks[1].id;
+        s.execute(Command::RenameTrack {
+            track: typed,
+            name: "Alarm".into(),
+        })
+        .unwrap();
+        let higher = Generator::Tone {
+            wave: Wave::Sine,
+            hz: 880.0,
+            level_db: -12.0,
+        };
+        for t in 0..2 {
+            let clip = s.project().tracks[t].clips[0].id;
+            s.execute(Command::SetGenerator {
+                clip,
+                generator: higher,
+            })
+            .unwrap();
+        }
+        let names: Vec<_> = s.project().tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Sine 880 Hz", "Alarm"]);
+    }
+
+    #[test]
     fn a_loop_or_rate_change_makes_the_sound_again() {
         let (mut s, _) = generated_session();
         s.execute(Command::SetLoopEnd { at: Some(120_000) }).unwrap();

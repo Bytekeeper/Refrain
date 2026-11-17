@@ -97,8 +97,10 @@ struct Editor {
     export_target: ExportTarget,
     saved_export: ExportTarget,
     export_open: bool,
-    /// The Generate panel, when open.
+    /// The settings panel of a generated clip, when open.
     generate: Option<generate::Panel>,
+    /// What "Add generator" makes: the settings last set.
+    last_generator: refrain_engine::Generator,
     /// Where unsaved work is copied in case the editor does not close normally. None in tests.
     recovery: Option<Recovery>,
     title: String,
@@ -124,6 +126,11 @@ impl Default for Editor {
             saved_export: ExportTarget::default(),
             export_open: false,
             generate: None,
+            last_generator: refrain_engine::Generator::Tone {
+                wave: refrain_engine::Wave::Sine,
+                hz: 440.0,
+                level_db: -12.0,
+            },
             recovery: None,
             file: None,
             title: String::new(),
@@ -251,11 +258,11 @@ impl Editor {
             self.import();
         }
         if ui
-            .button("Generate…")
-            .on_hover_text("Make a tone, noise or blips as a new clip")
+            .button("Add generator")
+            .on_hover_text("A tone, noise or blips as a new clip, on a new track at the play position")
             .clicked()
         {
-            self.generate = Some(generate::Panel::new());
+            self.add_generator();
         }
         if ui.button("Export").on_hover_text(self.export_tooltip()).clicked() {
             self.export_again();
