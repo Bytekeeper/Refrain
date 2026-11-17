@@ -308,10 +308,15 @@ impl Editor {
                 }
                 *track = project.tracks.get(row_under).map(|t| t.id);
             }
-            // Up to the ends of the audio file, and at least one frame of the clip stays after 0.
+            // Up to the ends of the audio file, and at least one frame of the clip stays after 0. Generated
+            // sound has no ends: more is made for the new length.
             Drag::TrimStart { clip, start } => {
                 if let Some((_, c)) = project.clip(*clip) {
-                    let first = c.start - c.offset;
+                    let first = if c.source.generated.is_some() {
+                        Frames::MIN / 4
+                    } else {
+                        c.start - c.offset
+                    };
                     let first = if project.loop_end.is_some() {
                         first.max(0)
                     } else {
@@ -322,7 +327,11 @@ impl Editor {
             }
             Drag::TrimEnd { clip, end } => {
                 if let Some((_, c)) = project.clip(*clip) {
-                    let audio_end = c.start - c.offset + c.source.frames();
+                    let audio_end = if c.source.generated.is_some() {
+                        Frames::MAX / 4
+                    } else {
+                        c.start - c.offset + c.source.frames()
+                    };
                     *end = snap
                         .apply(frame, &mut self.snap_guide)
                         .clamp((c.start + 1).max(1), audio_end.max(1));
@@ -434,6 +443,17 @@ impl Editor {
                 if ui.add(egui::Button::new("Duplicate").shortcut_text("Ctrl+D")).clicked() {
                     self.selected = Some(clip);
                     self.duplicate();
+                    ui.close();
+                }
+                let generated = self
+                    .session
+                    .project()
+                    .clip(clip)
+                    .and_then(|(_, c)| c.source.generated.clone());
+                if let Some(g) = generated
+                    && ui.button("Generator settings…").clicked()
+                {
+                    self.generate = Some(crate::generate::Panel::edit(clip, g.generator));
                     ui.close();
                 }
                 ui.separator();

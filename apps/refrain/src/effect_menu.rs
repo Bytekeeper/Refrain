@@ -150,7 +150,7 @@ impl Editor {
     }
 }
 
-type NumberRow<'a> = (
+pub(crate) type NumberRow<'a> = (
     &'static str,
     &'a mut f32,
     std::ops::RangeInclusive<f32>,
@@ -160,12 +160,13 @@ type NumberRow<'a> = (
 );
 
 /// One line per number: label and drag field. Returns whether one changed, and whether that change is finished.
-fn number_rows<const N: usize>(ui: &mut Ui, rows: [NumberRow<'_>; N]) -> (bool, bool) {
+pub(crate) fn number_rows<const N: usize>(ui: &mut Ui, rows: [NumberRow<'_>; N]) -> (bool, bool) {
     let (mut changed, mut done) = (false, false);
     for (label, value, range, speed, suffix, decimals) in rows {
         let response = ui
             .horizontal(|ui| {
-                ui.label(label);
+                // Tied to its label, so a screen reader names the field.
+                let label = ui.label(label);
                 ui.add(
                     egui::DragValue::new(value)
                         .range(range)
@@ -173,6 +174,7 @@ fn number_rows<const N: usize>(ui: &mut Ui, rows: [NumberRow<'_>; N]) -> (bool, 
                         .fixed_decimals(decimals)
                         .suffix(suffix),
                 )
+                .labelled_by(label.id)
             })
             .inner;
         changed |= response.changed();

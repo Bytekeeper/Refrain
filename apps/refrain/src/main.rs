@@ -1,6 +1,7 @@
 mod effect_menu;
 mod export;
 mod files;
+mod generate;
 mod lanes;
 mod mouse;
 mod playback;
@@ -96,6 +97,8 @@ struct Editor {
     export_target: ExportTarget,
     saved_export: ExportTarget,
     export_open: bool,
+    /// The Generate panel, when open.
+    generate: Option<generate::Panel>,
     /// Where unsaved work is copied in case the editor does not close normally. None in tests.
     recovery: Option<Recovery>,
     title: String,
@@ -120,6 +123,7 @@ impl Default for Editor {
             export_target: ExportTarget::default(),
             saved_export: ExportTarget::default(),
             export_open: false,
+            generate: None,
             recovery: None,
             file: None,
             title: String::new(),
@@ -177,6 +181,7 @@ impl Editor {
         self.shortcuts(ui);
         self.autosave(ui.ctx());
         self.export_panel(ui.ctx());
+        self.generate_panel(ui.ctx());
         egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal_wrapped(|ui| self.toolbar(ui)));
         egui::Panel::bottom("status").show(ui, |ui| {
             if self.status.is_empty() {
@@ -244,6 +249,13 @@ impl Editor {
         });
         if ui.button("Import…").clicked() {
             self.import();
+        }
+        if ui
+            .button("Generate…")
+            .on_hover_text("Make a tone, noise or blips as a new clip")
+            .clicked()
+        {
+            self.generate = Some(generate::Panel::new());
         }
         if ui.button("Export").on_hover_text(self.export_tooltip()).clicked() {
             self.export_again();

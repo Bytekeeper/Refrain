@@ -12,6 +12,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   mouse.rs         mouse editing: hit-testing and drags
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
+  generate.rs      the Generate panel: tone, noise and blips as new clips, and their settings
   files.rs         open, save, import, unsaved-changes question
   export.rs        export panel and "export again" to the project's export target
   recovery.rs      copies of unsaved work, restored after a crash
@@ -43,6 +44,8 @@ stored in the project; the audio is computed from the files whenever it plays or
 is ever applied to the audio for good, so a trim can be dragged back out and an effect changed or
 removed later. Results that depend on the audio (a normalize gain, a match) are measured again when
 the audio under them changes, never stored as a fixed number.
+Sound the editor makes (tone, noise, blips) is stored as its settings, never as samples, and made again
+for a new length, loop length or sample rate.
 
 Effects live in lanes below a track, or below the mix for effects across all tracks. A lane is one kind
 of effect and the time ranges where it applies, each range with its own settings; lanes apply from the

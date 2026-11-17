@@ -429,7 +429,7 @@ mod tests {
         // An empty project takes 48 kHz with its first generated clip.
         let len = Frames::from(RATE);
         s.execute(Command::AddGeneratedClip {
-            track,
+            track: Some(track),
             generator,
             start: len,
             len,

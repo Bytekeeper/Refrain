@@ -38,9 +38,9 @@ pub enum Command {
         source: Arc<Source>,
         start: Frames,
     },
-    /// A clip of sound the editor makes, `len` frames long.
+    /// A clip of sound the editor makes, `len` frames long. Without a track, on a new one named after the sound.
     AddGeneratedClip {
-        track: TrackId,
+        track: Option<TrackId>,
         generator: Generator,
         start: Frames,
         len: Frames,
@@ -415,6 +415,21 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 p.sample_rate = 48_000;
             }
             let source = Arc::new(generator.make(p.sample_rate, p.loop_end, 0, len)?);
+            let track = match track {
+                Some(track) => track,
+                None => {
+                    let id = TrackId(p.new_id());
+                    p.tracks.push(Track {
+                        id,
+                        name: generator.describe(),
+                        gain_db: 0.0,
+                        muted: false,
+                        clips: vec![],
+                        effects: vec![],
+                    });
+                    id
+                }
+            };
             let id = ClipId(p.new_id());
             let clip = Clip {
                 id,

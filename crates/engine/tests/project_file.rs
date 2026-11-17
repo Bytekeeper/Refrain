@@ -76,7 +76,7 @@ fn edited_project(dir: &Path) -> Session {
     .unwrap();
     // Generated noise, its start dragged out so it begins before the sound it was first made with.
     s.execute(Command::AddGeneratedClip {
-        track: t2,
+        track: Some(t2),
         generator: Generator::Noise {
             color: NoiseColor::Pink,
             level_db: -18.0,
