@@ -130,10 +130,12 @@ fn edited_project(dir: &Path) -> Session {
             delay_ms: 120.0,
             fade_db: 8.0,
             level_db: -9.0,
+            reversed: false,
         },
         Effect::Reverb {
             seconds: 0.8,
             level_db: -10.0,
+            reversed: true,
         },
     ];
     for (i, effect) in tail_effects.into_iter().enumerate() {

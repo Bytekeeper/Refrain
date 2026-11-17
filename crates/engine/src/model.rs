@@ -222,7 +222,7 @@ impl Project {
         let lanes = self.tracks.iter().flat_map(|t| &t.effects).chain(&self.mix_effects);
         lanes
             .flat_map(|lane| &lane.ranges)
-            .filter(|r| r.effect.tail(self.sample_rate) > 0)
+            .filter(|r| r.effect.tail(self.sample_rate) > 0 && !r.effect.reversed())
             .map(|r| r.end.saturating_add(r.effect.tail(self.sample_rate)))
             .max()
             .unwrap_or(0)

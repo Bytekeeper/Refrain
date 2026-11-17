@@ -7,7 +7,7 @@ mod model;
 mod project_file;
 mod session;
 
-pub use effects::{Effect, EffectLane, EffectRange, LaneId, RangeId};
+pub use effects::{Effect, EffectLane, EffectRange, LaneId, RangeId, Reversed};
 pub use io::{ExportFormat, ExportSettings, export, load_source, resample};
 pub use mix::{Renderer, clip_amp, edge_fades, fade_gain, overlap_after, overlap_before, render, similarity};
 pub use model::{ChannelMode, Clip, ClipId, Fade, FadeShape, Frames, GainPoint, Project, Source, Track, TrackId};

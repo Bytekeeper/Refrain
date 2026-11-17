@@ -266,7 +266,11 @@ impl Editor {
                 targets.extend([range.start, range.end]);
                 let tail = range.effect.tail(project.sample_rate);
                 if tail > 0 {
-                    let done = range.end.saturating_add(tail);
+                    let done = if range.effect.reversed() {
+                        range.start - tail
+                    } else {
+                        range.end.saturating_add(tail)
+                    };
                     targets.push(project.loop_end.filter(|l| *l > 0).map_or(done, |l| done.rem_euclid(l)));
                 }
             }

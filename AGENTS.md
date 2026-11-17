@@ -49,6 +49,8 @@ top down.
 Effects that need the sound before a frame (filters, echo, reverb) get it by starting the render earlier,
 so a render from any point sounds like one from the start. Playback instead keeps their memory from one
 piece to the next (`engine::Renderer`), because a reverb cannot hear seconds of the past again every 10 ms.
+A reversed echo or reverb needs the sound after a frame, which playback has not reached yet, so its sound is
+computed once per range when the project changes and kept with the range, like a normalize gain.
 
 ## 3. Clean room
 

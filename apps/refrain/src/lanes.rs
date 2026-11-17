@@ -174,15 +174,16 @@ impl Editor {
             .clamp(0.0, 1.0)
     }
 
-    /// Where the tail after a range ending at `end` is drawn: with a loop it wraps into the start, and it is
-    /// at most one loop long.
-    fn tail_span(&self, end: Frames, tail: Frames) -> (Frames, Frames) {
+    /// Where the tail of a range is drawn: after its end, or reversed before its start. With a loop it wraps,
+    /// and it is at most one loop long.
+    fn tail_span(&self, (start, end): (Frames, Frames), tail: Frames, reversed: bool) -> (Frames, Frames) {
+        let from = if reversed { start - tail } else { end };
         match self.session.project().loop_end.filter(|l| *l > 0) {
             Some(l) => {
-                let from = end.rem_euclid(l);
+                let from = from.rem_euclid(l);
                 (from, from + tail.min(l))
             }
-            None => (end, end + tail),
+            None => (from, from + tail),
         }
     }
 
@@ -284,10 +285,11 @@ impl Editor {
         let mut guide = None;
         let loop_end = project.loop_end.filter(|l| *l > 0);
         if let Some(drag) = &mut self.range_drag {
-            let other_fades = drag
+            let dragged = drag
                 .range
-                .and_then(|id| project.lane(drag.lane)?.ranges.iter().find(|r| r.id == id))
-                .map_or((0, 0), |r| (r.fade_in, r.fade_out));
+                .and_then(|id| project.lane(drag.lane)?.ranges.iter().find(|r| r.id == id));
+            let other_fades = dragged.map_or((0, 0), |r| (r.fade_in, r.fade_out));
+            let reversed = dragged.is_some_and(|r| r.effect.reversed());
             match &mut drag.kind {
                 &mut RangeDragKind::New { anchor } => {
                     let to = snap.apply(frame, &mut guide);
@@ -318,7 +320,8 @@ impl Editor {
                     *frames = to.clamp(0, drag.end - drag.start - other_fades.0);
                 }
                 RangeDragKind::Tail { frames } => {
-                    let to = snap.apply(frame, &mut guide) - drag.end;
+                    let at = snap.apply(frame, &mut guide);
+                    let to = if reversed { drag.start - at } else { at - drag.end };
                     // With a loop the handle may sit before the range, one loop later.
                     *frames = match loop_end {
                         Some(l) => to.rem_euclid(l).max(1),
@@ -393,14 +396,17 @@ impl Editor {
         let lane = project.lane(row.lane)?;
         let rate = project.sample_rate;
         let tail_end = |r: &EffectRange| {
-            let tail = self.shown_effect(r).tail(rate);
-            let (_, end) = self.shown_range(lane.id, r.id, r.start, r.end);
-            let (from, to) = self.tail_span(end, tail);
+            let effect = self.shown_effect(r);
+            let tail = effect.tail(rate);
+            let shown = self.shown_range(lane.id, r.id, r.start, r.end);
+            let (from, to) = self.tail_span(shown, tail, effect.reversed());
+            // A reversed tail is done where it starts, on the left.
+            let handle = |&(x0, x1): &(f32, f32)| if effect.reversed() { x0 } else { x1 };
             (tail > 0
                 && self
                     .range_spans(lane_left, from, to)
                     .iter()
-                    .any(|(_, x)| (pos.x - x).abs() <= HANDLE))
+                    .any(|span| (pos.x - handle(span)).abs() <= HANDLE))
             .then_some((r.id, Edge::Tail))
         };
         let fade_y = row.rect.top() + 3.0 + FADE_Y;
@@ -529,7 +535,7 @@ impl Editor {
             });
         }
         for r in &ranges {
-            self.draw_tail(&painter, lane_left, body, r.end, r.effect, color);
+            self.draw_tail(&painter, lane_left, body, (r.start, r.end), r.effect, color);
         }
         for range in &ranges {
             let &ShownRange {
@@ -585,8 +591,12 @@ impl Editor {
                     (Effect::Normalize { .. } | Effect::Loudness { .. }, None) => String::new(),
                     (Effect::HighPass { hz, .. }, _) => format!("above {}", hz_text(hz)),
                     (Effect::LowPass { hz, .. }, _) => format!("below {}", hz_text(hz)),
-                    (Effect::Echo { delay_ms, .. }, _) => format!("every {delay_ms:.0} ms"),
-                    (Effect::Reverb { seconds, .. }, _) => format!("{seconds:.1} s room"),
+                    (Effect::Echo { delay_ms, reversed, .. }, _) => {
+                        format!("every {delay_ms:.0} ms{}", if reversed { ", reversed" } else { "" })
+                    }
+                    (Effect::Reverb { seconds, reversed, .. }, _) => {
+                        format!("{seconds:.1} s room{}", if reversed { ", reversed" } else { "" })
+                    }
                 };
                 for x in handles
                     .filter(|_| selected)
@@ -617,7 +627,7 @@ impl Editor {
         painter: &egui::Painter,
         lane_left: f32,
         body: Rect,
-        end: Frames,
+        range: (Frames, Frames),
         effect: Effect,
         color: Color32,
     ) {
@@ -626,13 +636,16 @@ impl Editor {
         if tail <= 0 {
             return;
         }
-        let (from, to) = self.tail_span(end, tail);
+        let reversed = effect.reversed();
+        let (from, to) = self.tail_span(range, tail, reversed);
         let delay = match effect {
             Effect::Echo { delay_ms, .. } => (f64::from(delay_ms) * f64::from(rate) / 1000.0).round() as Frames,
             _ => 0,
         };
         for (x0, x1) in self.range_spans(lane_left, from, to) {
-            let alpha = |x: f32| if x == x0 { 0.3 } else { 0.0 };
+            // Strongest next to the range: a reversed tail swells towards its start.
+            let near = if reversed { x1 } else { x0 };
+            let alpha = |x: f32| if x == near { 0.3 } else { 0.0 };
             let mut mesh = egui::Mesh::default();
             for (x, y) in [
                 (x0, body.top()),
@@ -648,8 +661,9 @@ impl Editor {
             if delay > 0 {
                 let per_px = (x1 - x0) / (to - from).max(1) as f32;
                 let marks = (1..)
-                    .map(|k| x0 + (k * delay) as f32 * per_px)
-                    .take_while(|x| *x < x1 - 1.0);
+                    .map(|k| (k * delay) as f32 * per_px)
+                    .take_while(|d| *d < x1 - x0 - 1.0)
+                    .map(|d| if reversed { x1 - d } else { x0 + d });
                 for x in marks {
                     painter.line_segment(
                         [pos2(x, body.center().y - 4.0), pos2(x, body.center().y + 4.0)],
@@ -657,7 +671,11 @@ impl Editor {
                     );
                 }
             }
-            painter.line_segment([pos2(x1, body.top()), pos2(x1, body.bottom())], Stroke::new(2.0, color));
+            let done = if reversed { x0 } else { x1 };
+            painter.line_segment(
+                [pos2(done, body.top()), pos2(done, body.bottom())],
+                Stroke::new(2.0, color),
+            );
         }
     }
 
@@ -853,6 +871,11 @@ fn number_rows<const N: usize>(ui: &mut Ui, rows: [NumberRow<'_>; N]) -> (bool, 
     (changed, done)
 }
 
+/// Returns whether it was switched.
+fn reversed_box(ui: &mut Ui, reversed: &mut bool, hint: &str) -> bool {
+    ui.checkbox(reversed, "Reversed").on_hover_text(hint).changed()
+}
+
 /// The settings of one effect. Returns whether a value changed, and whether the change is finished, which is
 /// at once for a choice and on release for a dragged number.
 fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
@@ -912,20 +935,33 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
             delay_ms,
             fade_db,
             level_db,
+            reversed,
         } => {
             let rows = [
                 ("Repeat every", delay_ms, 10.0..=2000.0, 1.0, " ms", 0),
                 ("First echo at", level_db, -40.0..=0.0, 0.1, " dB", 1),
                 ("Each next one", fade_db, 3.0..=40.0, 0.1, " dB quieter", 1),
             ];
-            number_rows(ui, rows)
+            let (changed, done) = number_rows(ui, rows);
+            let flipped = reversed_box(
+                ui,
+                reversed,
+                "The echoes come before the sound, getting louder towards it",
+            );
+            (changed || flipped, done || flipped)
         }
-        Effect::Reverb { seconds, level_db } => {
+        Effect::Reverb {
+            seconds,
+            level_db,
+            reversed,
+        } => {
             let rows = [
                 ("Dies away in", seconds, 0.1..=10.0, 0.01, " s", 2),
                 ("Volume", level_db, -40.0..=0.0, 0.1, " dB", 1),
             ];
-            number_rows(ui, rows)
+            let (changed, done) = number_rows(ui, rows);
+            let flipped = reversed_box(ui, reversed, "The room comes before the sound and swells into it");
+            (changed || flipped, done || flipped)
         }
     }
 }

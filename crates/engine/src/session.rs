@@ -429,6 +429,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 effect: lane.effect,
                 gain: 1.0,
                 limited: false,
+                reversed: None,
                 fade_in: fade,
                 fade_out: fade,
             });

@@ -107,6 +107,7 @@ fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<Ef
                 effect: r.effect.unwrap_or(file.effect),
                 gain: 1.0,
                 limited: false,
+                reversed: None,
                 fade_in: r.fade_in.unwrap_or(default_fade(project.sample_rate)),
                 fade_out: r.fade_out.unwrap_or(default_fade(project.sample_rate)),
             });

@@ -1,6 +1,7 @@
 //! Effects in lanes: each lane is one effect applied in its time ranges, lanes in order from the top.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::mix::{db_to_amp, mix_upto, render_track};
 use crate::{Error, Frames, Project, Result};
@@ -24,9 +25,22 @@ pub enum Effect {
     /// Lets through what is below `hz`: removes hiss and harshness.
     LowPass { hz: f32, steep: bool },
     /// Repeats the sound every `delay_ms`; the first repeat at `level_db`, each next one `fade_db` quieter.
-    Echo { delay_ms: f32, fade_db: f32, level_db: f32 },
-    /// The sound of a room that dies away to -60 dB in `seconds`, added at `level_db`.
-    Reverb { seconds: f32, level_db: f32 },
+    /// `reversed`: the repeats come before the sound instead, getting louder towards it.
+    Echo {
+        delay_ms: f32,
+        fade_db: f32,
+        level_db: f32,
+        #[serde(default)]
+        reversed: bool,
+    },
+    /// The sound of a room that dies away to -60 dB in `seconds`, added at `level_db`. `reversed`: the room
+    /// comes before the sound instead and swells into it.
+    Reverb {
+        seconds: f32,
+        level_db: f32,
+        #[serde(default)]
+        reversed: bool,
+    },
 }
 
 impl Effect {
@@ -47,12 +61,22 @@ impl Effect {
                 delay_ms: 300.0,
                 fade_db: 6.0,
                 level_db: -6.0,
+                reversed: false,
             },
             Effect::Reverb {
                 seconds: 1.5,
                 level_db: -12.0,
+                reversed: false,
             },
         ]
+    }
+
+    /// Whether the effect's tail comes before the range instead of after it.
+    pub fn reversed(&self) -> bool {
+        matches!(
+            self,
+            Effect::Echo { reversed: true, .. } | Effect::Reverb { reversed: true, .. }
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -74,6 +98,7 @@ impl Effect {
                 delay_ms,
                 fade_db,
                 level_db,
+                ..
             } => {
                 let repeats = ((60.0 + level_db) / fade_db.max(0.1)).ceil().max(0.0) as Frames + 1;
                 ms_frames(delay_ms, rate).saturating_mul(repeats)
@@ -88,15 +113,21 @@ impl Effect {
     /// delay and first volume and changes how many repeats are heard, so its tail is whole repeats long.
     pub fn with_tail(self, frames: Frames, rate: u32) -> Effect {
         match self {
-            Effect::Reverb { level_db, .. } => {
+            Effect::Reverb { level_db, reversed, .. } => {
                 let extra = ms_frames(COMB_MS[7] + SPREAD_MS, rate);
                 let seconds = (frames - extra) as f32 / rate.max(1) as f32;
                 Effect::Reverb {
                     seconds: (seconds * 100.0).round().clamp(10.0, 1000.0) / 100.0,
                     level_db,
+                    reversed,
                 }
             }
-            Effect::Echo { delay_ms, level_db, .. } => {
+            Effect::Echo {
+                delay_ms,
+                level_db,
+                reversed,
+                ..
+            } => {
                 let delay = ms_frames(delay_ms, rate);
                 let span = 60.0 + level_db;
                 // tail() counts ceil(span / fade) + 1 repeats; fade from 40 down to 3 dB.
@@ -109,6 +140,7 @@ impl Effect {
                     delay_ms,
                     fade_db,
                     level_db,
+                    reversed,
                 }
             }
             _ => self,
@@ -117,8 +149,11 @@ impl Effect {
 
     /// How much audio before a frame the effect needs to compute it. Rendering starts this much earlier, so a
     /// render from the middle sounds like one from the start. For a filter its memory of the past fades to
-    /// -80 dB in this time.
+    /// -80 dB in this time. A reversed effect is computed in advance and needs none.
     pub(crate) fn warmup(&self, rate: u32) -> Frames {
+        if self.reversed() {
+            return 0;
+        }
         if let Effect::Echo { .. } | Effect::Reverb { .. } = self {
             return self.tail(rate);
         }
@@ -193,6 +228,20 @@ pub struct EffectRange {
     /// How long the effect takes to come in after the start and to go before the end, so it does not click.
     pub fade_in: Frames,
     pub fade_out: Frames,
+    /// Measured with the gain for a reversed echo or reverb: its whole sound, which ends at the range end.
+    pub reversed: Option<Reversed>,
+}
+
+/// The sound of a reversed effect. It needs all of the range before its first frame, so it cannot be computed
+/// piece by piece while playing.
+#[derive(Clone, PartialEq)]
+pub struct Reversed(Arc<[Vec<f32>; 2]>);
+
+impl std::fmt::Debug for Reversed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [left, _] = &*self.0;
+        write!(f, "Reversed({} frames)", left.len())
+    }
 }
 
 /// The fade a new range starts with: short enough not to be heard as a fade, long enough not to click.
@@ -378,6 +427,12 @@ pub(crate) fn apply_lane(
     let end = start.saturating_add(out[0].len() as Frames);
     let dry = out.clone();
     for range in &lane.ranges {
+        if range.effect.reversed() {
+            if let Some(Reversed(sound)) = &range.reversed {
+                add_reversed(range.end, sound, loop_end, start, out);
+            }
+            continue;
+        }
         // A filter needs its warm-up before the range; echo and reverb sound until their tail ends.
         let before = if range.effect.filter().is_some() {
             range.effect.warmup(rate)
@@ -393,6 +448,29 @@ pub(crate) fn apply_lane(
         }
         let weights = range_weights(range, loop_end, start, dry[0].len());
         apply_range(range, rate, &dry, &weights, out, memory.of(range, rate));
+    }
+}
+
+/// Adds a reversed effect's sound, which ends at `end`, to `out`, which holds timeline frames from `start`.
+fn add_reversed(end: Frames, sound: &[Vec<f32>; 2], loop_end: Option<Frames>, start: Frames, out: &mut [Vec<f32>; 2]) {
+    let len = sound[0].len() as Frames;
+    let from = end - len;
+    if loop_end.is_none() && (from >= start.saturating_add(out[0].len() as Frames) || end <= start) {
+        return;
+    }
+    for (channel, sound) in out.iter_mut().zip(sound) {
+        for (i, sample) in channel.iter_mut().enumerate() {
+            let t = start.saturating_add(i as Frames) - from;
+            // With a loop it is heard in every loop; one longer than the loop overlaps itself.
+            let (mut k, step) = match loop_end {
+                Some(l) => (t.rem_euclid(l), l),
+                None => (t, len.max(1)),
+            };
+            while let Some(s) = usize::try_from(k).ok().and_then(|k| sound.get(k)) {
+                *sample += s;
+                k += step;
+            }
+        }
     }
 }
 
@@ -626,47 +704,78 @@ fn position_in(range: &EffectRange, t: Frames, loop_end: Option<Frames>) -> Opti
 /// Measures what the effects need from the audio under them, lane by lane from the top, so each lane
 /// measures what the lanes above it produce.
 pub(crate) fn measure(project: &mut Project) {
-    let rate = project.sample_rate;
     for ti in 0..project.tracks.len() {
         let lanes = project.tracks.get(ti).map_or(0, |t| t.effects.len());
         for li in 0..lanes {
-            let gains: Vec<(f32, bool)> = {
+            let gains: Vec<Measured> = {
                 let Some(track) = project.tracks.get(ti) else { continue };
                 let Some(lane) = track.effects.get(li) else { continue };
                 lane.ranges
                     .iter()
-                    .map(|r| measured_gain(&r.effect, rate, || render_track(project, track, r.start, span(r), li)))
+                    .map(|r| measure_range(r, project, || render_track(project, track, r.start, span(r), li)))
                     .collect()
             };
             if let Some(lane) = project.tracks.get_mut(ti).and_then(|t| t.effects.get_mut(li)) {
                 lane.ranges
                     .iter_mut()
                     .zip(gains)
-                    .for_each(|(r, g)| (r.gain, r.limited) = g);
+                    .for_each(|(r, g)| (r.gain, r.limited, r.reversed) = g);
             }
         }
     }
     for li in 0..project.mix_effects.len() {
-        let gains: Vec<(f32, bool)> = {
+        let gains: Vec<Measured> = {
             let Some(lane) = project.mix_effects.get(li) else {
                 continue;
             };
             lane.ranges
                 .iter()
-                .map(|r| measured_gain(&r.effect, rate, || mix_upto(project, r.start, span(r), li)))
+                .map(|r| measure_range(r, project, || mix_upto(project, r.start, span(r), li)))
                 .collect()
         };
         if let Some(lane) = project.mix_effects.get_mut(li) {
             lane.ranges
                 .iter_mut()
                 .zip(gains)
-                .for_each(|(r, g)| (r.gain, r.limited) = g);
+                .for_each(|(r, g)| (r.gain, r.limited, r.reversed) = g);
         }
     }
 }
 
 fn span(range: &EffectRange) -> usize {
     usize::try_from(range.end - range.start).unwrap_or(0)
+}
+
+type Measured = (f32, bool, Option<Reversed>);
+
+/// What a range needs from the sound under it, which `audio` renders: the gain and whether the peak limit held
+/// it back, or a reversed effect's sound.
+fn measure_range(range: &EffectRange, project: &Project, audio: impl FnOnce() -> [Vec<f32>; 2]) -> Measured {
+    if range.effect.reversed() {
+        let sound = reversed_sound(range, project, audio());
+        return (1.0, false, Some(sound));
+    }
+    let (gain, limited) = measured_gain(&range.effect, project.sample_rate, audio);
+    (gain, limited, None)
+}
+
+/// Reverses the sound under the range, runs the effect over it and reverses the result, so the tail comes
+/// first. It ends at the range end and starts one tail before the range start.
+fn reversed_sound(range: &EffectRange, project: &Project, mut audio: [Vec<f32>; 2]) -> Reversed {
+    let rate = project.sample_rate;
+    let len = audio[0].len();
+    let weights = range_weights(range, project.loop_end.filter(|l| *l > 0), range.start, len);
+    let total = len.saturating_add(usize::try_from(range.effect.tail(rate)).unwrap_or(0));
+    for channel in &mut audio {
+        channel.iter_mut().zip(&weights).for_each(|(s, w)| *s *= w);
+        channel.reverse();
+        channel.resize(total, 0.0);
+    }
+    let mut sound = [vec![0.0; total], vec![0.0; total]];
+    let state = &mut State::new(range.effect, rate);
+    apply_range(range, rate, &audio, &vec![1.0; total], &mut sound, state);
+    sound.iter_mut().for_each(|c| c.reverse());
+    Reversed(Arc::new(sound))
 }
 
 /// The gain for normalize and loudness, and whether the peak limit held it back. Silence is left alone.
@@ -1074,6 +1183,7 @@ mod tests {
             delay_ms: 100.0,
             fade_db: 6.0,
             level_db: -6.0,
+            reversed: false,
         };
         let s = click_session(echo);
         // The first echo at -6 dB, each next one 6 dB quieter, until 60 dB down: 10 repeats, 1 s.
@@ -1093,6 +1203,7 @@ mod tests {
         let s = click_session(Effect::Reverb {
             seconds: 0.5,
             level_db: 0.0,
+            reversed: false,
         });
         let [left, right] = render(s.project(), 0, 1200);
         let peak = |from: usize, to: usize| left[from..to].iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -1110,14 +1221,21 @@ mod tests {
             delay_ms: 70.0,
             fade_db: 4.0,
             level_db: -3.0,
+            reversed: false,
         });
         let track = s.project().tracks[0].id;
         for effect in [
             Effect::Reverb {
                 seconds: 0.3,
                 level_db: -6.0,
+                reversed: false,
             },
             Effect::LowPass { hz: 200.0, steep: true },
+            Effect::Reverb {
+                seconds: 0.2,
+                level_db: -6.0,
+                reversed: true,
+            },
         ] {
             s.execute(Command::AddEffectLane {
                 track: Some(track),
@@ -1165,6 +1283,7 @@ mod tests {
             delay_ms,
             fade_db: 6.0,
             level_db: -6.0,
+            reversed: false,
         };
         let mut s = click_session(echo(100.0));
         let lane = s.project().tracks[0].effects[0].id;
@@ -1217,13 +1336,15 @@ mod tests {
         let reverb = Effect::Reverb {
             seconds: 1.5,
             level_db: -12.0,
+            reversed: false,
         };
         let longer = reverb.with_tail(reverb.tail(48_000) + 24_000, 48_000);
         assert_eq!(
             longer,
             Effect::Reverb {
                 seconds: 2.0,
-                level_db: -12.0
+                level_db: -12.0,
+                reversed: false,
             }
         );
 
@@ -1231,6 +1352,7 @@ mod tests {
             delay_ms: 100.0,
             fade_db: 6.0,
             level_db: -6.0,
+            reversed: false,
         };
         assert_eq!(echo.tail(RATE), 1000);
         for (dragged, repeats) in [(640, 6), (400, 4), (10, 3), (90_000, 19)] {
@@ -1301,5 +1423,38 @@ mod tests {
             .iter()
             .fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - db_to_amp(-1.0)).abs() < 1e-3, "{peak}");
+    }
+
+    #[test]
+    fn a_reversed_echo_comes_before_the_sound_and_wraps_to_the_loop_end() {
+        // A click at 100 in a range from 0 to 200.
+        let mut s = click_session(Effect::Echo {
+            delay_ms: 30.0,
+            fade_db: 6.0,
+            level_db: -6.0,
+            reversed: true,
+        });
+        let [left, _] = render(s.project(), 0, 300);
+        let at = |i: usize, db: f32| (left[i] - db_to_amp(db)).abs() < 1e-4;
+        assert!(at(70, -6.0) && at(40, -12.0) && at(10, -18.0), "{:?}", &left[..101]);
+        assert!((left[100] - 1.0).abs() < 1e-6, "the click itself");
+        assert!(left[101..].iter().all(|v| v.abs() < 1e-6), "nothing after the click");
+
+        let lane = s.project().tracks[0].effects[0].id;
+        s.execute(Command::SetLaneEffect {
+            lane,
+            effect: Effect::Echo {
+                delay_ms: 60.0,
+                // Shorter than the loop, so the wrapped part does not overlap its start.
+                fade_db: 12.0,
+                level_db: -6.0,
+                reversed: true,
+            },
+        })
+        .unwrap();
+        s.execute(Command::SetLoopEnd { at: Some(600) }).unwrap();
+        let [left, _] = render(s.project(), 0, 600);
+        let at = |i: usize, db: f32| (left[i] - db_to_amp(db)).abs() < 1e-4;
+        assert!(at(40, -6.0) && at(580, -18.0) && at(520, -30.0));
     }
 }
