@@ -7,6 +7,7 @@ mod files;
 mod generate;
 mod lanes;
 mod levels;
+mod mixing;
 mod mouse;
 mod playback;
 mod recovery;
@@ -99,6 +100,7 @@ struct Editor {
     saved_heights: Vec<f32>,
     export_open: bool,
     level_row: levels::LevelRow,
+    mixer: mixing::Mixer,
     /// The settings panel of a generated clip, when open.
     generate: Option<generate::Panel>,
     /// What "Add generator" makes: the settings last set.
@@ -127,6 +129,7 @@ impl Default for Editor {
             export_open: false,
             generate: None,
             level_row: levels::LevelRow::default(),
+            mixer: mixing::Mixer::default(),
             last_generator: refrain_engine::Generator::Tone {
                 wave: refrain_engine::Wave::Sine,
                 hz: 440.0,
@@ -209,11 +212,9 @@ impl Editor {
                 .max_height(max_height)
                 .show(ui, |ui| self.timeline(ui));
             self.scrollbar(ui);
+            self.mix(ui.ctx());
             self.draw_level_row(ui, level_row);
         });
-        if let Err(e) = self.player.set_project(self.session.project()) {
-            self.fail(e);
-        }
         if self.player.is_playing() {
             ui.ctx().request_repaint();
         }

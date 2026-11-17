@@ -1835,7 +1835,7 @@ mod tests {
         for (name, s) in sessions {
             let p = s.project();
             let len = p.len() as usize;
-            let (new, old) = (mixdown(p), render(p, 0, len));
+            let (new, old) = (mixdown(p, || true).unwrap(), render(p, 0, len));
             for (new, old) in new.iter().zip(&old) {
                 assert_eq!(new.len(), old.len(), "{name}");
                 let off = new.iter().zip(old).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);

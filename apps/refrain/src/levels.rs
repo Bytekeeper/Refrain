@@ -1,11 +1,10 @@
 //! The mix level row under the ruler: the loudest point of the whole mix over time, red where it goes over
-//! 0 dB. It is measured in the background after each edit, so editing never waits for it.
+//! 0 dB. It shows the latest mixdown (`mixing.rs`).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
-use refrain_engine::{Levels, Project};
+use refrain_engine::Levels;
 
 use crate::{Editor, HEADER_W};
 
@@ -32,9 +31,6 @@ const OVER_H: f32 = 5.0;
 const SPREAD_DB: f32 = 6.0;
 
 pub(crate) struct LevelRow {
-    /// The levels, and the project they were measured from.
-    shown: Option<(Arc<Project>, Arc<Levels>)>,
-    measuring: Option<Measuring>,
     /// A view setting, saved with the project like the zoom.
     pub(crate) height: f32,
     resizing: bool,
@@ -43,8 +39,6 @@ pub(crate) struct LevelRow {
 impl Default for LevelRow {
     fn default() -> Self {
         LevelRow {
-            shown: None,
-            measuring: None,
             height: MIN_ROW_H,
             resizing: false,
         }
@@ -57,60 +51,7 @@ fn depth(peak: f32) -> f32 {
     (1.0 + below / SPREAD_DB).ln() / (1.0 + FLOOR_DB / SPREAD_DB).ln()
 }
 
-/// A measurement running in the background.
-struct Measuring {
-    project: Arc<Project>,
-    stop: Arc<AtomicBool>,
-    arrives: mpsc::Receiver<Option<Levels>>,
-}
-
 impl Editor {
-    /// Takes a finished measurement, and starts one when the project changed since the last.
-    fn measure_levels(&mut self, ctx: &egui::Context) {
-        let project = self.session.project().clone();
-        let row = &mut self.level_row;
-        if let Some(m) = &row.measuring {
-            match m.arrives.try_recv() {
-                Ok(Some(levels)) => {
-                    row.shown = Some((m.project.clone(), Arc::new(levels)));
-                    row.measuring = None;
-                }
-                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => row.measuring = None,
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-        }
-        let current = |p: &Arc<Project>| Arc::ptr_eq(p, &project);
-        if row.shown.as_ref().is_some_and(|(p, _)| current(p))
-            || row.measuring.as_ref().is_some_and(|m| current(&m.project))
-        {
-            return;
-        }
-        if let Some(m) = row.measuring.take() {
-            m.stop.store(true, Ordering::Relaxed);
-        }
-        if project.is_empty() {
-            row.shown = None;
-            return;
-        }
-        // Tests measure at once, so every frame they look at is complete and the same each run.
-        if cfg!(test) {
-            let levels = refrain_engine::levels(&project, || true);
-            row.shown = levels.map(|levels| (project, Arc::new(levels)));
-            return;
-        }
-        let stop = Arc::new(AtomicBool::new(false));
-        let (send, arrives) = mpsc::channel();
-        let (measured, stopped, ctx) = (project.clone(), stop.clone(), ctx.clone());
-        let started = std::thread::Builder::new().name("levels".into()).spawn(move || {
-            let levels = refrain_engine::levels(&measured, || !stopped.load(Ordering::Relaxed));
-            let _ = send.send(levels);
-            ctx.request_repaint();
-        });
-        if started.is_ok() {
-            row.measuring = Some(Measuring { project, stop, arrives });
-        }
-    }
-
     /// The row's place under the ruler. It is painted at the end of the frame, after the tracks took the mouse,
     /// so a drop shows in the row in the same frame.
     pub(crate) fn level_row_space(&self, ui: &mut Ui) -> (Rect, egui::Response) {
@@ -145,7 +86,6 @@ impl Editor {
     }
 
     pub(crate) fn draw_level_row(&mut self, ui: &Ui, (rect, response): (Rect, egui::Response)) {
-        self.measure_levels(ui.ctx());
         self.level_row_mouse(rect, &response);
         let lane_left = rect.left() + HEADER_W;
         let painter = ui.painter_at(rect);
@@ -174,9 +114,10 @@ impl Editor {
             top = band.bottom();
         }
 
-        if let Some((measured, levels)) = &self.level_row.shown {
-            // Shown dimmed while the levels of the latest edit are still being measured.
-            let fresh = Arc::ptr_eq(measured, self.session.project());
+        if let Some(mixed) = &self.mixer.latest {
+            let levels = &mixed.levels;
+            // Shown dimmed while the mixdown of the latest edit is still being made.
+            let fresh = Arc::ptr_eq(&mixed.project, self.session.project());
             let dim = |c: Color32| if fresh { c } else { c.gamma_multiply(0.4) };
             let end = (levels.peaks.len() * Levels::BLOCK) as i64;
             let mut x = area.left();

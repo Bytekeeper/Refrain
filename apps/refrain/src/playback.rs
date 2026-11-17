@@ -1,14 +1,15 @@
-//! Audio output: plays the project through the default device, piece by piece on the audio thread.
+//! Audio output: plays the latest mixdown through the default device. The audio thread only copies from it.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use refrain_engine::{Frames, Project, Renderer};
+use refrain_engine::{Frames, Project};
 
-/// What the audio thread reads. The window swaps in each new project snapshot, so edits are heard at once.
+/// What the audio thread reads. The window swaps in each new mixdown as soon as it is made.
 #[derive(Default)]
 struct Shared {
-    project: Arc<Project>,
+    sound: Arc<[Vec<f32>; 2]>,
+    loop_end: Option<Frames>,
     pos: Frames,
     playing: bool,
 }
@@ -37,15 +38,19 @@ impl Player {
         lock(&self.shared).playing = false;
     }
 
-    /// Swaps in the latest project. A stream opened at another rate would play it at the wrong speed and
-    /// pitch, so after a sample rate change the stream is opened again at the new rate.
-    pub fn set_project(&mut self, project: &Arc<Project>) -> Result<(), String> {
+    /// Swaps in the latest mixdown, made from `project`. A stream opened at another rate would play it at the
+    /// wrong speed and pitch, so after a sample rate change the stream is opened again at the new rate.
+    pub fn set_mix(&mut self, project: &Project, sound: Arc<[Vec<f32>; 2]>) -> Result<(), String> {
         let rate = project.sample_rate;
         let stale = self.stream.as_ref().is_some_and(|(_, r)| *r != rate);
         if stale {
             self.stream = None;
         }
-        lock(&self.shared).project = project.clone();
+        {
+            let mut shared = lock(&self.shared);
+            shared.sound = sound;
+            shared.loop_end = project.loop_end.filter(|l| *l > 0);
+        }
         if stale && self.is_playing() {
             match open(rate, self.shared.clone()) {
                 Ok(stream) => self.stream = Some((stream, rate)),
@@ -68,7 +73,6 @@ impl Player {
             self.stream = Some((open(rate, self.shared.clone())?, rate));
         }
         let mut shared = lock(&self.shared);
-        shared.project = project.clone();
         if shared.pos >= project.len() {
             shared.pos = 0;
         }
@@ -97,11 +101,10 @@ fn open(rate: u32, shared: Arc<Mutex<Shared>>) -> Result<cpal::Stream, String> {
         .next()
         .ok_or_else(|| format!("The audio device cannot play {rate} Hz; resampling is not supported yet."))?;
     let channels = usize::from(config.channels());
-    let mut renderer = Renderer::default();
     let stream = device
         .build_output_stream(
             config.config(),
-            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| fill(out, channels, &shared, &mut renderer),
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| fill(out, channels, &shared),
             |e| eprintln!("audio output error: {e}"),
             None,
         )
@@ -112,20 +115,21 @@ fn open(rate: u32, shared: Arc<Mutex<Shared>>) -> Result<cpal::Stream, String> {
     Ok(stream)
 }
 
-/// Runs on the audio thread. Renders without holding the lock so the window never waits on it.
-fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>, renderer: &mut Renderer) {
+/// Runs on the audio thread. Copies without holding the lock so the window never waits on it.
+fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
     out.fill(0.0);
-    let (project, pos) = {
+    let (sound, loop_end, pos) = {
         let s = lock(shared);
         if !s.playing || channels == 0 {
             return;
         }
-        (s.project.clone(), s.pos)
+        (s.sound.clone(), s.loop_end, s.pos)
     };
-    let frames = out.len() / channels;
-    let [left, right] = renderer.render(&project, pos, frames);
-    for ((frame, l), r) in out.chunks_mut(channels).zip(&left).zip(&right) {
-        let (l, r) = (l.clamp(-1.0, 1.0), r.clamp(-1.0, 1.0));
+    let [left, right] = &*sound;
+    for (frame, t) in out.chunks_mut(channels).zip(pos..) {
+        let at = loop_end.map_or(t, |l| t.rem_euclid(l));
+        let get = |c: &Vec<f32>| usize::try_from(at).ok().and_then(|i| c.get(i)).copied().unwrap_or(0.0);
+        let (l, r) = (get(left).clamp(-1.0, 1.0), get(right).clamp(-1.0, 1.0));
         match frame {
             [mono] => *mono = (l + r) * 0.5,
             [a, b, ..] => {
@@ -135,14 +139,41 @@ fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>, renderer: &mut
             [] => {}
         }
     }
+    let frames = Frames::try_from(out.len() / channels).unwrap_or(0);
     let mut s = lock(shared);
-    // A seek from the window during rendering wins over advancing.
+    // A seek from the window during copying wins over advancing.
     if s.pos == pos {
-        s.pos = pos.saturating_add(Frames::try_from(frames).unwrap_or(0));
-        match project.loop_end {
-            Some(l) if l > 0 => s.pos = s.pos.rem_euclid(l),
-            _ if s.pos >= project.len() => s.playing = false,
-            _ => {}
+        s.pos = pos.saturating_add(frames);
+        match loop_end {
+            Some(l) => s.pos = s.pos.rem_euclid(l),
+            None if s.pos >= left.len() as Frames => s.playing = false,
+            None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plays_round_the_loop_and_stops_at_the_end_without_one() {
+        let sound: Arc<[Vec<f32>; 2]> = Arc::new([vec![0.1, 0.2, 0.3, 0.4], vec![0.5, 0.6, 0.7, 0.8]]);
+        let shared = Mutex::new(Shared {
+            sound,
+            loop_end: Some(4),
+            pos: 3,
+            playing: true,
+        });
+        let mut out = [0.0; 6];
+        fill(&mut out, 2, &shared);
+        assert_eq!(out, [0.4, 0.8, 0.1, 0.5, 0.2, 0.6]);
+        assert_eq!(lock(&shared).pos, 2);
+
+        lock(&shared).loop_end = None;
+        lock(&shared).pos = 3;
+        fill(&mut out, 2, &shared);
+        assert_eq!(out, [0.4, 0.8, 0.0, 0.0, 0.0, 0.0]);
+        assert!(!lock(&shared).playing);
     }
 }

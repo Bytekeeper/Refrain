@@ -7,7 +7,7 @@ use rubato::audioadapter::Adapter;
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
 
-use crate::{Error, Frames, Project, Result, Source, render};
+use crate::{Error, Frames, Project, Result, Source, mixdown};
 
 /// About 50 minutes of 48 kHz stereo in memory. Streaming from disk is a later step.
 const MAX_SAMPLES: u64 = 300_000_000;
@@ -187,8 +187,7 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
     }
     let format = settings.format;
     let rate = format.rate_for(settings.sample_rate.unwrap_or(project.sample_rate));
-    let frames = usize::try_from(project.len()).map_err(|_| Error::Invalid("the project is too long".into()))?;
-    let [left, right] = render(project, 0, frames);
+    let [left, right] = mixdown(project, || true).ok_or_else(|| Error::Invalid("the mix was stopped".into()))?;
     let mut channels = if settings.mono {
         vec![left.iter().zip(&right).map(|(l, r)| (l + r) * 0.5).collect()]
     } else {

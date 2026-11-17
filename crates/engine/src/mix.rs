@@ -82,8 +82,9 @@ pub fn render(project: &Project, start: Frames, frames: usize) -> [Vec<f32>; 2] 
 }
 
 /// The whole project as heard (with the loop on: one loop): each track's clips, then its effect lanes from the
-/// top, at its volume; then the mix lanes. Every effect hears all of its input, before and after.
-pub fn mixdown(project: &Project) -> [Vec<f32>; 2] {
+/// top, at its volume; then the mix lanes. Every effect hears all of its input, before and after. Stops and
+/// returns `None` once `keep_going` says no.
+pub fn mixdown(project: &Project, keep_going: impl Fn() -> bool) -> Option<[Vec<f32>; 2]> {
     let len = usize::try_from(project.len()).unwrap_or(0);
     let mut mix = [vec![0.0; len], vec![0.0; len]];
     let mut sound = [vec![0.0; len], vec![0.0; len]];
@@ -91,6 +92,9 @@ pub fn mixdown(project: &Project) -> [Vec<f32>; 2] {
         sound.iter_mut().for_each(|c| c.fill(0.0));
         clips_into(project, track, &mut sound, 0, 0, len);
         for lane in &track.effects {
+            if !keep_going() {
+                return None;
+            }
             lane_into(lane, project, &mut sound);
         }
         let amp = db_to_amp(track.gain_db);
@@ -99,9 +103,12 @@ pub fn mixdown(project: &Project) -> [Vec<f32>; 2] {
         }
     }
     for lane in &project.mix_effects {
+        if !keep_going() {
+            return None;
+        }
         lane_into(lane, project, &mut mix);
     }
-    mix
+    Some(mix)
 }
 
 /// Renders the mix piece after piece for playback. The effects keep their memory of the sound between pieces,
@@ -146,6 +153,14 @@ pub struct Levels {
 
 impl Levels {
     pub const BLOCK: usize = 256;
+
+    pub fn of([left, right]: &[Vec<f32>; 2]) -> Levels {
+        let blocks = left.chunks(Self::BLOCK).zip(right.chunks(Self::BLOCK));
+        let peaks = blocks
+            .map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, s| m.max(s.abs())))
+            .collect();
+        Levels { peaks }
+    }
 
     /// The loudest sample in timeline frames `from..to`.
     pub fn peak(&self, from: Frames, to: Frames) -> f32 {
