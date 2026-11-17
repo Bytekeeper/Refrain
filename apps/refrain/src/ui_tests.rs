@@ -22,6 +22,7 @@ fn tone(freq: f32, secs: f32) -> Arc<Source> {
         name: format!("{freq} Hz"),
         sample_rate: RATE,
         channels: vec![wave],
+        generated: None,
     })
 }
 
@@ -188,6 +189,7 @@ fn stereo_clip_shows_both_channels() {
         name: "left only".into(),
         sample_rate: RATE,
         channels: vec![left, right],
+        generated: None,
     });
     e.run(Command::AddClip {
         track,
@@ -564,6 +566,7 @@ fn channels_of_a_clip_and_of_a_whole_track() {
             name: format!("{f} Hz"),
             sample_rate: RATE,
             channels: vec![ch(1.0), ch(3.0)],
+            generated: None,
         })
     };
     let mut e = Editor::default();

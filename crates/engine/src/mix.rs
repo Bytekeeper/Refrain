@@ -356,6 +356,7 @@ mod tests {
             name: "c".into(),
             sample_rate: 1000,
             channels: vec![vec![value; frames]],
+            generated: None,
         })
     }
 
@@ -455,6 +456,7 @@ mod tests {
                 name: "s".into(),
                 sample_rate: 1000,
                 channels: vec![wave.collect()],
+                generated: None,
             })
         };
         let a = clip(1, sine(50.0, 1.0), 0, FadeShape::Linear);
@@ -489,6 +491,7 @@ mod tests {
             name: "lr".into(),
             sample_rate: 1000,
             channels: vec![vec![1.0; 10], vec![0.5; 10]],
+            generated: None,
         });
         for (mode, expected) in [
             (ChannelMode::Stereo, (1.0, 0.5)),

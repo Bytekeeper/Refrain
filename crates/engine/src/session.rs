@@ -6,8 +6,8 @@ use crate::effects::{default_fade, measure, tidy_lane};
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::{
-    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, LaneId,
-    MAX_DB, MIN_DB, Project, RangeId, Result, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, Generator,
+    LaneId, MAX_DB, MIN_DB, Project, RangeId, Result, Source, Track, TrackId,
 };
 
 const MAX_UNDO: usize = 500;
@@ -37,6 +37,18 @@ pub enum Command {
         track: TrackId,
         source: Arc<Source>,
         start: Frames,
+    },
+    /// A clip of sound the editor makes, `len` frames long.
+    AddGeneratedClip {
+        track: TrackId,
+        generator: Generator,
+        start: Frames,
+        len: Frames,
+    },
+    /// New settings for a generated clip; its sound is made again.
+    SetGenerator {
+        clip: ClipId,
+        generator: Generator,
     },
     /// Moves a clip to `start` on `track` (which may be another track). Overlapping a neighbour
     /// makes a crossfade.
@@ -268,7 +280,28 @@ fn settle(p: &mut Project) -> Result<()> {
     for lane in &mut p.mix_effects {
         tidy_lane(lane, p.loop_end)?;
     }
+    refit(p)?;
     measure(p);
+    Ok(())
+}
+
+/// Makes generated sound again where it was fitted to another loop length or made at another rate, so it
+/// keeps repeating without a click. Clips that shared a source share the new one.
+fn refit(p: &mut Project) -> Result<()> {
+    let (rate, loop_end) = (p.sample_rate, p.loop_end.filter(|l| *l > 0));
+    let mut made: Vec<(Arc<Source>, Arc<Source>)> = vec![];
+    for clip in p.tracks.iter_mut().flat_map(|t| &mut t.clips) {
+        let Some(g) = &clip.source.generated else { continue };
+        if g.fitted == loop_end && clip.source.sample_rate == rate {
+            continue;
+        }
+        if let Some((_, new)) = made.iter().find(|(old, _)| Arc::ptr_eq(old, &clip.source)) {
+            clip.source = new.clone();
+            continue;
+        }
+        let new = Arc::new(g.generator.make(rate, loop_end, g.first, clip.source.frames())?);
+        made.push((std::mem::replace(&mut clip.source, new.clone()), new));
+    }
     Ok(())
 }
 
@@ -370,6 +403,41 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 channels: ChannelMode::Stereo,
             };
             track_mut(p, track)?.clips.push(clip);
+        }
+        Command::AddGeneratedClip {
+            track,
+            generator,
+            start,
+            len,
+        } => {
+            // A project without a rate yet takes the usual one for game audio.
+            if p.sample_rate == 0 {
+                p.sample_rate = 48_000;
+            }
+            let source = Arc::new(generator.make(p.sample_rate, p.loop_end, 0, len)?);
+            let id = ClipId(p.new_id());
+            let clip = Clip {
+                id,
+                source,
+                start: check_placement(start, len)?,
+                offset: 0,
+                len,
+                fade_in: Fade::default(),
+                fade_out: Fade::default(),
+                crossfade_shape: FadeShape::EqualPower,
+                gain: vec![],
+                channels: ChannelMode::Stereo,
+            };
+            track_mut(p, track)?.clips.push(clip);
+        }
+        Command::SetGenerator { clip, generator } => {
+            let loop_end = p.loop_end;
+            let c = clip_mut(p, clip)?;
+            let Some(g) = &c.source.generated else {
+                return Err(Error::Invalid("this clip plays a file, not generated sound".into()));
+            };
+            let source = generator.make(c.source.sample_rate, loop_end, g.first, c.source.frames())?;
+            c.source = Arc::new(source);
         }
         Command::MoveClip { clip, track, start } => {
             track_mut(p, track)?;
@@ -642,18 +710,26 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
         let source = match converted.get(&key) {
             Some((_, new)) => new.clone(),
             None => {
-                let moved = relocated.iter().find(|(s, _)| Arc::ptr_eq(s, &clip.source));
-                let file = moved.map(|(_, f)| f.as_path()).or(clip.source.path.as_deref());
-                let original = match file {
-                    Some(path) => Arc::new(
-                        load_source(path)
-                            .map_err(|e| Error::Invalid(format!("cannot read {} again: {e}", path.display())))?,
-                    ),
-                    None => clip.source.clone(),
-                };
-                let new = Arc::new(resample(&original, rate)?);
-                converted.insert(key, (clip.source.clone(), new.clone()));
-                new
+                // Generated sound is made again at the new rate; `refit` then fits it to the new loop length.
+                if let Some(g) = &clip.source.generated {
+                    let frames = scale(clip.source.frames()).max(1);
+                    let new = Arc::new(g.generator.make(rate, g.fitted, scale(g.first), frames)?);
+                    converted.insert(key, (clip.source.clone(), new.clone()));
+                    new
+                } else {
+                    let moved = relocated.iter().find(|(s, _)| Arc::ptr_eq(s, &clip.source));
+                    let file = moved.map(|(_, f)| f.as_path()).or(clip.source.path.as_deref());
+                    let original = match file {
+                        Some(path) => Arc::new(
+                            load_source(path)
+                                .map_err(|e| Error::Invalid(format!("cannot read {} again: {e}", path.display())))?,
+                        ),
+                        None => clip.source.clone(),
+                    };
+                    let new = Arc::new(resample(&original, rate)?);
+                    converted.insert(key, (clip.source.clone(), new.clone()));
+                    new
+                }
             }
         };
         let frames = source.frames();
@@ -866,6 +942,7 @@ mod tests {
             name: "ramp".into(),
             sample_rate: 1000,
             channels: vec![samples],
+            generated: None,
         })
     }
 
@@ -905,6 +982,7 @@ mod tests {
             name: "steady".into(),
             sample_rate: 1000,
             channels: vec![vec![1.0; 1500]],
+            generated: None,
         });
         let mut s = Session::default();
         s.execute(Command::AddTrack { name: "t".into() }).unwrap();
@@ -956,6 +1034,7 @@ mod tests {
                     .map(|i| (i as f32 * std::f32::consts::TAU / 20.0).sin())
                     .collect(),
             ],
+            generated: None,
         });
         let in_step = |p: &Project| {
             let clips = &p.tracks[0].clips;
@@ -1039,6 +1118,7 @@ mod tests {
             name: "faster".into(),
             sample_rate: 2000,
             channels: vec![vec![0.1; 1500]],
+            generated: None,
         });
         s.execute(Command::AddClip {
             track,
@@ -1058,6 +1138,7 @@ mod tests {
                 name: format!("{rate}"),
                 sample_rate: rate,
                 channels: vec![vec![0.25; frames]],
+                generated: None,
             })
         };
         let mut s = Session::default();

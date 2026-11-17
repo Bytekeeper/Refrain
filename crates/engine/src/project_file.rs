@@ -11,14 +11,27 @@ use crate::effects::default_fade;
 use crate::io::write_atomic;
 use crate::session::check_db;
 use crate::{
-    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, LaneId,
-    Project, RangeId, Result, Session, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, Fade, FadeShape, Frames, GainPoint, Generator,
+    LaneId, Project, RangeId, Result, Session, Source, Track, TrackId,
 };
 
 pub const PROJECT_EXTENSION: &str = "refrain";
 const VERSION: u32 = 1;
 /// A project file holds only edits; a file this large is not one.
 const MAX_FILE_BYTES: u64 = 64 << 20;
+
+/// An audio file, or the settings of generated sound and which part of it the clips use.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SourceFile {
+    /// Relative to the project file's folder when the audio is inside it, so the folder can move.
+    File(PathBuf),
+    Generated {
+        generator: Generator,
+        first: Frames,
+        frames: Frames,
+    },
+}
 
 #[derive(Deserialize)]
 struct Header {
@@ -29,8 +42,7 @@ struct Header {
 struct ProjectFile {
     version: u32,
     sample_rate: u32,
-    /// Relative to the project file's folder when the audio is inside it, so the folder can move.
-    sources: Vec<PathBuf>,
+    sources: Vec<SourceFile>,
     tracks: Vec<TrackFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loop_end: Option<Frames>,
@@ -146,11 +158,21 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
             let source = match index.get(&key) {
                 Some(&i) => i,
                 None => {
-                    let file = project.file_of(&clip.source).ok_or_else(|| {
-                        Error::ProjectFile(format!("\"{}\" was not read from a file", clip.source.name))
-                    })?;
-                    let file = std::path::absolute(file)?;
-                    sources.push(file.strip_prefix(dir).map(Path::to_path_buf).unwrap_or(file));
+                    let stored = match &clip.source.generated {
+                        Some(g) => SourceFile::Generated {
+                            generator: g.generator,
+                            first: g.first,
+                            frames: clip.source.frames(),
+                        },
+                        None => {
+                            let file = project.file_of(&clip.source).ok_or_else(|| {
+                                Error::ProjectFile(format!("\"{}\" was not read from a file", clip.source.name))
+                            })?;
+                            let file = std::path::absolute(file)?;
+                            SourceFile::File(file.strip_prefix(dir).map(Path::to_path_buf).unwrap_or(file))
+                        }
+                    };
+                    sources.push(stored);
                     index.insert(key, sources.len() - 1);
                     sources.len() - 1
                 }
@@ -207,6 +229,19 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut sources = vec![];
     for stored in &file.sources {
+        let stored = match stored {
+            SourceFile::File(path) => path,
+            &SourceFile::Generated {
+                generator,
+                first,
+                frames,
+            } => {
+                let made = generator.make(file.sample_rate, file.loop_end, first, frames);
+                let made = made.map_err(|e| Error::ProjectFile(format!("generated sound: {e}")))?;
+                sources.push(Arc::new(made));
+                continue;
+            }
+        };
         let full = dir.join(stored);
         let source = crate::load_source(&full)
             .map_err(|e| Error::ProjectFile(format!("cannot read {}: {e}", full.display())))?;

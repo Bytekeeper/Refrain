@@ -20,6 +20,8 @@ pub struct Source {
     pub name: String,
     pub sample_rate: u32,
     pub channels: Vec<Vec<f32>>,
+    /// For sound the editor made: how, so it can be made again for another length, loop or rate.
+    pub generated: Option<crate::Generated>,
 }
 
 impl Source {
@@ -127,9 +129,17 @@ impl Clip {
         if end <= 0 {
             return Err(crate::Error::Invalid("a clip must end after 0".into()));
         }
-        if offset < 0 || offset.saturating_add(len) > self.source.frames() {
+        // Generated sound has no end: the source is made again for exactly the new span.
+        let offset = if let Some(g) = &self.source.generated {
+            let first = g.first.saturating_add(offset);
+            let source = g.generator.make(self.source.sample_rate, g.fitted, first, len)?;
+            self.source = std::sync::Arc::new(source);
+            0
+        } else if offset < 0 || offset.saturating_add(len) > self.source.frames() {
             return Err(crate::Error::Invalid("the trim goes past the end of the audio".into()));
-        }
+        } else {
+            offset
+        };
         let shift = start - self.start;
         for point in &mut self.gain {
             point.at = point.at.saturating_sub(shift);

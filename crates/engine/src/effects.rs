@@ -844,6 +844,7 @@ mod tests {
             name: "level".into(),
             sample_rate: RATE,
             channels: vec![vec![value; frames]],
+            generated: None,
         })
     }
 
@@ -1010,6 +1011,7 @@ mod tests {
             name: "tone".into(),
             sample_rate: rate,
             channels: vec![samples],
+            generated: None,
         });
         let mut s = Session::default();
         s.execute(Command::AddTrack { name: "t".into() }).unwrap();
@@ -1116,6 +1118,7 @@ mod tests {
             name: "click".into(),
             sample_rate: RATE,
             channels: vec![samples],
+            generated: None,
         });
         s.execute(Command::AddClip {
             track,

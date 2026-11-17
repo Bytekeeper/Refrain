@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use refrain_engine::{
-    ChannelMode, Command, Effect, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Session, Source, export,
-    load_source, open_project, render, save_project,
+    ChannelMode, Command, Effect, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Generator, NoiseColor,
+    Session, Source, export, load_source, open_project, render, save_project,
 };
 
 const RATE: u32 = 8000;
@@ -32,6 +32,7 @@ fn write_wav(path: &Path, freq: f32, secs: f32) {
         name: "tmp".into(),
         sample_rate: RATE,
         channels: vec![tone(freq), tone(freq * 1.5)],
+        generated: None,
     });
     let mut s = Session::default();
     s.execute(Command::AddTrack { name: "t".into() }).unwrap();
@@ -71,6 +72,26 @@ fn edited_project(dir: &Path) -> Session {
         track: t2,
         source: a,
         start: 4000,
+    })
+    .unwrap();
+    // Generated noise, its start dragged out so it begins before the sound it was first made with.
+    s.execute(Command::AddGeneratedClip {
+        track: t2,
+        generator: Generator::Noise {
+            color: NoiseColor::Pink,
+            level_db: -18.0,
+            wide: true,
+            variation: 7,
+        },
+        start: 24_000,
+        len: 8000,
+    })
+    .unwrap();
+    let noise = s.project().tracks[1].clips[1].id;
+    s.execute(Command::TrimClip {
+        clip: noise,
+        start: 22_000,
+        end: 32_000,
     })
     .unwrap();
     let clips: Vec<_> = s.project().tracks[0].clips.iter().map(|c| c.id).collect();
@@ -209,6 +230,7 @@ fn mono_export_mixes_both_sides_into_one_channel() {
         name: "lr".into(),
         sample_rate: RATE,
         channels: vec![vec![0.5; 800], vec![0.25; 800]],
+        generated: None,
     });
     let mut s = Session::default();
     s.execute(Command::AddTrack { name: "t".into() }).unwrap();
@@ -267,6 +289,7 @@ fn audio_made_in_memory_cannot_be_saved() {
         name: "beep".into(),
         sample_rate: RATE,
         channels: vec![vec![0.1; 100]],
+        generated: None,
     });
     let mut s = Session::default();
     s.execute(Command::AddTrack { name: "t".into() }).unwrap();
@@ -345,6 +368,7 @@ fn every_export_format_reads_back() {
         name: "tone".into(),
         sample_rate: rate,
         channels: vec![tone.clone(), tone],
+        generated: None,
     });
     let mut s = Session::default();
     s.execute(Command::AddTrack { name: "t".into() }).unwrap();

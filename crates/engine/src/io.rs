@@ -26,6 +26,7 @@ pub fn load_source(path: &Path) -> Result<Source> {
         name,
         sample_rate: info.sample_rate,
         channels: buffer.channels,
+        generated: None,
     })
 }
 
@@ -71,6 +72,7 @@ pub fn resample(source: &Source, rate: u32) -> Result<Source> {
         name: source.name.clone(),
         sample_rate: rate,
         channels: converted,
+        generated: None,
     })
 }
 
@@ -177,6 +179,7 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
             name: "mix".into(),
             sample_rate: project.sample_rate,
             channels,
+            generated: None,
         };
         channels = resample(&mix, rate)?.channels;
     }
@@ -238,6 +241,7 @@ mod tests {
             name: "tone".into(),
             sample_rate: 48_000,
             channels: vec![tone(48_000, 48_000)],
+            generated: None,
         };
         let converted = resample(&source, 44_100).unwrap();
         assert_eq!(converted.sample_rate, 44_100);
