@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use audioeditor_engine::{Command, Session, Source};
+use refrain_engine::{Command, Session, Source};
 use egui::{Event, Modifiers, MouseWheelSource, MouseWheelUnit, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -304,11 +304,11 @@ fn save_and_open_track_unsaved_changes() {
     std::fs::create_dir_all(&dir).unwrap();
     // Saved projects refer to audio files, so the test audio has to exist on disk.
     let wav = dir.join("tone.wav");
-    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
+    refrain_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
     let mut e = Editor::default();
     e.run(Command::AddTrack { name: "Tone".into() });
     let track = e.session.project().tracks[0].id;
-    let source = Arc::new(audioeditor_engine::load_source(&wav).unwrap());
+    let source = Arc::new(refrain_engine::load_source(&wav).unwrap());
     e.run(Command::AddClip {
         track,
         source,
@@ -317,12 +317,12 @@ fn save_and_open_track_unsaved_changes() {
     let mut h = harness(e);
     assert!(h.state().title.starts_with("• Untitled"), "{}", h.state().title);
 
-    let project = dir.join("song.audioedit");
+    let project = dir.join("song.refrain");
     h.state_mut().track_heights.insert(track, 250.0);
     h.state_mut().frames_per_px = 77.0;
     assert!(h.state_mut().save_to(&project));
     h.run();
-    assert_eq!(h.state().title, "song – Audio editor");
+    assert_eq!(h.state().title, "song – Refrain");
 
     let clip = h.state().session.project().tracks[0].clips[0].id;
     h.state_mut().run(Command::MoveClip {
@@ -335,7 +335,7 @@ fn save_and_open_track_unsaved_changes() {
     // Undo back to the saved state counts as saved again.
     h.state_mut().undo();
     h.run();
-    assert_eq!(h.state().title, "song – Audio editor");
+    assert_eq!(h.state().title, "song – Refrain");
     h.state_mut().track_heights.insert(track, 300.0);
     h.run();
     assert!(
@@ -347,7 +347,7 @@ fn save_and_open_track_unsaved_changes() {
     let mut other = harness(Editor::default());
     other.state_mut().open_from(&project);
     other.run();
-    assert_eq!(other.state().title, "song – Audio editor");
+    assert_eq!(other.state().title, "song – Refrain");
     assert_eq!(other.state().session.project().tracks[0].name, "Tone");
     let opened = other.state().session.project().tracks[0].id;
     assert_eq!(other.state().track_heights.get(&opened), Some(&250.0));
@@ -369,7 +369,7 @@ fn trimmed_edges_can_be_dragged_back_out() {
     });
     e.frames_per_px = 50.0;
     let mut h = harness(e);
-    let clip = || -> fn(&Editor) -> audioeditor_engine::Clip { |e| e.session.project().tracks[0].clips[0].clone() };
+    let clip = || -> fn(&Editor) -> refrain_engine::Clip { |e| e.session.project().tracks[0].clips[0].clone() };
 
     drag(&mut h, egui::pos2(764.0, 120.0), egui::pos2(616.0, 120.0));
     drag(&mut h, egui::pos2(288.0, 120.0), egui::pos2(366.0, 120.0));
@@ -408,13 +408,13 @@ fn volume_points_in_an_overlap_stay_visible() {
     let a = e.session.project().tracks[0].clips[0].id;
     let b = e.session.project().tracks[0].clips[1].id;
     let points = vec![
-        audioeditor_engine::GainPoint { at: 8000, db: 0.0 },
-        audioeditor_engine::GainPoint { at: 22000, db: -6.0 },
+        refrain_engine::GainPoint { at: 8000, db: 0.0 },
+        refrain_engine::GainPoint { at: 22000, db: -6.0 },
     ];
     e.run(Command::SetGainCurve { clip: a, points });
     e.run(Command::SetGainCurve {
         clip: b,
-        points: vec![audioeditor_engine::GainPoint { at: 12000, db: -12.0 }],
+        points: vec![refrain_engine::GainPoint { at: 12000, db: -12.0 }],
     });
     e.selected = Some(b);
     let mut h = harness(e);
@@ -434,7 +434,7 @@ fn deep_zoom_on_a_long_clip_does_not_crash() {
         start: 0,
     });
     let clip = e.session.project().tracks[0].clips[0].id;
-    let points = vec![audioeditor_engine::GainPoint { at: 0, db: 0.0 }];
+    let points = vec![refrain_engine::GainPoint { at: 0, db: 0.0 }];
     e.run(Command::SetGainCurve { clip, points });
     e.selected = Some(clip);
     e.frames_per_px = 1.0;
@@ -484,7 +484,7 @@ fn right_click_on_a_crossfade_sets_its_curve() {
     h.get_by_label("Linear").click();
     h.run();
     let shape = h.state().session.project().clip(b).map(|(_, c)| c.crossfade_shape);
-    assert_eq!(shape, Some(audioeditor_engine::FadeShape::Linear));
+    assert_eq!(shape, Some(refrain_engine::FadeShape::Linear));
     save(&mut h, "crossfade_linear");
 }
 
@@ -581,14 +581,14 @@ fn channels_of_a_clip_and_of_a_whole_track() {
     });
     e.frames_per_px = 50.0;
     let mut h = harness(e);
-    let modes = |h: &Harness<'_, Editor>| -> Vec<audioeditor_engine::ChannelMode> {
+    let modes = |h: &Harness<'_, Editor>| -> Vec<refrain_engine::ChannelMode> {
         h.state().session.project().tracks[0]
             .clips
             .iter()
             .map(|c| c.channels)
             .collect()
     };
-    use audioeditor_engine::ChannelMode::{Left, Mono, Stereo};
+    use refrain_engine::ChannelMode::{Left, Mono, Stereo};
 
     right_click(&mut h, 200.0, 110.0);
     h.get_by_label("Left only").click();
@@ -703,8 +703,8 @@ fn unsaved_work_is_recovered() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let wav = dir.join("tone.wav");
-    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
-    let project = dir.join("song.audioedit");
+    refrain_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
+    let project = dir.join("song.refrain");
     let copies = dir.join("copies");
 
     let mut e = Editor {
@@ -713,7 +713,7 @@ fn unsaved_work_is_recovered() {
     };
     e.run(Command::AddTrack { name: "Tone".into() });
     let track = e.session.project().tracks[0].id;
-    let source = Arc::new(audioeditor_engine::load_source(&wav).unwrap());
+    let source = Arc::new(refrain_engine::load_source(&wav).unwrap());
     e.run(Command::AddClip {
         track,
         source,
@@ -727,7 +727,7 @@ fn unsaved_work_is_recovered() {
         start: 4000,
     });
     let _crashed = harness(e);
-    let copy = copies.join("recovery-crashed.audioedit");
+    let copy = copies.join("recovery-crashed.refrain");
     assert!(copy.exists());
 
     let mut e = Editor {
@@ -745,7 +745,7 @@ fn unsaved_work_is_recovered() {
     assert_eq!(e.session.project().tracks[0].clips[0].start, 4000);
     let mut h = harness(e);
     assert!(h.state().title.starts_with("• song"), "{}", h.state().title);
-    let next = copies.join("recovery-next.audioedit");
+    let next = copies.join("recovery-next.refrain");
     assert!(next.exists(), "the restored work is still only in a copy");
 
     assert!(h.state_mut().save());
@@ -761,7 +761,7 @@ fn export_panel_and_overwriting_a_source() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let wav = dir.join("engine.wav");
-    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
+    refrain_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
     let mut e = Editor {
         recovery: Some(super::Recovery::named(dir.join("editor"), "test")),
         ..Editor::default()
@@ -772,19 +772,19 @@ fn export_panel_and_overwriting_a_source() {
     e.export_open = true;
     let mut h = harness_sized(e, 450.0);
     save(&mut h, "export_panel");
-    h.state_mut().export_target.settings.format = audioeditor_engine::ExportFormat::Mp3;
+    h.state_mut().export_target.settings.format = refrain_engine::ExportFormat::Mp3;
     h.run();
     save(&mut h, "export_panel_mp3_loop");
-    h.state_mut().export_target.settings.format = audioeditor_engine::ExportFormat::Wav;
+    h.state_mut().export_target.settings.format = refrain_engine::ExportFormat::Wav;
     h.run();
 
-    let before = audioeditor_engine::render(h.state().session.project(), 0, 40_000);
+    let before = refrain_engine::render(h.state().session.project(), 0, 40_000);
     h.state_mut().write_export(&wav);
     h.run();
     assert!(!h.state().status_error, "{}", h.state().status);
-    assert_eq!(audioeditor_engine::load_source(&wav).unwrap().frames(), 24_000);
+    assert_eq!(refrain_engine::load_source(&wav).unwrap().frames(), 24_000);
     assert_eq!(
-        audioeditor_engine::render(h.state().session.project(), 0, 40_000),
+        refrain_engine::render(h.state().session.project(), 0, 40_000),
         before
     );
     assert!(h.state().session.can_undo());
@@ -794,7 +794,7 @@ fn export_panel_and_overwriting_a_source() {
     h.state_mut().write_export(&wav);
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
 
-    let project = dir.join("song.audioedit");
+    let project = dir.join("song.refrain");
     assert!(h.state_mut().save_to(&project));
     let text = std::fs::read_to_string(&project).unwrap();
     assert!(text.contains("\"originals/engine.wav\""), "{text}");
@@ -802,7 +802,7 @@ fn export_panel_and_overwriting_a_source() {
     let mut other = Editor::default();
     assert!(other.open_from(&project));
     assert_eq!(other.export_target.file.as_deref(), Some(wav.as_path()));
-    assert_eq!(audioeditor_engine::render(other.session.project(), 0, 40_000), before);
+    assert_eq!(refrain_engine::render(other.session.project(), 0, 40_000), before);
 }
 
 /// Kept originals a leftover recovery copy still uses survive the cleanup at start; unused ones go.
@@ -813,12 +813,12 @@ fn unused_kept_originals_are_removed() {
     let kept = dir.join("originals");
     std::fs::create_dir_all(&kept).unwrap();
     let wav = kept.join("1-5-engine.wav");
-    audioeditor_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
+    refrain_engine::export(overlapping().session.project(), &Default::default(), &wav).unwrap();
     std::fs::write(kept.join("1-6-gone.wav"), b"").unwrap();
     let mut crashed = Session::default();
     crashed.execute(Command::AddTrack { name: "t".into() }).unwrap();
     let track = crashed.project().tracks[0].id;
-    let source = Arc::new(audioeditor_engine::load_source(&wav).unwrap());
+    let source = Arc::new(refrain_engine::load_source(&wav).unwrap());
     crashed
         .execute(Command::AddClip {
             track,
@@ -826,7 +826,7 @@ fn unused_kept_originals_are_removed() {
             start: 0,
         })
         .unwrap();
-    audioeditor_engine::save_project(crashed.project(), &dir.join("recovery-1.audioedit"), None).unwrap();
+    refrain_engine::save_project(crashed.project(), &dir.join("recovery-1.refrain"), None).unwrap();
 
     let e = Editor {
         recovery: Some(super::Recovery::named(dir.clone(), "2")),
@@ -870,7 +870,7 @@ fn duplicate_and_zoom_to_fit() {
 fn effect_ranges_are_edited_with_the_mouse() {
     let mut e = overlapping();
     let track = e.session.project().tracks[0].id;
-    let normalize = |peak_db| audioeditor_engine::Effect::Normalize { peak_db };
+    let normalize = |peak_db| refrain_engine::Effect::Normalize { peak_db };
     e.run(Command::AddEffectLane {
         track: Some(track),
         effect: normalize(-1.0),
@@ -925,7 +925,7 @@ fn a_filter_is_added_and_set_from_the_menus() {
     let lane = |h: &Harness<'_, Editor>| h.state().session.project().tracks[0].effects[0].clone();
     assert_eq!(
         lane(&h).effect,
-        audioeditor_engine::Effect::HighPass { hz: 80.0, steep: false }
+        refrain_engine::Effect::HighPass { hz: 80.0, steep: false }
     );
 
     drag(&mut h, egui::pos2(206.0, 188.0), egui::pos2(606.0, 188.0));
@@ -936,6 +936,6 @@ fn a_filter_is_added_and_set_from_the_menus() {
     h.run();
     assert_eq!(
         lane(&h).effect,
-        audioeditor_engine::Effect::HighPass { hz: 80.0, steep: true }
+        refrain_engine::Effect::HighPass { hz: 80.0, steep: true }
     );
 }

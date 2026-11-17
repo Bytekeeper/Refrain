@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use audioeditor_engine::{
+use refrain_engine::{
     ChannelMode, Clip, Fade, FadeShape, Frames, MAX_DB, MIN_DB, Project, Source, TrackId, clip_amp, edge_fades,
     overlap_after, overlap_before, similarity,
 };
@@ -236,7 +236,7 @@ impl Editor {
     }
 
     /// Mute, volume and delete in the track's header.
-    fn track_controls(&mut self, ui: &mut Ui, row: Rect, track: &audioeditor_engine::Track) {
+    fn track_controls(&mut self, ui: &mut Ui, row: Rect, track: &refrain_engine::Track) {
         let mute = Rect::from_min_size(row.min + vec2(6.0, 30.0), vec2(24.0, 20.0));
         if ui
             .put(mute, egui::Button::selectable(track.muted, "M"))

@@ -1,6 +1,6 @@
 //! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points.
 
-use audioeditor_engine::{
+use refrain_engine::{
     ChannelMode, Clip, ClipId, Command, Fade, FadeShape, Frames, GainPoint, Project, TrackId, overlap_before,
 };
 use egui::{Pos2, Rect, pos2};
@@ -49,7 +49,7 @@ pub(crate) enum Menu {
     /// The channels of all clips on a track; opened from the track header.
     Track(TrackId),
     /// An effect lane, and the range that was right-clicked in it.
-    Lane(audioeditor_engine::LaneId, Option<audioeditor_engine::RangeId>),
+    Lane(refrain_engine::LaneId, Option<refrain_engine::RangeId>),
 }
 
 /// The fade whose curve the right-click menu changes.

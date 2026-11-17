@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use audioeditor_engine::{PROJECT_EXTENSION, Project, Session, save_project};
+use refrain_engine::{PROJECT_EXTENSION, Project, Session, save_project};
 use rfd::{MessageButtons, MessageDialogResult};
 
 use crate::Editor;
@@ -156,7 +156,7 @@ impl Editor {
             view.insert("file".into(), file.to_string_lossy().into());
         }
         let written = std::fs::create_dir_all(&recovery.dir)
-            .map_err(audioeditor_engine::Error::from)
+            .map_err(refrain_engine::Error::from)
             .and_then(|()| save_project(self.session.project(), &recovery.file, Some(&view)));
         match written {
             Ok(()) => recovery.written = Some(self.session.project().clone()),

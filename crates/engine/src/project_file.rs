@@ -14,7 +14,7 @@ use crate::{
     Project, RangeId, Result, Session, Source, Track, TrackId,
 };
 
-pub const PROJECT_EXTENSION: &str = "audioedit";
+pub const PROJECT_EXTENSION: &str = "refrain";
 const VERSION: u32 = 1;
 /// A project file holds only edits; a file this large is not one.
 const MAX_FILE_BYTES: u64 = 64 << 20;

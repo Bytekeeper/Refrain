@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use audioeditor_engine::{Command, PROJECT_EXTENSION, load_source, open_project, save_project};
+use refrain_engine::{Command, PROJECT_EXTENSION, load_source, open_project, save_project};
 use rfd::{MessageButtons, MessageDialogResult};
 
 use crate::export::ExportTarget;

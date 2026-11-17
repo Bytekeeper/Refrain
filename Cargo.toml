@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.95"
 
 [workspace.dependencies]
-audioeditor-engine = { path = "crates/engine" }
+refrain-engine = { path = "crates/engine" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

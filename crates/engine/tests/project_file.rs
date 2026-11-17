@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use audioeditor_engine::{
+use refrain_engine::{
     ChannelMode, Command, Effect, ExportFormat, ExportSettings, Fade, FadeShape, GainPoint, Session, Source, export,
     load_source, open_project, render, save_project,
 };
@@ -174,7 +174,7 @@ fn assert_same_sound(a: &Session, b: &Session) {
 fn saved_project_opens_with_the_same_sound() {
     let dir = folder("roundtrip");
     let s = edited_project(&dir);
-    let file = dir.join("song.audioedit");
+    let file = dir.join("song.refrain");
     save_project(s.project(), &file, None).unwrap();
 
     let (opened, _) = open_project(&file).unwrap();
@@ -229,12 +229,12 @@ fn mono_export_mixes_both_sides_into_one_channel() {
 fn a_moved_project_folder_still_opens() {
     let dir = folder("moved");
     let s = edited_project(&dir);
-    save_project(s.project(), &dir.join("song.audioedit"), None).unwrap();
+    save_project(s.project(), &dir.join("song.refrain"), None).unwrap();
     let moved = dir.with_file_name("moved-elsewhere");
     let _ = std::fs::remove_dir_all(&moved);
     std::fs::rename(&dir, &moved).unwrap();
 
-    let (opened, _) = open_project(&moved.join("song.audioedit")).unwrap();
+    let (opened, _) = open_project(&moved.join("song.refrain")).unwrap();
     assert_eq!(opened.project().len(), s.project().len());
 }
 
@@ -242,7 +242,7 @@ fn a_moved_project_folder_still_opens() {
 fn a_missing_audio_file_is_named() {
     let dir = folder("missing");
     let s = edited_project(&dir);
-    let file = dir.join("song.audioedit");
+    let file = dir.join("song.refrain");
     save_project(s.project(), &file, None).unwrap();
     std::fs::remove_file(dir.join("audio/b.wav")).unwrap();
 
@@ -268,7 +268,7 @@ fn audio_made_in_memory_cannot_be_saved() {
         start: 0,
     })
     .unwrap();
-    let err = save_project(s.project(), &dir.join("x.audioedit"), None)
+    let err = save_project(s.project(), &dir.join("x.refrain"), None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("beep"), "{err}");
@@ -282,7 +282,7 @@ type Damage = fn(&mut serde_json::Value);
 fn damaged_files_are_refused() {
     let dir = folder("damaged");
     let s = edited_project(&dir);
-    let file = dir.join("song.audioedit");
+    let file = dir.join("song.refrain");
     save_project(s.project(), &file, None).unwrap();
     let good: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
 
@@ -404,8 +404,8 @@ fn relocated_audio_is_read_from_its_new_place() {
     let source = &s.project().tracks[0].clips[0].source;
     assert_eq!(s.project().file_of(source), Some(kept.as_path()));
 
-    save_project(s.project(), &dir.join("song.audioedit"), None).unwrap();
-    let text = std::fs::read_to_string(dir.join("song.audioedit")).unwrap();
+    save_project(s.project(), &dir.join("song.refrain"), None).unwrap();
+    let text = std::fs::read_to_string(dir.join("song.refrain")).unwrap();
     assert!(text.contains("kept.wav") && !text.contains("a.wav"), "{text}");
 }
 
@@ -414,7 +414,7 @@ fn relocated_audio_is_read_from_its_new_place() {
 fn ranges_in_older_files_take_the_lane_settings() {
     let dir = folder("older");
     let s = edited_project(&dir);
-    let file = dir.join("song.audioedit");
+    let file = dir.join("song.refrain");
     save_project(s.project(), &file, None).unwrap();
     let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     let mut removed = 0;

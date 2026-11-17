@@ -1,12 +1,12 @@
-# Audio editor: rules for agents and contributors
+# Refrain: rules for agents and contributors
 
-A small multitrack audio editor in pure Rust: tracks, clips, fades, crossfades and volume curves.
+Refrain is a small multitrack audio editor in pure Rust: tracks, clips, fades, crossfades and volume curves.
 It is not a DAW. When a feature only makes sense in a DAW (mixer busses, MIDI, plugins), leave it out.
 
 ## Layout
 
 ```text
-apps/audioeditor   the egui window. Reads the project, sends commands, shows errors.
+apps/refrain       the egui window. Reads the project, sends commands, shows errors.
   main.rs          editor state, toolbar, shortcuts
   timeline.rs      drawing: tracks, clips, crossfades, ruler, scrollbar
   mouse.rs         mouse editing: hit-testing and drags
@@ -78,7 +78,7 @@ at the copy, so clips, undo and rate changes keep the original. Saving moves suc
 Test the mixing maths and commands with a few concrete samples. Every crash fix gets a regression
 test that failed before the fix.
 
-Check window changes without a screen: `apps/audioeditor/src/ui_tests.rs` drives the real window
+Check window changes without a screen: `apps/refrain/src/ui_tests.rs` drives the real window
 with `egui_kittest` (mouse, wheel, keys) and saves images to `target/ui-snapshots/`. Look at the
 images before saying a window change works. Add a test there only for a real window bug.
 

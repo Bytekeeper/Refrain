@@ -1,6 +1,6 @@
 //! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
 
-use audioeditor_engine::{Command, Effect, EffectLane, EffectRange, Frames, LaneId, Project, RangeId, TrackId};
+use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, LaneId, Project, RangeId, TrackId};
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
 
 use crate::{Editor, HANDLE, HEADER_W};

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use audioeditor_engine::{ExportFormat, ExportSettings, export};
+use refrain_engine::{ExportFormat, ExportSettings, export};
 use egui::{Align2, Order, Ui, vec2};
 
 use crate::{Editor, RATES, khz};

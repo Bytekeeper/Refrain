@@ -479,33 +479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "audioeditor"
-version = "0.1.0"
-dependencies = [
- "audioeditor-engine",
- "cpal",
- "craft-audio",
- "dirs",
- "eframe",
- "egui",
- "egui_kittest",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "audioeditor-engine"
-version = "0.1.0"
-dependencies = [
- "craft-audio",
- "rubato",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3165,6 +3138,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "refrain"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "craft-audio",
+ "dirs",
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "refrain-engine",
+ "rfd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "refrain-engine"
+version = "0.1.0"
+dependencies = [
+ "craft-audio",
+ "rubato",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

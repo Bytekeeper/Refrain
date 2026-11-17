@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
-use audioeditor_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
+use refrain_engine::{ClipId, Command, Frames, Project, Session, Source, TrackId};
 use craft_audio::peaks::Peaks;
 use egui::{Key, Ui, ViewportCommand};
 use export::ExportTarget;
@@ -36,11 +36,11 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     let mut editor = Editor {
-        recovery: dirs::data_local_dir().map(|dir| Recovery::new(dir.join("audioeditor"))),
+        recovery: dirs::data_local_dir().map(|dir| Recovery::new(dir.join("refrain"))),
         ..Editor::default()
     };
     editor.offer_recovery();
-    eframe::run_native("Audio editor", options, Box::new(|_| Ok(Box::new(editor))))
+    eframe::run_native("Refrain", options, Box::new(|_| Ok(Box::new(editor))))
 }
 
 struct Editor {
@@ -65,14 +65,14 @@ struct Editor {
     track_heights: HashMap<TrackId, f32>,
     /// The effect range being drawn, moved or resized.
     range_drag: Option<lanes::RangeDrag>,
-    selected_range: Option<audioeditor_engine::RangeId>,
+    selected_range: Option<refrain_engine::RangeId>,
     /// Tracks whose effect lanes are hidden. A view setting.
     folded: std::collections::HashSet<TrackId>,
     /// An effect setting being dragged in its menu, not yet in the project.
     effect_edit: Option<(
-        audioeditor_engine::LaneId,
-        Option<audioeditor_engine::RangeId>,
-        audioeditor_engine::Effect,
+        refrain_engine::LaneId,
+        Option<refrain_engine::RangeId>,
+        refrain_engine::Effect,
     )>,
     /// The width of the track lanes in the last frame, for zooming to fit.
     lane_w: f32,
@@ -494,7 +494,7 @@ impl Editor {
             .and_then(|f| f.file_stem())
             .map_or_else(|| "Untitled".into(), |n| n.to_string_lossy().into_owned());
         let dot = if self.has_unsaved_changes() { "• " } else { "" };
-        let title = format!("{dot}{name} – Audio editor");
+        let title = format!("{dot}{name} – Refrain");
         if title != self.title {
             ui.ctx().send_viewport_cmd(ViewportCommand::Title(title.clone()));
             self.title = title;
