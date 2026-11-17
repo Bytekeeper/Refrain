@@ -1,3 +1,5 @@
+//! The open project with undo, and every command that changes it.
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;

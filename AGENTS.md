@@ -1,6 +1,7 @@
 # Refrain: rules for agents and contributors
 
-Refrain is a small multitrack audio editor in pure Rust: tracks, clips, fades, crossfades and volume curves.
+Refrain is a small multitrack audio editor in pure Rust: tracks, clips, fades, crossfades, volume curves,
+effects and generated sound (tone, noise, blips).
 It is not a DAW. When a feature only makes sense in a DAW (mixer busses, MIDI, plugins), leave it out.
 
 ## Layout
@@ -10,7 +11,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   main.rs          editor state, toolbar, shortcuts
   timeline.rs      the timeline: track rows and headers, ruler, scrollbar, layout
   clips.rs         drawing one clip and the overlap zone of a crossfade
-  mouse.rs         mouse editing: hit-testing and drags
+  mouse.rs         mouse editing: hit-testing, drags, snapping, and the clip, fade and channel menus
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
   generate.rs      adding a generated clip (tone, noise, blips) and its settings panel
@@ -18,7 +19,8 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   export.rs        export panel and "export again" to the project's export target
   recovery.rs      copies of unsaved work, restored after a crash
   playback.rs      audio output (cpal)
-crates/engine      project model, commands, undo, mixing, project files, import and export.
+crates/engine      project model, commands, undo, mixing, effects, generated sound, project files,
+                   import and export.
                    No UI or OS audio crates.
 ```
 
@@ -32,7 +34,8 @@ People trust the editor with their recordings. A broken file, an odd click or a 
 error message, never a crash and never lost work.
 
 - Return `Result`; no `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!` or slice indexing outside
-  tests. The workspace lints deny them; `clippy.toml` allows them in tests.
+  tests. The workspace lints deny them; `clippy.toml` allows `unwrap`, `expect`, `panic!` and indexing
+  in tests.
 - No `unsafe` (`unsafe_code = "forbid"`).
 - Every number from a file or from the UI is hostile: use `get()`, `checked_*`/`saturating_*`, and
   never divide by a sample rate or length that can be zero.
@@ -41,7 +44,8 @@ error message, never a crash and never lost work.
 ## 2. Non-destructive
 
 Every edit stays editable. Trims, fades, volume curves, crossfades, channels and effects are settings
-stored in the project; the audio is computed from the files whenever it plays or is exported. Nothing
+stored in the project; the audio is computed from the files (or a generator's settings) whenever it
+plays or is exported. Nothing
 is ever applied to the audio for good, so a trim can be dragged back out and an effect changed or
 removed later. Results that depend on the audio (a normalize gain, a match) are measured again when
 the audio under them changes, never stored as a fixed number.
@@ -69,7 +73,8 @@ computed once per range when the project changes and kept with the range, like a
 ## 4. Time
 
 All edit math uses whole sample frames (`i64`) at the project sample rate. No `f64` seconds in the
-model; seconds are only for display.
+model; seconds are only for display. Settings that mean the same at any rate, such as an echo's delay or
+a blip's length, are kept in ms or seconds and turned into frames where they are used.
 
 A project has one working sample rate. Audio at another rate is converted to it when it is added
 (`engine::resample`); the files on disk are never changed. Changing the project rate converts again

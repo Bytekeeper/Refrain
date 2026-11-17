@@ -1,3 +1,5 @@
+//! The project: tracks, clips, the audio they play, effect lanes and the loop.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

@@ -1,3 +1,5 @@
+//! Reading audio files, converting the sample rate, and exporting the mix.
+
 use std::path::Path;
 
 use craft_audio::{AudioBuffer, BitDepth, DecodeOptions, EncodeFormat, EncodeOptions};

@@ -312,7 +312,8 @@ fn noise_period(color: NoiseColor, seed: u64, len: usize, rate: f64) -> Vec<f32>
     match color {
         NoiseColor::White => out.iter_mut().zip(&white).for_each(|(o, w)| *o = *w as f32),
         NoiseColor::Pink => {
-            // Three smoothing filters of different speeds add up to about 3 dB less per octave.
+            // Three smoothing filters of different speeds add up to about 3 dB less per octave: Paul Kellet's
+            // public-domain recipe.
             let mut b = [0.0f64; 3];
             for pass in 0..2 {
                 for (o, w) in out.iter_mut().zip(&white) {

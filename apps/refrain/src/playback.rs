@@ -1,3 +1,5 @@
+//! Audio output: plays the project through the default device, piece by piece on the audio thread.
+
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

@@ -1,3 +1,5 @@
+//! The editor window: its state, the toolbar, keyboard shortcuts and the window title.
+
 mod clips;
 mod effect_menu;
 mod export;

@@ -1,4 +1,5 @@
-//! The project file: JSON that refers to the audio files by path and holds every edit.
+//! The project file: JSON that refers to the audio files by path, holds generated sound as its settings,
+//! and holds every edit.
 //! Opening treats the file as hostile: every number is checked before it reaches the model.
 
 use std::collections::HashMap;

@@ -1,4 +1,5 @@
-//! The editor without a window: project model, commands with undo, mixing, import and export.
+//! The editor without a window: project model, commands with undo, mixing, effects, generated sound,
+//! project files, import and export.
 
 mod effects;
 mod generate;

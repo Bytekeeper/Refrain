@@ -1,4 +1,5 @@
-//! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points.
+//! Mouse editing on the timeline: selecting, moving and trimming clips, fades and volume points, snapping,
+//! and the right-click menus of clips, fades and channels.
 
 use egui::{Pos2, Rect, pos2};
 use refrain_engine::{

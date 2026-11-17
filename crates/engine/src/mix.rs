@@ -1,3 +1,5 @@
+//! Mixing: clips with their fades, curves and crossfades, track and mix effects, and the loop.
+
 use std::f32::consts::FRAC_PI_2;
 
 use crate::effects::{Memory, apply_lane};
