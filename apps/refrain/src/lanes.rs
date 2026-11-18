@@ -571,19 +571,8 @@ impl Editor {
                     (Effect::Reverb { seconds, reversed, .. }, _) => {
                         format!("{seconds:.1} s room{}", if reversed { ", reversed" } else { "" })
                     }
-                    (Effect::Eq { gains_db }, _) => {
-                        let bands: Vec<String> = gains_db
-                            .iter()
-                            .zip(crate::effect_menu::EQ_BAND_NAMES)
-                            .filter(|(db, _)| **db != 0.0)
-                            .map(|(db, name)| format!("{name} {}", crate::effect_menu::db_text(*db)))
-                            .collect();
-                        if bands.is_empty() {
-                            "flat".into()
-                        } else {
-                            bands.join("  ")
-                        }
-                    }
+                    // Drawn as bars below; the bands as text are often wider than the range.
+                    (Effect::Eq { .. }, _) => String::new(),
                     (Effect::Limiter { ceiling_db, .. }, _) => format!("at most {ceiling_db:.1} dB"),
                 };
                 for x in handles
@@ -596,13 +585,21 @@ impl Editor {
                     painter.rect_filled(handle, 1.0, Color32::from_gray(220));
                 }
                 if x1 - x0 > 50.0 {
-                    painter.text(
-                        pos2(x0.max(lane_left) + 6.0, area.center().y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        FontId::proportional(11.0),
-                        Color32::WHITE,
-                    );
+                    let at = pos2(x0.max(lane_left) + 6.0, area.center().y);
+                    // A label longer than the range is cut at its end rather than running over the next one.
+                    let inside = painter.with_clip_rect(area.intersect(painter.clip_rect()));
+                    match effect {
+                        Effect::Eq { gains_db } => draw_eq_bars(&inside, at, area.height() / 2.0 - 2.0, &gains_db),
+                        _ => {
+                            inside.text(
+                                at,
+                                Align2::LEFT_CENTER,
+                                label,
+                                FontId::proportional(11.0),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -673,6 +670,21 @@ enum Edge {
     Tail,
     FadeIn,
     FadeOut,
+}
+
+/// The ten bands as bars up and down from a middle line, starting at `at`: the EQ's shape at a glance.
+fn draw_eq_bars(painter: &egui::Painter, at: Pos2, half_height: f32, gains_db: &[f32; 10]) {
+    const BAR_W: f32 = 4.0;
+    const GAP: f32 = 1.0;
+    let width = gains_db.len() as f32 * (BAR_W + GAP) - GAP;
+    let middle = [at, at + vec2(width, 0.0)];
+    painter.line_segment(middle, Stroke::new(1.0, Color32::from_white_alpha(90)));
+    for (i, db) in gains_db.iter().enumerate() {
+        let x = at.x + i as f32 * (BAR_W + GAP);
+        let y = at.y - db / 12.0 * half_height;
+        let bar = Rect::from_x_y_ranges(x..=x + BAR_W, y.min(at.y)..=y.max(at.y));
+        painter.rect_filled(bar, 0.0, Color32::WHITE);
+    }
 }
 
 fn hz_text(hz: f32) -> String {
