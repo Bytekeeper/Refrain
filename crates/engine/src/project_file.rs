@@ -322,7 +322,9 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
             header.version
         )));
     }
-    let file: ProjectFile = serde_json::from_slice(&bytes).map_err(not_a_project)?;
+    let mut json: serde_json::Value = serde_json::from_slice(&bytes).map_err(not_a_project)?;
+    upgrade_one_band_eqs(&mut json);
+    let file: ProjectFile = serde_json::from_value(json).map_err(not_a_project)?;
 
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut sources = vec![];
@@ -452,6 +454,48 @@ fn export_from_file(export: Option<ExportTarget>, view: Option<&serde_json::Valu
         *file = dir.join(&*file);
     }
     export
+}
+
+/// Files from the short time the EQ had one band (a bell or a shelf) hold that band in place of the ten. A bell
+/// goes to the nearest octave band, which is the same bell when it was one octave wide; a shelf to every band on
+/// its side.
+fn upgrade_one_band_eqs(json: &mut serde_json::Value) {
+    match json {
+        serde_json::Value::Object(map) => {
+            if map.get("kind").and_then(|k| k.as_str()) == Some("eq") && map.contains_key("shape") {
+                let hz = map.get("hz").and_then(serde_json::Value::as_f64).unwrap_or(1000.0) as f32;
+                let db = map.get("gain_db").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+                let db = if db.is_finite() { db.clamp(-12.0, 12.0) } else { 0.0 };
+                let shape = map.get("shape").and_then(|s| s.as_str()).unwrap_or("bell").to_string();
+                let octaves_from = |band: f32| (band / hz.max(1.0)).log2();
+                let nearest = crate::EQ_BANDS_HZ
+                    .iter()
+                    .map(|b| octaves_from(*b).abs())
+                    .enumerate()
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map_or(0, |(i, _)| i);
+                let gains: Vec<f32> = crate::EQ_BANDS_HZ
+                    .iter()
+                    .enumerate()
+                    .map(|(i, band)| {
+                        let on = match shape.as_str() {
+                            "low_shelf" => *band <= hz,
+                            "high_shelf" => *band >= hz,
+                            _ => i == nearest,
+                        };
+                        if on { db } else { 0.0 }
+                    })
+                    .collect();
+                map.clear();
+                map.insert("kind".into(), "eq".into());
+                map.insert("gains_db".into(), gains.into());
+                return;
+            }
+            map.values_mut().for_each(upgrade_one_band_eqs);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(upgrade_one_band_eqs),
+        _ => {}
+    }
 }
 
 /// JSON has no infinity, but a hand-edited file may hold any number.

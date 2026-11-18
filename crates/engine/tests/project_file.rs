@@ -660,3 +660,33 @@ fn regions_export_their_part_of_the_mix_and_are_saved() {
     let spans: Vec<_> = lane.regions.iter().map(|r| (r.start, r.end, r.name.as_str())).collect();
     assert_eq!(spans, [(1000, 3000, "sound 1"), (5000, 5500, "ui/click")]);
 }
+
+/// Files saved while the EQ had one band did not open after it got ten, so their recovery copies could not be
+/// restored either.
+#[test]
+fn a_one_band_eq_opens_as_the_ten_bands() {
+    let dir = folder("one_band_eq");
+    let s = edited_project(&dir);
+    let file = dir.join("song.refrain");
+    save_project(s.project(), &file, None).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let bell = serde_json::json!({"kind": "eq", "shape": "bell", "hz": 1000.0, "gain_db": -3.0, "octaves": 1.0});
+    let shelf = serde_json::json!({"kind": "eq", "shape": "high_shelf", "hz": 3000.0, "gain_db": 20.0, "octaves": 1.0});
+    let range = |effect: &serde_json::Value, start: i64| serde_json::json!({"start": start, "end": start + 1000, "effect": effect, "fade_in": 0, "fade_out": 0});
+    json["tracks"][0]["effects"] =
+        serde_json::json!([{"effect": bell, "enabled": true, "ranges": [range(&bell, 0), range(&shelf, 2000)]}]);
+    std::fs::write(&file, json.to_string()).unwrap();
+
+    let (opened, _) = open_project(&file).unwrap();
+    let ranges = &opened.project().tracks[0].effects[0].ranges;
+    let gains = |i: usize| match ranges[i].effect {
+        Effect::Eq { gains_db } => gains_db,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(gains(0), [0.0, 0.0, 0.0, 0.0, 0.0, -3.0, 0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(
+        gains(1),
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0, 12.0, 12.0],
+        "held to the ten bands' range"
+    );
+}

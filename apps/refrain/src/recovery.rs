@@ -187,8 +187,15 @@ impl Editor {
                 }
                 _ => continue,
             }
-            if self.restore(&copy) {
-                break;
+            match self.restore(&copy) {
+                Ok(()) => break,
+                Err(why) => {
+                    rfd::MessageDialog::new()
+                        .set_level(rfd::MessageLevel::Error)
+                        .set_title("Cannot restore")
+                        .set_description(why)
+                        .show();
+                }
             }
         }
         self.remove_unused_originals();
@@ -224,16 +231,26 @@ impl Editor {
         self.recovery.as_ref().map(Recovery::originals_dir)
     }
 
-    /// Opens a recovery copy as unsaved work of the project it came from, and deletes the copy.
-    pub(crate) fn restore(&mut self, copy: &Path) -> bool {
+    /// Opens a recovery copy as unsaved work of the project it came from, and deletes the copy. A copy that
+    /// cannot be opened is renamed, so it is kept but not offered at every start again.
+    pub(crate) fn restore(&mut self, copy: &Path) -> Result<(), String> {
         if !self.open_from(copy) {
-            return false;
+            let name = copy
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let aside = copy.with_file_name(format!("unreadable-{name}"));
+            let kept = match std::fs::rename(copy, &aside) {
+                Ok(()) => format!("The copy is kept as {}.", aside.display()),
+                Err(_) => format!("The copy stays at {}.", copy.display()),
+            };
+            return Err(format!("{} {kept}", self.status));
         }
         self.file = original_file(copy);
         // Nothing of this is saved yet.
         self.saved = Session::default().project().clone();
         let _ = std::fs::remove_file(copy);
         self.info("Restored unsaved work. Save to keep it.".into());
-        true
+        Ok(())
     }
 }

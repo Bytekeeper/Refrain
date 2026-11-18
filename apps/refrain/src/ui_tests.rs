@@ -743,7 +743,7 @@ fn unsaved_work_is_recovered() {
         found.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
         std::slice::from_ref(&copy)
     );
-    assert!(e.restore(&copy));
+    e.restore(&copy).unwrap();
     assert!(!copy.exists());
     assert_eq!(e.file.as_deref(), Some(project.as_path()));
     assert_eq!(e.session.project().tracks[0].clips[0].start, 4000);
@@ -755,6 +755,13 @@ fn unsaved_work_is_recovered() {
     assert!(h.state_mut().save());
     h.run();
     assert!(!next.exists());
+
+    // A copy this editor cannot read is kept, but not offered again at the next start.
+    std::fs::write(&copy, "{\"version\": 2}").unwrap();
+    let e = h.state_mut();
+    let why = e.restore(&copy).unwrap_err();
+    assert!(why.contains("unreadable-recovery-crashed"), "{why}");
+    assert!(e.recovery.as_ref().unwrap().left_behind().is_empty());
 }
 
 /// The panel warns about MP3 loops. Exporting over audio the project uses keeps the original aside, so the clips,
