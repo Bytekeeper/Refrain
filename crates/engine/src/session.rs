@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::effects::{default_fade, tidy_lane};
-use crate::io::{load_source, resample};
+use crate::io::{change_speed, load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::project_file::save_project;
 use crate::regions::{check_name, tidy_regions};
@@ -168,6 +168,12 @@ pub enum Command {
     SetChannels {
         clips: Vec<ClipId>,
         mode: ChannelMode,
+    },
+    /// Plays a clip `speed` times as fast, higher or lower like a tape. Its start stays; its length, fades and
+    /// volume points stretch with the audio. 1 plays the audio as recorded.
+    SetClipSpeed {
+        clip: ClipId,
+        speed: f64,
     },
     /// Converts all audio to `rate` and moves every position along, so everything stays at the same
     /// time. Audio from a file is converted again from the file, so changing the rate twice loses nothing.
@@ -640,6 +646,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 crossfade_shape: FadeShape::EqualPower,
                 gain: vec![],
                 channels: ChannelMode::Stereo,
+                sped: None,
             };
             track_mut(p, track)?.clips.push(clip);
         }
@@ -681,6 +688,7 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 crossfade_shape: FadeShape::EqualPower,
                 gain: vec![],
                 channels: ChannelMode::Stereo,
+                sped: None,
             };
             track_mut(p, track)?.clips.push(clip);
         }
@@ -907,6 +915,43 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 clip_mut(p, clip)?.channels = mode;
             }
         }
+        Command::SetClipSpeed { clip, speed } => {
+            let (_, c) = p.clip(clip).ok_or(Error::NoClip(clip))?;
+            if c.source.generated.is_some() {
+                return Err(Error::Invalid(
+                    "generated sound changes speed through its settings, such as its pitch or length".into(),
+                ));
+            }
+            let (old, original) = (c.speed(), c.original().clone());
+            let source = if speed == 1.0 {
+                original.clone()
+            } else {
+                // Split and duplicated clips share the converted audio, as they share the file.
+                let same = p.tracks.iter().flat_map(|t| &t.clips).find_map(|c| {
+                    let s = c.sped.as_ref()?;
+                    (s.speed == speed && Arc::ptr_eq(&s.original, &original)).then(|| c.source.clone())
+                });
+                match same {
+                    Some(source) => source,
+                    None => Arc::new(change_speed(&original, speed)?),
+                }
+            };
+            let frames = source.frames();
+            if frames <= 0 {
+                return Err(Error::EmptySource);
+            }
+            let scale = |f: Frames| (f as f64 * old / speed).round() as Frames;
+            let c = clip_mut(p, clip)?;
+            c.offset = scale(c.offset).clamp(0, frames - 1);
+            c.len = scale(c.len).clamp(1, frames - c.offset);
+            c.fade_in.len = scale(c.fade_in.len);
+            c.fade_out.len = scale(c.fade_out.len);
+            for point in &mut c.gain {
+                point.at = scale(point.at);
+            }
+            c.source = source;
+            c.sped = (speed != 1.0).then_some(crate::Sped { speed, original });
+        }
         Command::SetGainCurve { clip, mut points } => {
             for point in &mut points {
                 point.db = check_db(point.db)?;
@@ -999,30 +1044,47 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
     let mut converted: HashMap<usize, (Arc<Source>, Arc<Source>)> = HashMap::new();
     // Converted audio is read from where its file is now, so the old relocations are no longer needed.
     let relocated = std::mem::take(&mut p.relocated);
+    let mut sped: HashMap<(usize, u64), Arc<Source>> = HashMap::new();
     for clip in p.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
-        let key = Arc::as_ptr(&clip.source) as usize;
-        let source = match converted.get(&key) {
+        let key = Arc::as_ptr(clip.original()) as usize;
+        let original = match converted.get(&key) {
             Some((_, new)) => new.clone(),
             None => {
                 // Generated sound is made again at the new rate; `refit` then fits it to the new loop length.
-                if let Some(g) = &clip.source.generated {
-                    let frames = scale(clip.source.frames()).max(1);
+                let old = clip.original();
+                if let Some(g) = &old.generated {
+                    let frames = scale(old.frames()).max(1);
                     let new = Arc::new(g.generator.make(rate, g.fitted, scale(g.first), frames)?);
-                    converted.insert(key, (clip.source.clone(), new.clone()));
+                    converted.insert(key, (old.clone(), new.clone()));
                     new
                 } else {
-                    let moved = relocated.iter().find(|(s, _)| Arc::ptr_eq(s, &clip.source));
-                    let file = moved.map(|(_, f)| f.as_path()).or(clip.source.path.as_deref());
-                    let original = match file {
+                    let moved = relocated.iter().find(|(s, _)| Arc::ptr_eq(s, old));
+                    let file = moved.map(|(_, f)| f.as_path()).or(old.path.as_deref());
+                    let read = match file {
                         Some(path) => Arc::new(
                             load_source(path)
                                 .map_err(|e| Error::Invalid(format!("cannot read {} again: {e}", path.display())))?,
                         ),
-                        None => clip.source.clone(),
+                        None => old.clone(),
                     };
-                    let new = Arc::new(resample(&original, rate)?);
-                    converted.insert(key, (clip.source.clone(), new.clone()));
+                    let new = Arc::new(resample(&read, rate)?);
+                    converted.insert(key, (old.clone(), new.clone()));
                     new
+                }
+            }
+        };
+        let source = match clip.sped.as_mut() {
+            None => original,
+            Some(s) => {
+                s.original = original.clone();
+                let made = sped.get(&(key, s.speed.to_bits())).cloned();
+                match made {
+                    Some(source) => source,
+                    None => {
+                        let source = Arc::new(change_speed(&original, s.speed)?);
+                        sped.insert((key, s.speed.to_bits()), source.clone());
+                        source
+                    }
                 }
             }
         };

@@ -352,6 +352,7 @@ mod tests {
             crossfade_shape: shape,
             gain: vec![],
             channels: ChannelMode::Stereo,
+            sped: None,
         }
     }
 

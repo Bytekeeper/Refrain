@@ -95,9 +95,32 @@ pub struct Clip {
     /// Sorted by `at`. Empty means 0 dB.
     pub gain: Vec<GainPoint>,
     pub channels: ChannelMode,
+    /// `None` plays the audio at the speed it was recorded.
+    pub sped: Option<Sped>,
 }
 
+/// A clip played faster or slower, and so higher or lower, like a tape. `Clip::source` is then
+/// `original` resampled, and the clip's frames count in it.
+#[derive(Debug, Clone)]
+pub struct Sped {
+    /// 2 is twice as fast and an octave higher.
+    pub speed: f64,
+    pub original: Arc<Source>,
+}
+
+pub const MIN_SPEED: f64 = 0.25;
+pub const MAX_SPEED: f64 = 4.0;
+
 impl Clip {
+    pub fn speed(&self) -> f64 {
+        self.sped.as_ref().map_or(1.0, |s| s.speed)
+    }
+
+    /// The audio as read from the file or made by a generator, before any speed change.
+    pub fn original(&self) -> &Arc<Source> {
+        self.sped.as_ref().map_or(&self.source, |s| &s.original)
+    }
+
     /// Left and right of source frame `frame`, as this clip plays them.
     pub fn frame(&self, frame: Frames) -> (f32, f32) {
         let left = self.source.sample(0, frame);
@@ -209,12 +232,12 @@ impl Project {
         moved.map(|(_, file)| file.as_path()).or(source.path.as_deref())
     }
 
-    /// Every distinct piece of audio the clips use.
+    /// Every distinct piece of audio the clips use, before speed changes.
     pub fn sources(&self) -> Vec<&Arc<Source>> {
         let mut found: Vec<&Arc<Source>> = vec![];
         for clip in self.tracks.iter().flat_map(|t| &t.clips) {
-            if !found.iter().any(|s| Arc::ptr_eq(s, &clip.source)) {
-                found.push(&clip.source);
+            if !found.iter().any(|s| Arc::ptr_eq(s, clip.original())) {
+                found.push(clip.original());
             }
         }
         found

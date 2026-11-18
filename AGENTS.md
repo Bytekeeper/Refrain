@@ -53,6 +53,9 @@ plays or is exported. Nothing
 is ever applied to the audio for good, so a trim can be dragged back out and an effect changed or
 removed later. Results that depend on the audio (a normalize gain, a match) are measured from the audio
 each time, never stored as a fixed number.
+A clip's speed works like a tape: faster is higher. The clip plays its audio resampled once per speed
+change (`engine::change_speed`), and its trim counts in that resampled audio; the original stays with
+the clip, so speed 1 gives the clip back exactly. Generated sound changes speed through its settings.
 Sound the editor makes (tone, noise, blips) is stored as its settings, never as samples, and made again
 for a new length, loop length or sample rate.
 

@@ -13,11 +13,14 @@ mod session;
 
 pub use effects::{EQ_BANDS_HZ, Effect, EffectLane, EffectRange, Gain, LaneId, RangeId};
 pub use generate::{Generated, Generator, NoiseColor, Wave, color_name, played_hz, wave_name};
-pub use io::{ExportFormat, ExportSettings, ExportTarget, Written, export, load_source, resample};
+pub use io::{ExportFormat, ExportSettings, ExportTarget, Written, change_speed, export, load_source, resample};
 pub use mix::{
     Levels, Mixdown, clip_amp, edge_fades, fade_gain, mixdown, overlap_after, overlap_before, render, similarity,
 };
-pub use model::{ChannelMode, Clip, ClipId, Fade, FadeShape, Frames, GainPoint, Project, Source, Track, TrackId};
+pub use model::{
+    ChannelMode, Clip, ClipId, Fade, FadeShape, Frames, GainPoint, MAX_SPEED, MIN_SPEED, Project, Source, Sped, Track,
+    TrackId,
+};
 pub use project_file::{PROJECT_EXTENSION, open_project, save_project};
 pub use regions::{Region, RegionLane};
 pub use session::{Command, ExportPart, Exported, Session};

@@ -690,3 +690,42 @@ fn a_one_band_eq_opens_as_the_ten_bands() {
         "held to the ten bands' range"
     );
 }
+
+#[test]
+fn a_faster_clip_is_shorter_and_higher_and_keeps_its_speed() {
+    let dir = folder("speed");
+    let file = dir.join("audio/a.wav");
+    write_wav(&file, 200.0, 2.0);
+    let mut s = Session::default();
+    s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+    let track = s.project().tracks[0].id;
+    let source = Arc::new(load_source(&file).unwrap());
+    s.execute(Command::AddClip { track, source, start: 0 }).unwrap();
+    let clip = s.project().tracks[0].clips[0].id;
+    s.execute(Command::TrimClip { clip, start: 4000, end: 12_000 }).unwrap();
+    let crossings = |s: &Session| {
+        let [left, _] = render(s.project(), 4000, 4000);
+        left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count()
+    };
+    let before = crossings(&s);
+
+    s.execute(Command::SetClipSpeed { clip, speed: 2.0 }).unwrap();
+    let c = &s.project().tracks[0].clips[0];
+    assert_eq!((c.start, c.offset, c.len), (4000, 2000, 4000), "starts in place, plays the same part in half the time");
+    let after = crossings(&s);
+    assert!(before >= 99 && after.abs_diff(2 * before) <= 2, "an octave higher: {before} then {after}");
+
+    let saved = dir.join("speed.refrain");
+    save_project(s.project(), &saved, None).unwrap();
+    let (opened, _) = open_project(&saved).unwrap();
+    assert_same_sound(&s, &opened);
+
+    s.execute(Command::SetSampleRate { rate: 16_000 }).unwrap();
+    let c = &s.project().tracks[0].clips[0];
+    assert_eq!((c.speed(), c.start, c.len), (2.0, 8000, 8000));
+
+    s.execute(Command::SetSampleRate { rate: RATE }).unwrap();
+    s.execute(Command::SetClipSpeed { clip, speed: 1.0 }).unwrap();
+    let c = &s.project().tracks[0].clips[0];
+    assert_eq!((c.offset, c.len, c.sped.is_none()), (4000, 8000, true), "back to the trim it had");
+}

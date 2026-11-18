@@ -214,6 +214,16 @@ struct ClipFile {
     gain: Vec<GainPoint>,
     #[serde(default)]
     channels: ChannelMode,
+    #[serde(default = "normal_speed", skip_serializing_if = "is_normal_speed")]
+    speed: f64,
+}
+
+fn normal_speed() -> f64 {
+    1.0
+}
+
+fn is_normal_speed(speed: &f64) -> bool {
+    *speed == 1.0
 }
 
 /// `view` is stored with the project and handed back by [`open_project`] unchanged.
@@ -226,19 +236,20 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
     for track in &project.tracks {
         let mut clips = vec![];
         for clip in &track.clips {
-            let key = Arc::as_ptr(&clip.source) as usize;
+            let original = clip.original();
+            let key = Arc::as_ptr(original) as usize;
             let source = match index.get(&key) {
                 Some(&i) => i,
                 None => {
-                    let stored = match &clip.source.generated {
+                    let stored = match &original.generated {
                         Some(g) => SourceFile::Generated {
                             generator: g.generator,
                             first: g.first,
-                            frames: clip.source.frames(),
+                            frames: original.frames(),
                         },
                         None => {
-                            let file = project.file_of(&clip.source).ok_or_else(|| {
-                                Error::ProjectFile(format!("\"{}\" was not read from a file", clip.source.name))
+                            let file = project.file_of(original).ok_or_else(|| {
+                                Error::ProjectFile(format!("\"{}\" was not read from a file", original.name))
                             })?;
                             let file = std::path::absolute(file)?;
                             SourceFile::File(file.strip_prefix(dir).map(Path::to_path_buf).unwrap_or(file))
@@ -259,6 +270,7 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
                 crossfade_shape: clip.crossfade_shape,
                 gain: clip.gain.clone(),
                 channels: clip.channels,
+                speed: clip.speed(),
             });
         }
         tracks.push(TrackFile {
@@ -359,12 +371,14 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
         export: export_from_file(file.export, file.view.as_ref(), dir),
         ..Project::default()
     };
+    // Clips of one file at one speed share the converted audio, as they did before saving.
+    let mut sped: Vec<(usize, u64, Arc<Source>)> = vec![];
     for track in file.tracks {
         let id = TrackId(project.new_id());
         let mut clips = vec![];
         for clip in track.clips {
             let id = ClipId(project.new_id());
-            clips.push(clip_from_file(id, clip, &sources)?);
+            clips.push(clip_from_file(id, clip, &sources, &mut sped)?);
         }
         let gain_db = finite_db(track.gain_db)?;
         project.tracks.push(Track {
@@ -403,11 +417,38 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
     Ok((Session::open(project)?, file.view))
 }
 
-fn clip_from_file(id: ClipId, c: ClipFile, sources: &[Arc<Source>]) -> Result<Clip> {
+fn clip_from_file(
+    id: ClipId,
+    c: ClipFile,
+    sources: &[Arc<Source>],
+    made: &mut Vec<(usize, u64, Arc<Source>)>,
+) -> Result<Clip> {
     let bad = |what: &str| Error::ProjectFile(what.into());
-    let source = sources
+    let original = sources
         .get(c.source)
         .ok_or_else(|| bad("a clip refers to an audio file that is not listed"))?;
+    let (source, sped) = if c.speed == 1.0 {
+        (original.clone(), None)
+    } else {
+        if original.generated.is_some() {
+            return Err(bad("generated sound has a speed; it can only change through its settings"));
+        }
+        let found = made.iter().find(|(i, bits, _)| *i == c.source && *bits == c.speed.to_bits());
+        let source = match found {
+            Some((_, _, s)) => s.clone(),
+            None => {
+                let s = Arc::new(crate::change_speed(original, c.speed)?);
+                made.push((c.source, c.speed.to_bits(), s.clone()));
+                s
+            }
+        };
+        let sped = crate::Sped {
+            speed: c.speed,
+            original: original.clone(),
+        };
+        (source, Some(sped))
+    };
+    let source = &source;
     if c.len <= 0 {
         return Err(bad("a clip has no length"));
     }
@@ -441,6 +482,7 @@ fn clip_from_file(id: ClipId, c: ClipFile, sources: &[Arc<Source>]) -> Result<Cl
         crossfade_shape: c.crossfade_shape,
         gain,
         channels: c.channels,
+        sped,
     })
 }
 

@@ -455,10 +455,56 @@ impl Editor {
                     ui.close();
                 }
                 ui.separator();
+                self.speed_menu_ui(ui, clip);
+                ui.separator();
                 self.channels_menu_ui(ui, menu);
             }
             Menu::Track(_) => self.channels_menu_ui(ui, menu),
             Menu::Lane(lane, range) => self.lane_menu_ui(ui, lane, range),
+        }
+    }
+
+    /// Tape speed: semitones and percent are two views of one number, as pitch and speed move together.
+    fn speed_menu_ui(&mut self, ui: &mut egui::Ui, id: ClipId) {
+        let Some((_, clip)) = self.session.project().clip(id) else { return };
+        let current = clip.speed();
+        if clip.source.generated.is_some() {
+            ui.weak("Generated sound: change its pitch and length in its settings");
+            return;
+        }
+        ui.label("Speed (the pitch follows)");
+        let speed = match self.speed_edit {
+            Some((clip, speed)) if clip == id => speed,
+            _ => current,
+        };
+        let mut semitones = (12.0 * speed.log2()) as f32;
+        let mut percent = (speed * 100.0) as f32;
+        let (max, min) = (refrain_engine::MAX_SPEED as f32, refrain_engine::MIN_SPEED as f32);
+        let (by_semitones, done_semitones) = crate::effect_menu::number_rows(
+            ui,
+            [("Semitones", &mut semitones, -24.0..=24.0, 0.05, " st", 1)],
+        );
+        let (by_percent, done_percent) = crate::effect_menu::number_rows(
+            ui,
+            [("Speed", &mut percent, min * 100.0..=max * 100.0, 0.25, " %", 1)],
+        );
+        if by_semitones {
+            self.speed_edit = Some((id, 2f64.powf(f64::from(semitones) / 12.0)));
+        } else if by_percent {
+            self.speed_edit = Some((id, f64::from(percent) / 100.0));
+        }
+        if (done_semitones || done_percent)
+            && let Some((clip, speed)) = self.speed_edit.take()
+            && speed != current
+        {
+            self.run(Command::SetClipSpeed { clip, speed });
+        }
+        if ui
+            .add_enabled(current != 1.0, egui::Button::new("As recorded (100 %)"))
+            .clicked()
+        {
+            self.run(Command::SetClipSpeed { clip: id, speed: 1.0 });
+            ui.close();
         }
     }
 

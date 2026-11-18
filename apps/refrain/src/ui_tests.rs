@@ -1071,3 +1071,26 @@ fn the_format_of_an_export_lane_is_picked_in_its_menu() {
         "the menu stays open for the next setting"
     );
 }
+
+/// Clicking a number field in a clip's menu closed the menu, so a value could only be dragged, never typed.
+#[test]
+fn a_clip_speed_is_typed_into_its_menu() {
+    let mut h = harness_sized(overlapping(), 500.0);
+    right_click(&mut h, 250.0, 130.0);
+    h.get_by_value("0.0 st").click();
+    h.run();
+    let select_all = Event::Key {
+        key: egui::Key::A,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    };
+    h.event(select_all);
+    h.event(Event::Text("12".into()));
+    h.key_press(egui::Key::Enter);
+    h.run();
+    save(&mut h, "clip_speed_menu");
+    let clip = &h.state().session.project().tracks[0].clips[0];
+    assert_eq!((clip.speed(), clip.len), (2.0, 3 * RATE as i64 / 2), "an octave up, half as long");
+}

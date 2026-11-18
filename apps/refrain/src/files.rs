@@ -87,6 +87,7 @@ impl Editor {
         self.region_menu = None;
         self.region_name = None;
         self.effect_edit = None;
+        self.speed_edit = None;
         self.fade_edit = None;
         self.gain_edit = None;
         self.name_edit = None;

@@ -141,7 +141,7 @@ impl Editor {
         painter.text(
             title,
             Align2::LEFT_TOP,
-            channel_label(clip),
+            clip_label(clip),
             FontId::proportional(11.0),
             Color32::WHITE,
         );
@@ -415,18 +415,32 @@ fn mixed(source: &Source) -> Vec<f32> {
     }
 }
 
-/// The clip's name, and which channels it plays when that is not simply stereo.
-fn channel_label(clip: &Clip) -> String {
-    let name = &clip.source.name;
-    if clip.source.channels.len() < 2 {
-        return name.clone();
+/// The clip's name, its speed when changed, and which channels it plays when that is not simply stereo.
+fn clip_label(clip: &Clip) -> String {
+    let mut label = clip.source.name.clone();
+    if clip.sped.is_some() {
+        label += &format!(" · {}", speed_text(clip.speed()));
     }
-    match clip.channels {
-        ChannelMode::Stereo => name.clone(),
-        ChannelMode::Mono => format!("{name} · mono"),
-        ChannelMode::Left => format!("{name} · left only"),
-        ChannelMode::Right => format!("{name} · right only"),
+    if clip.source.channels.len() > 1 {
+        label += match clip.channels {
+            ChannelMode::Stereo => "",
+            ChannelMode::Mono => " · mono",
+            ChannelMode::Left => " · left only",
+            ChannelMode::Right => " · right only",
+        };
     }
+    label
+}
+
+/// "112 % (+2 st)": the speed, and how far that moves the pitch.
+pub(crate) fn speed_text(speed: f64) -> String {
+    let semitones = 12.0 * speed.log2();
+    let pitch = if (semitones - semitones.round()).abs() < 0.05 {
+        format!("{:+.0}", semitones.round())
+    } else {
+        format!("{semitones:+.1}")
+    };
+    format!("{:.0} % ({pitch} st)", speed * 100.0)
 }
 
 /// A small wave before a generated clip's title. Returns where the title goes after it.

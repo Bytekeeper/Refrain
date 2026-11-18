@@ -56,7 +56,11 @@ impl Editor {
             self.selected_range = None;
         }
         if let Some(menu) = self.menu
-            && response.context_menu(|ui| self.menu_ui(ui, menu)).is_none()
+            // A click to type into a number field must not close it; the buttons close it themselves.
+            && egui::Popup::context_menu(&response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| self.menu_ui(ui, menu))
+                .is_none()
         {
             self.menu = None;
         }

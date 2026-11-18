@@ -86,6 +86,8 @@ struct Editor {
         Option<refrain_engine::RangeId>,
         refrain_engine::Effect,
     )>,
+    /// A clip's speed being dragged in its menu, not yet in the project.
+    speed_edit: Option<(ClipId, f64)>,
     /// A range's fade-in and fade-out being dragged in its menu, in frames, not yet in the project.
     fade_edit: Option<(refrain_engine::RangeId, Frames, Frames)>,
     /// The width of the track lanes in the last frame, for zooming to fit.
@@ -167,6 +169,7 @@ impl Default for Editor {
             region_name: None,
             folded: std::collections::HashSet::new(),
             effect_edit: None,
+            speed_edit: None,
             fade_edit: None,
             gain_edit: None,
             name_edit: None,
