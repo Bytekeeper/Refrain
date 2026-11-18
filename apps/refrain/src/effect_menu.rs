@@ -1,7 +1,7 @@
 //! The menu of an effect lane: the settings of one range or of all, fades, order, removing; and the FX menu.
 
 use egui::Ui;
-use refrain_engine::{Command, Effect, EffectRange, EqShape, Frames, LaneId, RangeId, TrackId};
+use refrain_engine::{Command, Effect, EffectRange, Frames, LaneId, RangeId, TrackId};
 
 use crate::Editor;
 
@@ -150,6 +150,20 @@ impl Editor {
     }
 }
 
+/// A band's gain, with the half dB only where there is one.
+pub(crate) fn db_text(db: f32) -> String {
+    if db == 0.0 {
+        "0".into()
+    } else if db.fract() == 0.0 {
+        format!("{db:+.0}")
+    } else {
+        format!("{db:+.1}")
+    }
+}
+
+/// The bands of `EQ_BANDS_HZ` as a graphic EQ names them.
+pub(crate) const EQ_BAND_NAMES: [&str; 10] = ["31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
+
 pub(crate) type NumberRow<'a> = (
     &'static str,
     &'a mut f32,
@@ -249,36 +263,34 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
             let flipped = reversed_box(ui, reversed, "The room comes before the sound and swells into it");
             (changed || flipped, done || flipped)
         }
-        Effect::Eq {
-            shape,
-            hz,
-            gain_db,
-            octaves,
-        } => {
-            let mut picked = false;
+        Effect::Eq { gains_db } => {
+            let (mut changed, mut done) = (false, false);
+            ui.spacing_mut().slider_width = 110.0;
             ui.horizontal(|ui| {
-                for (value, text, hint) in [
-                    (EqShape::Bell, "Bell", "Around the frequency"),
-                    (EqShape::LowShelf, "Low shelf", "Everything below the frequency"),
-                    (EqShape::HighShelf, "High shelf", "Everything above the frequency"),
-                ] {
-                    picked |= ui.radio_value(shape, value, text).on_hover_text(hint).changed();
+                for (db, name) in gains_db.iter_mut().zip(EQ_BAND_NAMES) {
+                    let column = egui::Layout::top_down(egui::Align::Center);
+                    ui.allocate_ui_with_layout(egui::vec2(30.0, 170.0), column, |ui| {
+                        ui.label(db_text(*db));
+                        let response = ui
+                            .add(
+                                egui::Slider::new(db, -12.0..=12.0)
+                                    .vertical()
+                                    .step_by(0.5)
+                                    .show_value(false),
+                            )
+                            .on_hover_text("Double-click: back to 0 dB");
+                        let label = ui.label(name);
+                        let response = response.labelled_by(label.id);
+                        if response.double_clicked() {
+                            *db = 0.0;
+                            (changed, done) = (true, true);
+                        }
+                        changed |= response.changed();
+                        done |= response.drag_stopped() || (response.changed() && !response.dragged());
+                    });
                 }
             });
-            // Each pixel dragged moves the frequency by 1 %, so low and high frequencies are equally easy to set.
-            let speed = f64::from(hz.max(10.0) * 0.01);
-            let (mut changed, mut done) = number_rows(
-                ui,
-                [
-                    ("Frequency", hz, 10.0..=20_000.0, speed, " Hz", 0),
-                    ("Change by", gain_db, -24.0..=24.0, 0.1, " dB", 1),
-                ],
-            );
-            if *shape == EqShape::Bell {
-                let (c, d) = number_rows(ui, [("Width", octaves, 0.1..=4.0, 0.01, " octaves", 2)]);
-                (changed, done) = (changed || c, done || d);
-            }
-            (changed || picked, done || picked)
+            (changed, done)
         }
         Effect::Limiter { ceiling_db, release_ms } => number_rows(
             ui,

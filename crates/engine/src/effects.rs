@@ -41,26 +41,17 @@ pub enum Effect {
         #[serde(default)]
         reversed: bool,
     },
-    /// Raises or lowers the sound around `hz` by `gain_db`: a bell `octaves` wide, or a shelf that moves
-    /// everything below (low) or above (high) it.
-    Eq {
-        shape: EqShape,
-        hz: f32,
-        gain_db: f32,
-        octaves: f32,
-    },
+    /// Raises or lowers each of the octave bands in [`EQ_BANDS_HZ`] by its gain.
+    Eq { gains_db: [f32; 10] },
     /// Keeps every sample at or below `ceiling_db`: turns the sound down smoothly just before a peak that
     /// would pass it, and back up over `release_ms`.
     Limiter { ceiling_db: f32, release_ms: f32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EqShape {
-    Bell,
-    LowShelf,
-    HighShelf,
-}
+/// The centres of the EQ's bands, an octave apart, as on a classic graphic EQ.
+pub const EQ_BANDS_HZ: [f32; 10] = [
+    31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16_000.0,
+];
 
 /// How far ahead the limiter starts turning down for a peak: short enough to keep the attack of drums and
 /// clicks, long enough that the turn down itself is not heard as a click.
@@ -91,12 +82,7 @@ impl Effect {
                 level_db: -12.0,
                 reversed: false,
             },
-            Effect::Eq {
-                shape: EqShape::Bell,
-                hz: 1000.0,
-                gain_db: -3.0,
-                octaves: 1.0,
-            },
+            Effect::Eq { gains_db: [0.0; 10] },
             Effect::Limiter {
                 ceiling_db: -1.0,
                 release_ms: 100.0,
@@ -220,12 +206,13 @@ impl Effect {
                 .iter()
                 .map(|&q| Biquad::pass(*self, hz, q, rate))
                 .collect(),
-            Effect::Eq {
-                shape,
-                hz,
-                gain_db,
-                octaves,
-            } => vec![Biquad::eq(shape, hz, gain_db, octaves, rate)],
+            // A band at 0 dB changes nothing, and one above what the rate can hold cannot be heard.
+            Effect::Eq { gains_db } => EQ_BANDS_HZ
+                .iter()
+                .zip(gains_db)
+                .filter(|&(&hz, db)| db != 0.0 && hz < rate as f32 * 0.45)
+                .map(|(&hz, db)| Biquad::bell(hz, db, 1.0, rate))
+                .collect(),
             _ => vec![],
         }
     }
@@ -243,14 +230,11 @@ impl Effect {
             Effect::Loudness { peak_db, .. } if !within(peak_db, -60.0..=20.0) => {
                 "the peak limit must be between -60 and +20 dB"
             }
-            Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. } | Effect::Eq { hz, .. }
-                if !within(hz, 10.0..=40_000.0) =>
-            {
+            Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. } if !within(hz, 10.0..=40_000.0) => {
                 "a filter's frequency must be between 10 Hz and 40 kHz"
             }
-            Effect::Eq { gain_db, .. } if !within(gain_db, -24.0..=24.0) => "an EQ raises or lowers by at most 24 dB",
-            Effect::Eq { octaves, .. } if !within(octaves, 0.1..=4.0) => {
-                "a bell must be between 0.1 and 4 octaves wide"
+            Effect::Eq { gains_db } if !gains_db.iter().all(|&db| within(db, -12.0..=12.0)) => {
+                "each EQ band raises or lowers by at most 12 dB"
             }
             Effect::Limiter { ceiling_db, .. } if !within(ceiling_db, -40.0..=0.0) => {
                 "a limiter's ceiling must be between -40 and 0 dB"
@@ -694,41 +678,16 @@ impl Biquad {
         Biquad::normalized(b, [1.0 + alpha, -2.0 * cos, 1.0 - alpha])
     }
 
-    /// A bell or shelf; shelves with the cookbook's steepest slope that does not overshoot.
-    fn eq(shape: EqShape, hz: f32, gain_db: f32, octaves: f32, rate: u32) -> Biquad {
+    /// Raises or lowers the sound around `hz` by `gain_db`, in a bell `octaves` wide.
+    fn bell(hz: f32, gain_db: f32, octaves: f32, rate: u32) -> Biquad {
         let w0 = angle(hz, rate);
         let (sin, cos) = w0.sin_cos();
         let a = 10f64.powf(f64::from(gain_db) / 40.0);
-        match shape {
-            EqShape::Bell => {
-                let alpha = sin * (std::f64::consts::LN_2 / 2.0 * f64::from(octaves) * w0 / sin).sinh();
-                Biquad::normalized(
-                    [1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a],
-                    [1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a],
-                )
-            }
-            EqShape::LowShelf | EqShape::HighShelf => {
-                let k = 2.0 * a.sqrt() * sin / std::f64::consts::SQRT_2;
-                // A high shelf is the low shelf mirrored in frequency: the cosine changes sign.
-                let (c, s) = if shape == EqShape::LowShelf {
-                    (cos, 1.0)
-                } else {
-                    (-cos, -1.0)
-                };
-                Biquad::normalized(
-                    [
-                        a * ((a + 1.0) - (a - 1.0) * c + k),
-                        s * 2.0 * a * ((a - 1.0) - (a + 1.0) * c),
-                        a * ((a + 1.0) - (a - 1.0) * c - k),
-                    ],
-                    [
-                        (a + 1.0) + (a - 1.0) * c + k,
-                        s * -2.0 * ((a - 1.0) + (a + 1.0) * c),
-                        (a + 1.0) + (a - 1.0) * c - k,
-                    ],
-                )
-            }
-        }
+        let alpha = sin * (std::f64::consts::LN_2 / 2.0 * f64::from(octaves) * w0 / sin).sinh();
+        Biquad::normalized(
+            [1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a],
+            [1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a],
+        )
     }
 
     fn normalized(b: [f64; 3], [a0, a1, a2]: [f64; 3]) -> Biquad {
@@ -1109,23 +1068,14 @@ mod tests {
     }
 
     #[test]
-    fn eq_raises_a_bell_and_a_shelf_and_leaves_the_rest() {
-        let eq = |shape, hz| Effect::Eq {
-            shape,
-            hz,
-            gain_db: 6.0,
-            octaves: 1.0,
-        };
-        let db = |s: &Session| 20.0 * (level_after(s) / 0.5).log10();
-        let near = |got: f32, want: f32| (got - want).abs() < 0.3;
-        // The tone at the bell's centre is raised by the gain; two octaves off, hardly at all.
-        assert!(near(db(&tone_session(1000.0, eq(EqShape::Bell, 1000.0))), 6.0));
-        assert!(near(db(&tone_session(4000.0, eq(EqShape::Bell, 1000.0))), 0.0));
-        // A shelf moves everything on its side, the far side stays.
-        assert!(near(db(&tone_session(50.0, eq(EqShape::LowShelf, 500.0))), 6.0));
-        assert!(near(db(&tone_session(5000.0, eq(EqShape::LowShelf, 500.0))), 0.0));
-        assert!(near(db(&tone_session(10_000.0, eq(EqShape::HighShelf, 1000.0))), 6.0));
-        assert!(near(db(&tone_session(100.0, eq(EqShape::HighShelf, 1000.0))), 0.0));
+    fn an_eq_band_raises_its_octave_and_leaves_the_others() {
+        let mut gains_db = [0.0; 10];
+        gains_db[5] = 6.0;
+        let db = |hz| 20.0 * (level_after(&tone_session(hz, Effect::Eq { gains_db })) / 0.5).log10();
+        // The 1 kHz band; two octaves away hardly anything.
+        assert!((db(1000.0) - 6.0).abs() < 0.1, "{}", db(1000.0));
+        assert!(db(4000.0).abs() < 0.3, "{}", db(4000.0));
+        assert!(db(250.0).abs() < 0.3, "{}", db(250.0));
     }
 
     #[test]

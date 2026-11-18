@@ -1,7 +1,7 @@
 //! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
-use refrain_engine::{Command, Effect, EffectLane, EffectRange, EqShape, Frames, Gain, LaneId, Project, RangeId};
+use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, Gain, LaneId, Project, RangeId};
 
 use crate::{Editor, HANDLE, HEADER_W};
 
@@ -601,13 +601,18 @@ impl Editor {
                     (Effect::Reverb { seconds, reversed, .. }, _) => {
                         format!("{seconds:.1} s room{}", if reversed { ", reversed" } else { "" })
                     }
-                    (Effect::Eq { shape, hz, gain_db, .. }, _) => {
-                        let shape = match shape {
-                            EqShape::Bell => "at ",
-                            EqShape::LowShelf => "below ",
-                            EqShape::HighShelf => "above ",
-                        };
-                        format!("{gain_db:+.1} dB {shape}{}", hz_text(hz))
+                    (Effect::Eq { gains_db }, _) => {
+                        let bands: Vec<String> = gains_db
+                            .iter()
+                            .zip(crate::effect_menu::EQ_BAND_NAMES)
+                            .filter(|(db, _)| **db != 0.0)
+                            .map(|(db, name)| format!("{name} {}", crate::effect_menu::db_text(*db)))
+                            .collect();
+                        if bands.is_empty() {
+                            "flat".into()
+                        } else {
+                            bands.join("  ")
+                        }
                     }
                     (Effect::Limiter { ceiling_db, .. }, _) => format!("at most {ceiling_db:.1} dB"),
                 };
