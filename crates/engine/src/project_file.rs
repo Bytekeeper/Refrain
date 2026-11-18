@@ -12,8 +12,9 @@ use crate::effects::default_fade;
 use crate::io::write_atomic;
 use crate::session::check_db;
 use crate::{
-    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, ExportTarget, Fade, FadeShape, Frames,
-    GainPoint, Generator, LaneId, Project, RangeId, Result, Session, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, ExportSettings, ExportTarget, Fade, FadeShape,
+    Frames, GainPoint, Generator, LaneId, Project, RangeId, Region, RegionLane, Result, Session, Source, Track,
+    TrackId,
 };
 
 pub const PROJECT_EXTENSION: &str = "refrain";
@@ -55,10 +56,27 @@ struct ProjectFile {
     /// the export target was part of the project; the window kept it in `view` then.
     #[serde(default)]
     export: Option<ExportTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    region_lanes: Vec<RegionLaneFile>,
     /// Settings of the program that edits the project, such as zoom. Stored as they come; read only for an
     /// export target from older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<serde_json::Value>,
+}
+
+/// The folder is relative to the project file's folder when it lies inside it.
+#[derive(Serialize, Deserialize)]
+struct RegionLaneFile {
+    folder: Option<PathBuf>,
+    settings: ExportSettings,
+    regions: Vec<RegionFile>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RegionFile {
+    start: Frames,
+    end: Frames,
+    name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -251,6 +269,27 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
             effects: lanes_to_file(&track.effects),
         });
     }
+    let relative = |f: &PathBuf| {
+        let f = std::path::absolute(f).unwrap_or_else(|_| f.clone());
+        f.strip_prefix(dir).map(Path::to_path_buf).unwrap_or(f)
+    };
+    let region_lanes = project
+        .region_lanes
+        .iter()
+        .map(|lane| RegionLaneFile {
+            folder: lane.folder.as_ref().map(relative),
+            settings: lane.settings.clone(),
+            regions: lane
+                .regions
+                .iter()
+                .map(|r| RegionFile {
+                    start: r.start,
+                    end: r.end,
+                    name: r.name.clone(),
+                })
+                .collect(),
+        })
+        .collect();
     let file = ProjectFile {
         version: VERSION,
         sample_rate: project.sample_rate,
@@ -259,12 +298,10 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
         loop_end: project.loop_end,
         mix_effects: lanes_to_file(&project.mix_effects),
         export: Some(ExportTarget {
-            file: project.export.file.as_ref().map(|f| {
-                let f = std::path::absolute(f).unwrap_or_else(|_| f.clone());
-                f.strip_prefix(dir).map(Path::to_path_buf).unwrap_or(f)
-            }),
+            file: project.export.file.as_ref().map(relative),
             settings: project.export.settings.clone(),
         }),
+        region_lanes,
         view: view.cloned(),
     };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|e| Error::ProjectFile(e.to_string()))?;
@@ -342,6 +379,25 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
         }
     }
     project.mix_effects = lanes_from_file(&mut project, file.mix_effects, header.version)?;
+    for lane in file.region_lanes {
+        let id = LaneId(project.new_id());
+        let mut regions = vec![];
+        for r in lane.regions {
+            let id = RangeId(project.new_id());
+            regions.push(Region {
+                id,
+                start: r.start,
+                end: r.end,
+                name: r.name,
+            });
+        }
+        project.region_lanes.push(RegionLane {
+            id,
+            folder: lane.folder.map(|f| dir.join(f)),
+            settings: lane.settings,
+            regions,
+        });
+    }
     Ok((Session::open(project)?, file.view))
 }
 

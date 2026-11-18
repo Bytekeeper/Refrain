@@ -3,15 +3,14 @@
 use std::path::Path;
 
 use egui::{Align2, Order, Ui, vec2};
-use refrain_engine::{Command, ExportFormat, ExportSettings, ExportTarget};
+use refrain_engine::{Command, ExportFormat, ExportPart, ExportSettings};
 
 use crate::{Editor, RATES, khz};
 
 const KBPS: [u32; 6] = [96, 128, 160, 192, 256, 320];
 
 /// For the status line and the tooltip, e.g. "Ogg Vorbis, 160 kbit/s, mono, 48 kHz".
-fn summary(target: &ExportTarget, rate: u32) -> String {
-    let s = &target.settings;
+fn summary(s: &ExportSettings, rate: u32) -> String {
     let quality = if s.format.is_lossy() {
         format!("{} kbit/s", s.kbps)
     } else {
@@ -40,6 +39,74 @@ fn fit_bits(settings: &mut ExportSettings) {
     }
 }
 
+/// The rows of a two-column grid that set how audio is written. `salt` keeps the boxes of two grids apart.
+pub(crate) fn settings_rows(ui: &mut Ui, salt: &str, s: &mut ExportSettings, project_rate: u32) {
+    let old = s.format;
+    let label = ui.label("Format");
+    egui::ComboBox::from_id_salt((salt, "format"))
+        .selected_text(s.format.name())
+        .show_ui(ui, |ui| {
+            for format in ExportFormat::ALL {
+                ui.selectable_value(&mut s.format, format, format.name());
+            }
+        })
+        .response
+        .labelled_by(label.id);
+    ui.end_row();
+    if s.format.is_lossy() {
+        let label = ui.label("Bit rate");
+        egui::ComboBox::from_id_salt((salt, "kbps"))
+            .selected_text(format!("{} kbit/s", s.kbps))
+            .show_ui(ui, |ui| {
+                for kbps in KBPS {
+                    ui.selectable_value(&mut s.kbps, kbps, format!("{kbps} kbit/s"));
+                }
+            })
+            .response
+            .labelled_by(label.id);
+    } else {
+        let label = ui.label("Bit depth");
+        let depths: &[u16] = if s.format == ExportFormat::Wav {
+            &[16, 24, 32]
+        } else {
+            &[16, 24]
+        };
+        egui::ComboBox::from_id_salt((salt, "bits"))
+            .selected_text(depth_name(s.bits))
+            .show_ui(ui, |ui| {
+                for &bits in depths {
+                    ui.selectable_value(&mut s.bits, bits, depth_name(bits));
+                }
+            })
+            .response
+            .labelled_by(label.id);
+    }
+    ui.end_row();
+    ui.label("Channels");
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut s.mono, false, "Stereo");
+        ui.radio_value(&mut s.mono, true, "Mono")
+            .on_hover_text("Left and right mixed into one channel, as game engines want for sounds placed in space");
+    });
+    ui.end_row();
+    let label = ui.label("Sample rate");
+    let project_choice = format!("Project ({})", khz(project_rate));
+    egui::ComboBox::from_id_salt((salt, "rate"))
+        .selected_text(s.sample_rate.map_or(project_choice.clone(), khz))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut s.sample_rate, None, project_choice);
+            for rate in RATES {
+                ui.selectable_value(&mut s.sample_rate, Some(rate), khz(rate));
+            }
+        })
+        .response
+        .labelled_by(label.id);
+    ui.end_row();
+    if s.format != old {
+        fit_bits(s);
+    }
+}
+
 impl Editor {
     pub(crate) fn export_panel(&mut self, ctx: &egui::Context) {
         if !self.export_open {
@@ -65,72 +132,11 @@ impl Editor {
         let old = project.export.clone();
         let mut target = old.clone();
         let mut browse = false;
-        let s = &mut target.settings;
         egui::Grid::new("export settings")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                let label = ui.label("Format");
-                egui::ComboBox::from_id_salt("export format")
-                    .selected_text(s.format.name())
-                    .show_ui(ui, |ui| {
-                        for format in ExportFormat::ALL {
-                            ui.selectable_value(&mut s.format, format, format.name());
-                        }
-                    })
-                    .response
-                    .labelled_by(label.id);
-                ui.end_row();
-                if s.format.is_lossy() {
-                    let label = ui.label("Bit rate");
-                    egui::ComboBox::from_id_salt("export kbps")
-                        .selected_text(format!("{} kbit/s", s.kbps))
-                        .show_ui(ui, |ui| {
-                            for kbps in KBPS {
-                                ui.selectable_value(&mut s.kbps, kbps, format!("{kbps} kbit/s"));
-                            }
-                        })
-                        .response
-                        .labelled_by(label.id);
-                } else {
-                    let label = ui.label("Bit depth");
-                    let depths: &[u16] = if s.format == ExportFormat::Wav {
-                        &[16, 24, 32]
-                    } else {
-                        &[16, 24]
-                    };
-                    egui::ComboBox::from_id_salt("export bits")
-                        .selected_text(depth_name(s.bits))
-                        .show_ui(ui, |ui| {
-                            for &bits in depths {
-                                ui.selectable_value(&mut s.bits, bits, depth_name(bits));
-                            }
-                        })
-                        .response
-                        .labelled_by(label.id);
-                }
-                ui.end_row();
-                ui.label("Channels");
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut s.mono, false, "Stereo");
-                    ui.radio_value(&mut s.mono, true, "Mono").on_hover_text(
-                        "Left and right mixed into one channel, as game engines want for sounds placed in space",
-                    );
-                });
-                ui.end_row();
-                let label = ui.label("Sample rate");
-                let project_choice = format!("Project ({})", khz(project_rate));
-                egui::ComboBox::from_id_salt("export rate")
-                    .selected_text(s.sample_rate.map_or(project_choice.clone(), khz))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut s.sample_rate, None, project_choice);
-                        for rate in RATES {
-                            ui.selectable_value(&mut s.sample_rate, Some(rate), khz(rate));
-                        }
-                    })
-                    .response
-                    .labelled_by(label.id);
-                ui.end_row();
+                settings_rows(ui, "export", &mut target.settings, project_rate);
                 ui.label("File");
                 ui.horizontal(|ui| {
                     let name = target.file.as_deref().and_then(Path::file_name);
@@ -148,11 +154,10 @@ impl Editor {
                 ui.end_row();
             });
 
-        if target.settings.format != old.settings.format {
-            fit_bits(&mut target.settings);
-            if let Some(file) = &mut target.file {
-                file.set_extension(target.settings.format.extension());
-            }
+        if target.settings.format != old.settings.format
+            && let Some(file) = &mut target.file
+        {
+            file.set_extension(target.settings.format.extension());
         }
         let format = target.settings.format;
         let wanted = target.settings.sample_rate.unwrap_or(project_rate);
@@ -186,17 +191,25 @@ impl Editor {
         if browse {
             self.browse_export_file();
         }
+        ui.separator();
+        ui.label("Regions export named parts of the mix, each to a file of its own, into the folder of their lane.");
+        if ui
+            .button("Add region lane")
+            .on_hover_text("A row above the tracks: drag in it to mark a region")
+            .clicked()
+        {
+            self.run(Command::AddRegionLane);
+        }
         ui.add_space(4.0);
-        let ready = can_export && self.session.project().export.file.is_some();
+        let ready = can_export && !self.export_parts().is_empty();
         if ui
             .add_enabled(ready, egui::Button::new("Export"))
-            .on_hover_text("Ctrl+E exports again with these settings, also when this panel is closed")
+            .on_hover_text(self.export_tooltip())
             .clicked()
         {
             self.export_again();
         }
     }
-
     fn browse_export_file(&mut self) {
         let mut target = self.session.project().export.clone();
         let format = target.settings.format;
@@ -236,68 +249,122 @@ impl Editor {
         self.run(Command::SetExportTarget { target });
     }
 
-    /// The toolbar button and Ctrl+E: writes the target again, or opens the panel when there is none.
+    /// What "export again" writes: the mix when it has a file, and every region whose lane has a folder.
+    fn export_parts(&self) -> Vec<ExportPart> {
+        let project = self.session.project();
+        let mix = project.export.file.is_some().then_some(ExportPart::Mix);
+        let lanes = project.region_lanes.iter().filter(|l| l.folder.is_some());
+        let regions = lanes.flat_map(|l| &l.regions).map(|r| ExportPart::Region(r.id));
+        mix.into_iter().chain(regions).collect()
+    }
+
+    /// The toolbar button and Ctrl+E: writes everything again, or opens the panel when nothing has a place yet.
     pub(crate) fn export_again(&mut self) {
-        if self.session.project().export.file.is_some() {
-            self.write_export();
-        } else {
+        let parts = self.export_parts();
+        if parts.is_empty() {
             self.export_open = true;
+        } else {
+            self.write_export(&parts);
         }
     }
 
     pub(crate) fn export_tooltip(&self) -> String {
         let project = self.session.project();
         let target = &project.export;
-        match &target.file {
-            Some(file) => {
+        let regions = match self.export_parts().len() - usize::from(target.file.is_some()) {
+            0 => String::new(),
+            1 => "1 region".into(),
+            n => format!("{n} regions"),
+        };
+        match (&target.file, regions.is_empty()) {
+            (Some(file), _) => {
                 let wanted = target.settings.sample_rate.unwrap_or(project.sample_rate);
                 let rate = target.settings.format.rate_for(wanted);
-                format!("Export to {} ({}). Ctrl+E", file.display(), summary(target, rate))
+                let and = if regions.is_empty() {
+                    String::new()
+                } else {
+                    format!(", and {regions}")
+                };
+                format!(
+                    "Export to {} ({}){and}. Ctrl+E",
+                    file.display(),
+                    summary(&target.settings, rate)
+                )
             }
-            None => "Choose where and how to export. Ctrl+E".into(),
+            (None, false) => format!("Export {regions}. Ctrl+E"),
+            (None, true) => "Choose where and how to export. Ctrl+E".into(),
         }
     }
 
-    /// Writes the project's export target. Audio the project uses is kept in this window's originals folder
-    /// first, so the clips keep their audio and every later export starts from the original again.
-    pub(crate) fn write_export(&mut self) {
+    /// Writes `parts`. Audio the project uses is kept in this window's originals folder first, so the clips keep
+    /// their audio and every later export starts from the original again.
+    pub(crate) fn write_export(&mut self, parts: &[ExportPart]) {
         let recovery = self.recovery.as_ref();
         let keep_as = |name: &str| recovery.map(|r| r.kept_path(name));
-        match self.session.export(keep_as) {
-            Ok(done) => {
-                let target = &self.session.project().export;
-                let file = target.file.as_deref().map(Path::display).map(|p| p.to_string());
-                let kept = if done.kept_original {
-                    " The project keeps using the original audio."
-                } else {
-                    ""
-                };
-                let written = done.written;
-                let text = format!(
-                    "Exported {} ({}).{kept}",
-                    file.unwrap_or_default(),
-                    summary(target, written.rate)
-                );
-                if written.over == 0 {
-                    self.info(text);
-                    return;
-                }
-                let float = target.settings.format == ExportFormat::Wav && target.settings.bits == 32;
-                let fate = if float {
-                    "stay over in the file, and most game engines cut them off"
-                } else {
-                    "were cut off"
-                };
-                let warning = format!(
-                    "{text} But {} samples were over 0 dB and {fate}: the loudest {:+.1} dB at {}. \
-                     Lower a volume, or the target of a normalize. The Mix level row shows where.",
-                    written.over,
-                    20.0 * written.peak.log10(),
-                    self.time_text(written.peak_at)
-                );
-                self.fail(warning);
+        let done = match self.session.export(parts, keep_as) {
+            Ok(done) => done,
+            Err(e) => {
+                self.fail(format!("Not exported: {e}"));
+                return;
             }
-            Err(e) => self.fail(format!("Not exported: {e}")),
+        };
+        let text = match done.as_slice() {
+            [one] => {
+                let settings = self.settings_of(parts.first());
+                format!(
+                    "Exported {} ({}).",
+                    one.file.display(),
+                    summary(&settings, one.written.rate)
+                )
+            }
+            many => format!("Exported {} files.", many.len()),
+        };
+        let kept = if done.iter().any(|d| d.kept_original) {
+            " The project keeps using the original audio."
+        } else {
+            ""
+        };
+        let over: Vec<(&refrain_engine::Exported, &ExportPart)> =
+            done.iter().zip(parts).filter(|(d, _)| d.written.over > 0).collect();
+        if over.is_empty() {
+            self.info(format!("{text}{kept}"));
+            return;
         }
+        let float = |p: &ExportPart| {
+            let s = self.settings_of(Some(p));
+            s.format == ExportFormat::Wav && s.bits == 32
+        };
+        let fate = if over.iter().all(|(_, p)| float(p)) {
+            "stay over in the file, and most game engines cut them off"
+        } else {
+            "were cut off"
+        };
+        let loudest: Vec<String> = over
+            .iter()
+            .map(|(d, _)| {
+                let name = d
+                    .file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let db = 20.0 * d.written.peak.log10();
+                format!("{name} {db:+.1} dB at {}", self.time_text(d.written.peak_at))
+            })
+            .collect();
+        self.fail(format!(
+            "{text}{kept} But samples went over 0 dB and {fate}; the loudest: {}. \
+             Lower a volume, or the target of a normalize. The Mix level row shows where.",
+            loudest.join(", ")
+        ));
+    }
+
+    /// The settings a part is written with.
+    fn settings_of(&self, part: Option<&ExportPart>) -> ExportSettings {
+        let project = self.session.project();
+        match part {
+            Some(ExportPart::Region(id)) => project.region(*id).map(|(l, _)| l.settings.clone()),
+            _ => None,
+        }
+        .unwrap_or_else(|| project.export.settings.clone())
     }
 }

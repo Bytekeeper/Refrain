@@ -268,6 +268,11 @@ impl Editor {
             for range in lanes.flat_map(|l| &l.ranges).filter(|r| Some(r.id) != dragged) {
                 targets.extend([range.start, range.end]);
             }
+            let dragged = self.region_drag.as_ref().and_then(|d| d.region);
+            let regions = project.region_lanes.iter().flat_map(|l| &l.regions);
+            for region in regions.filter(|r| Some(r.id) != dragged) {
+                targets.extend([region.start, region.end]);
+            }
         }
         Snap {
             targets,

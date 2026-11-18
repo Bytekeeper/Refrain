@@ -796,7 +796,7 @@ fn export_panel_and_overwriting_a_source() {
     h.run();
 
     let before = refrain_engine::render(h.state().session.project(), 0, 40_000);
-    h.state_mut().write_export();
+    h.state_mut().export_again();
     h.run();
     assert!(!h.state().status_error, "{}", h.state().status);
     assert_eq!(refrain_engine::load_source(&wav).unwrap().frames(), 24_000);
@@ -805,7 +805,7 @@ fn export_panel_and_overwriting_a_source() {
     let kept = dir.join("editor/originals");
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
     // A second export over it needs no new copy: the project no longer reads that file.
-    h.state_mut().write_export();
+    h.state_mut().export_again();
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1);
 
     let project = dir.join("song.refrain");

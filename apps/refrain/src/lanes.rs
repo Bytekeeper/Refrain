@@ -193,7 +193,7 @@ impl Editor {
     }
 
     /// The screen spans of a range: with a loop, a range past the loop end also shows at the start.
-    fn range_spans(&self, lane_left: f32, start: Frames, end: Frames) -> Vec<(f32, f32)> {
+    pub(crate) fn range_spans(&self, lane_left: f32, start: Frames, end: Frames) -> Vec<(f32, f32)> {
         let mut spans = vec![(self.x_of(lane_left, start), self.x_of(lane_left, end))];
         if let Some(l) = self.session.project().loop_end
             && end > l

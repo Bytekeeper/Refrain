@@ -8,6 +8,7 @@ mod loudness;
 mod mix;
 mod model;
 mod project_file;
+mod regions;
 mod session;
 
 pub use effects::{EQ_BANDS_HZ, Effect, EffectLane, EffectRange, Gain, LaneId, RangeId};
@@ -18,7 +19,8 @@ pub use mix::{
 };
 pub use model::{ChannelMode, Clip, ClipId, Fade, FadeShape, Frames, GainPoint, Project, Source, Track, TrackId};
 pub use project_file::{PROJECT_EXTENSION, open_project, save_project};
-pub use session::{Command, Exported, Session};
+pub use regions::{Region, RegionLane};
+pub use session::{Command, ExportPart, Exported, Session};
 
 pub const MIN_DB: f32 = -80.0;
 pub const MAX_DB: f32 = 24.0;

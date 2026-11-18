@@ -8,9 +8,10 @@ use crate::effects::{default_fade, tidy_lane};
 use crate::io::{load_source, resample};
 use crate::mix::{edge_fades, envelope_db, overlap_after, overlap_before, similarity_sampled};
 use crate::project_file::save_project;
+use crate::regions::{check_name, tidy_regions};
 use crate::{
-    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, ExportTarget, Fade, FadeShape, Frames,
-    GainPoint, Generator, LaneId, MAX_DB, MIN_DB, Project, RangeId, Result, Source, Track, TrackId,
+    ChannelMode, Clip, ClipId, Effect, EffectLane, EffectRange, Error, ExportSettings, ExportTarget, Fade, FadeShape,
+    Frames, GainPoint, Generator, LaneId, MAX_DB, MIN_DB, Project, RangeId, RegionLane, Result, Source, Track, TrackId,
 };
 
 const MAX_UNDO: usize = 500;
@@ -177,11 +178,50 @@ pub enum Command {
     SetExportTarget {
         target: ExportTarget,
     },
+    /// A new region lane below the others, with the mix's export format and no folder yet.
+    AddRegionLane,
+    RemoveRegionLane {
+        lane: LaneId,
+    },
+    /// The folder and format for all of the lane's regions.
+    SetRegionLane {
+        lane: LaneId,
+        folder: Option<PathBuf>,
+        settings: ExportSettings,
+    },
+    /// A region named "sound N", N the first number free in the lane.
+    AddRegion {
+        lane: LaneId,
+        start: Frames,
+        end: Frames,
+    },
+    /// Moves or resizes a region.
+    SetRegion {
+        region: RangeId,
+        start: Frames,
+        end: Frames,
+    },
+    RenameRegion {
+        region: RangeId,
+        name: String,
+    },
+    RemoveRegion {
+        region: RangeId,
+    },
 }
 
-/// What [`Session::export`] did.
+/// What [`Session::export`] writes.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExportPart {
+    /// The whole mix, to the project's export target.
+    Mix,
+    Region(RangeId),
+}
+
+/// What [`Session::export`] did for one file.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Exported {
+    pub file: PathBuf,
     pub written: crate::Written,
     /// The target was audio the project uses; a copy of it was kept and the project reads that now.
     pub kept_original: bool,
@@ -257,32 +297,92 @@ impl Session {
         })
     }
 
-    /// Writes the mix to the project's export target. The only file the editor overwrites is that target, so
-    /// when it is audio the project or its undo history uses, the file is first copied to where `keep_as` says
-    /// for its name, and the project reads that copy from then on.
-    pub fn export(&mut self, keep_as: impl FnOnce(&str) -> Option<PathBuf>) -> Result<Exported> {
-        let target = self.project.export.clone();
-        let path = target
-            .file
-            .ok_or_else(|| Error::Invalid("no export file is chosen yet".into()))?;
-        let kept_original = self.uses_file(&path);
-        if kept_original {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let cannot = |e: &dyn std::fmt::Display| {
-                Error::Invalid(format!("cannot keep a copy of the original {}: {e}", path.display()))
-            };
-            let copy = keep_as(&name).ok_or_else(|| cannot(&"there is no folder for it"))?;
-            if let Some(dir) = copy.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| cannot(&e))?;
-            }
-            std::fs::copy(&path, &copy).map_err(|e| cannot(&e))?;
-            self.relocate(&path, &copy);
+    /// Writes the mix to the project's export target and regions to their lanes' folders, all from one mixdown.
+    /// The only files the editor overwrites are these, so when one is audio the project or its undo history
+    /// uses, it is first copied to where `keep_as` says for its name, and the project reads that copy from then
+    /// on. Every file is checked before the first is written.
+    pub fn export(&mut self, parts: &[ExportPart], keep_as: impl Fn(&str) -> Option<PathBuf>) -> Result<Vec<Exported>> {
+        let project = self.project.clone();
+        // Each file with how it is written, and the region it holds; `None` is the whole mix.
+        let mut jobs: Vec<(PathBuf, &ExportSettings, Option<&crate::Region>)> = vec![];
+        for part in parts {
+            jobs.push(match *part {
+                ExportPart::Mix => {
+                    let file = project.export.file.clone();
+                    let file = file.ok_or_else(|| Error::Invalid("no export file is chosen yet".into()))?;
+                    (file, &project.export.settings, None)
+                }
+                ExportPart::Region(id) => {
+                    let (lane, region) = project
+                        .region(id)
+                        .ok_or_else(|| Error::Invalid("no such region".into()))?;
+                    let file = lane.file_of(region).ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "choose a folder for the regions before exporting \"{}\"",
+                            region.name
+                        ))
+                    })?;
+                    (file, &lane.settings, Some(region))
+                }
+            });
         }
-        let written = crate::export(&self.project, &target.settings, &path)?;
-        Ok(Exported { written, kept_original })
+        for (i, (file, ..)) in jobs.iter().enumerate() {
+            if jobs.iter().skip(i + 1).any(|(other, ..)| same_path(file, other)) {
+                return Err(Error::Invalid(format!(
+                    "two exports would write {}; rename a region or pick another folder",
+                    file.display()
+                )));
+            }
+        }
+        if project.is_empty() {
+            return Err(Error::Invalid("the project has no audio to export".into()));
+        }
+        let mix = crate::mixdown(&project, || true)
+            .ok_or_else(|| Error::Invalid("the mix was stopped".into()))?
+            .sound;
+        let mut done = vec![];
+        for (file, settings, region) in jobs {
+            let kept_original = self.uses_file(&file);
+            if kept_original {
+                self.keep_original(&file, &keep_as)?;
+            }
+            let (sound, first) = match region {
+                Some(r) => {
+                    let len = usize::try_from(r.end - r.start).unwrap_or(0);
+                    (crate::mix::read(&mix, project.loop_end, r.start, len), r.start)
+                }
+                None => (mix.clone(), 0),
+            };
+            if let Some(dir) = file.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| Error::Invalid(format!("cannot make the folder {}: {e}", dir.display())))?;
+            }
+            let mut written = crate::io::write_sound(sound, project.sample_rate, settings, &file)?;
+            written.peak_at = written.peak_at.saturating_add(first);
+            done.push(Exported {
+                file,
+                written,
+                kept_original,
+            });
+        }
+        Ok(done)
+    }
+
+    fn keep_original(&mut self, path: &Path, keep_as: impl Fn(&str) -> Option<PathBuf>) -> Result<()> {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let cannot = |e: &dyn std::fmt::Display| {
+            Error::Invalid(format!("cannot keep a copy of the original {}: {e}", path.display()))
+        };
+        let copy = keep_as(&name).ok_or_else(|| cannot(&"there is no folder for it"))?;
+        if let Some(dir) = copy.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| cannot(&e))?;
+        }
+        std::fs::copy(path, &copy).map_err(|e| cannot(&e))?;
+        self.relocate(path, &copy);
+        Ok(())
     }
 
     /// Saves the project to `path` with the window's `view`. Copies of overwritten originals that lie in
@@ -360,6 +460,11 @@ impl Session {
     }
 }
 
+/// The same file, also in another case: on Windows and macOS that is one file. Files need not exist yet.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase() || same_file(a, b)
+}
+
 /// The same path, or two spellings of one existing file.
 fn same_file(a: &Path, b: &Path) -> bool {
     a == b || std::fs::canonicalize(a).is_ok_and(|a| std::fs::canonicalize(b).is_ok_and(|b| a == b))
@@ -376,6 +481,9 @@ fn settle(p: &mut Project) -> Result<()> {
     }
     for lane in &mut p.mix_effects {
         tidy_lane(lane, rate, p.loop_end)?;
+    }
+    for lane in &mut p.region_lanes {
+        tidy_regions(lane, p.loop_end)?;
     }
     refit(p)?;
     Ok(())
@@ -432,6 +540,20 @@ fn range_mut(p: &mut Project, range: RangeId) -> Result<&mut EffectRange> {
     ranges
         .find(|r| r.id == range)
         .ok_or_else(|| Error::Invalid("no such effect range".into()))
+}
+
+fn region_lane_mut(p: &mut Project, lane: LaneId) -> Result<&mut RegionLane> {
+    p.region_lanes
+        .iter_mut()
+        .find(|l| l.id == lane)
+        .ok_or_else(|| Error::Invalid("no such region lane".into()))
+}
+
+fn region_mut(p: &mut Project, region: RangeId) -> Result<&mut crate::Region> {
+    let mut regions = p.region_lanes.iter_mut().flat_map(|l| &mut l.regions);
+    regions
+        .find(|r| r.id == region)
+        .ok_or_else(|| Error::Invalid("no such region".into()))
 }
 
 fn apply(p: &mut Project, command: Command) -> Result<()> {
@@ -723,6 +845,42 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         Command::MatchCrossfade { clip, range } => match_crossfade(p, clip, range)?,
         Command::SetSampleRate { rate } => set_sample_rate(p, rate)?,
         Command::SetExportTarget { target } => p.export = target,
+        Command::AddRegionLane => {
+            let lane = RegionLane {
+                id: LaneId(p.new_id()),
+                folder: None,
+                settings: p.export.settings.clone(),
+                regions: vec![],
+            };
+            p.region_lanes.push(lane);
+        }
+        Command::RemoveRegionLane { lane } => {
+            let before = p.region_lanes.len();
+            p.region_lanes.retain(|l| l.id != lane);
+            if p.region_lanes.len() == before {
+                return Err(Error::Invalid("no such region lane".into()));
+            }
+        }
+        Command::SetRegionLane { lane, folder, settings } => {
+            let lane = region_lane_mut(p, lane)?;
+            (lane.folder, lane.settings) = (folder, settings);
+        }
+        Command::AddRegion { lane, start, end } => {
+            let id = RangeId(p.new_id());
+            let lane = region_lane_mut(p, lane)?;
+            let name = lane.free_name();
+            lane.regions.push(crate::Region { id, start, end, name });
+        }
+        Command::SetRegion { region, start, end } => {
+            let r = region_mut(p, region)?;
+            (r.start, r.end) = (start, end);
+        }
+        Command::RenameRegion { region, name } => region_mut(p, region)?.name = check_name(&name)?,
+        Command::RemoveRegion { region } => {
+            let lane = p.region_lanes.iter_mut().find(|l| l.region(region).is_some());
+            let lane = lane.ok_or_else(|| Error::Invalid("no such region".into()))?;
+            lane.regions.retain(|r| r.id != region);
+        }
         Command::SetChannels { clips, mode } => {
             for clip in clips {
                 clip_mut(p, clip)?.channels = mode;
@@ -872,6 +1030,10 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
         range.end = scale(range.end).max(range.start.saturating_add(1));
         range.fade_in = scale(range.fade_in);
         range.fade_out = scale(range.fade_out);
+    }
+    for region in p.region_lanes.iter_mut().flat_map(|l| &mut l.regions) {
+        region.start = scale(region.start);
+        region.end = scale(region.end).max(region.start.saturating_add(1));
     }
     p.sample_rate = rate;
     Ok(())

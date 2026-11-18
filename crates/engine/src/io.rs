@@ -185,21 +185,31 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
     if project.is_empty() {
         return Err(Error::Invalid("the project has no audio to export".into()));
     }
-    let format = settings.format;
-    let rate = format.rate_for(settings.sample_rate.unwrap_or(project.sample_rate));
-    let [left, right] = mixdown(project, || true)
+    let sound = mixdown(project, || true)
         .ok_or_else(|| Error::Invalid("the mix was stopped".into()))?
         .sound;
+    write_sound(sound, project.sample_rate, settings, path)
+}
+
+/// Writes `sound`, made at `project_rate`. Where the peak is counts from the first frame of `sound`.
+pub(crate) fn write_sound(
+    [left, right]: [Vec<f32>; 2],
+    project_rate: u32,
+    settings: &ExportSettings,
+    path: &Path,
+) -> Result<Written> {
+    let format = settings.format;
+    let rate = format.rate_for(settings.sample_rate.unwrap_or(project_rate));
     let mut channels = if settings.mono {
         vec![left.iter().zip(&right).map(|(l, r)| (l + r) * 0.5).collect()]
     } else {
         vec![left, right]
     };
-    if rate != project.sample_rate {
+    if rate != project_rate {
         let mix = Source {
             path: None,
             name: "mix".into(),
-            sample_rate: project.sample_rate,
+            sample_rate: project_rate,
             channels,
             generated: None,
         };
@@ -215,7 +225,7 @@ pub fn export(project: &Project, settings: &ExportSettings, path: &Path) -> Resu
             }
         }
     }
-    let peak_at = (peak_index as f64 * f64::from(project.sample_rate) / f64::from(rate.max(1))).round() as Frames;
+    let peak_at = (peak_index as f64 * f64::from(project_rate) / f64::from(rate.max(1))).round() as Frames;
     let mut options = EncodeOptions::new(match format {
         ExportFormat::Wav => EncodeFormat::Wav,
         ExportFormat::Flac => EncodeFormat::Flac,

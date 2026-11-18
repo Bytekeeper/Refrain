@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use refrain_engine::{
-    ChannelMode, Command, Effect, ExportFormat, ExportSettings, ExportTarget, Fade, FadeShape, GainPoint, Generator,
-    NoiseColor, Session, Source, export, load_source, open_project, render, save_project,
+    ChannelMode, Command, Effect, ExportFormat, ExportPart, ExportSettings, ExportTarget, Fade, FadeShape, GainPoint,
+    Generator, NoiseColor, Session, Source, export, load_source, open_project, render, save_project,
 };
 
 const RATE: u32 = 8000;
@@ -518,15 +518,18 @@ fn exporting_over_used_audio_keeps_it_and_saving_takes_it_along() {
     s.execute(Command::SetExportTarget { target }).unwrap();
 
     let kept_dir = dir.join("kept");
-    let done = s.export(|name| Some(kept_dir.join(format!("x-{name}")))).unwrap();
-    assert!(done.kept_original);
+    let done = s
+        .export(&[ExportPart::Mix], |name| Some(kept_dir.join(format!("x-{name}"))))
+        .unwrap();
+    assert!(done[0].kept_original);
     assert_eq!(
         render(s.project(), 0, 30_000),
         before,
         "the clips still play the original"
     );
     assert!(
-        s.export(|_| None).is_ok_and(|d| !d.kept_original),
+        s.export(&[ExportPart::Mix], |_| None)
+            .is_ok_and(|d| !d[0].kept_original),
         "the project no longer reads it"
     );
 
@@ -580,4 +583,80 @@ fn an_export_reports_the_samples_over_0_db() {
     assert_eq!((written.over, written.peak), (over, peak));
     let at = written.peak_at as usize;
     assert!(left[at].abs() == peak || right[at].abs() == peak);
+}
+
+/// Two regions in a folder next to the project: each file is its part of the mix, a name with a `/` makes a
+/// subfolder, and the lane comes back from the project file.
+#[test]
+fn regions_export_their_part_of_the_mix_and_are_saved() {
+    let dir = folder("regions");
+    let mut s = edited_project(&dir);
+    s.execute(Command::AddRegionLane).unwrap();
+    let lane = s.project().region_lanes[0].id;
+    let settings = ExportSettings {
+        bits: 32,
+        ..ExportSettings::default()
+    };
+    s.execute(Command::SetRegionLane {
+        lane,
+        folder: Some(dir.join("sfx")),
+        settings,
+    })
+    .unwrap();
+    s.execute(Command::AddRegion {
+        lane,
+        start: 1000,
+        end: 3000,
+    })
+    .unwrap();
+    s.execute(Command::AddRegion {
+        lane,
+        start: 5000,
+        end: 5500,
+    })
+    .unwrap();
+    let regions = s.project().region_lanes[0].regions.clone();
+    assert_eq!(regions[1].name, "sound 2");
+    s.execute(Command::RenameRegion {
+        region: regions[1].id,
+        name: "ui/click".into(),
+    })
+    .unwrap();
+    assert!(
+        s.execute(Command::RenameRegion {
+            region: regions[1].id,
+            name: "Sound 1".into(),
+        })
+        .is_err(),
+        "one file on Windows and macOS"
+    );
+    assert!(
+        s.execute(Command::AddRegion {
+            lane,
+            start: 2500,
+            end: 4000
+        })
+        .is_err(),
+        "overlaps"
+    );
+
+    let parts: Vec<ExportPart> = regions.iter().map(|r| ExportPart::Region(r.id)).collect();
+    let done = s.export(&parts, |_| None).unwrap();
+    assert_eq!(done[1].file, dir.join("sfx/ui/click.wav"));
+    let mix = render(s.project(), 0, 6000);
+    let click = load_source(&dir.join("sfx/ui/click.wav")).unwrap();
+    assert_eq!(click.channels[0], mix[0][5000..5500]);
+    assert_eq!(
+        load_source(&dir.join("sfx/sound 1.wav")).unwrap().channels[1],
+        mix[1][1000..3000]
+    );
+
+    let file = dir.join("game.refrain");
+    s.save(&file, None, None).unwrap();
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"folder\": \"sfx\""));
+    let (opened, _) = open_project(&file).unwrap();
+    let lane = &opened.project().region_lanes[0];
+    assert_eq!(lane.folder.as_deref(), Some(dir.join("sfx").as_path()));
+    let spans: Vec<_> = lane.regions.iter().map(|r| (r.start, r.end, r.name.as_str())).collect();
+    assert_eq!(spans, [(1000, 3000, "sound 1"), (5000, 5500, "ui/click")]);
 }

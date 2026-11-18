@@ -11,6 +11,7 @@ mod mixing;
 mod mouse;
 mod playback;
 mod recovery;
+mod regions;
 mod timeline;
 #[cfg(test)]
 mod ui_tests;
@@ -71,7 +72,12 @@ struct Editor {
     track_heights: HashMap<TrackId, f32>,
     /// The effect range being drawn, moved or resized.
     range_drag: Option<lanes::RangeDrag>,
+    /// The selected effect range or region.
     selected_range: Option<refrain_engine::RangeId>,
+    region_drag: Option<regions::RegionDrag>,
+    region_menu: Option<regions::RegionMenu>,
+    /// The name being typed in a region's menu.
+    region_name: Option<(refrain_engine::RangeId, String)>,
     /// Tracks whose effect lanes are hidden. A view setting.
     folded: std::collections::HashSet<TrackId>,
     /// An effect setting being dragged in its menu, not yet in the project.
@@ -156,6 +162,9 @@ impl Default for Editor {
             lane_w: 800.0,
             range_drag: None,
             selected_range: None,
+            region_drag: None,
+            region_menu: None,
+            region_name: None,
             folded: std::collections::HashSet::new(),
             effect_edit: None,
             fade_edit: None,
@@ -206,6 +215,7 @@ impl Editor {
         egui::CentralPanel::default().show(ui, |ui| {
             self.snap_guide = None;
             self.ruler(ui);
+            self.region_lanes(ui);
             let level_row = self.level_row_space(ui);
             let max_height = (ui.available_height() - SCROLLBAR_H - ui.spacing().item_spacing.y).max(0.0);
             egui::ScrollArea::vertical()
@@ -368,7 +378,11 @@ impl Editor {
             self.redo();
         }
         if delete && let Some(range) = self.selected_range.take() {
-            self.run(Command::RemoveEffectRange { range });
+            if self.session.project().region(range).is_some() {
+                self.run(Command::RemoveRegion { region: range });
+            } else {
+                self.run(Command::RemoveEffectRange { range });
+            }
         } else if delete && let Some(clip) = self.selected {
             self.run(Command::DeleteClip { clip });
         }

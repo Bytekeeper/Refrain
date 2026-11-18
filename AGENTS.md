@@ -16,6 +16,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   mouse.rs         mouse editing: hit-testing, drags, snapping, and the clip, fade and channel menus
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu
+  regions.rs       region lanes above the tracks: named parts of the mix exported as files of their own
   generate.rs      adding a generated clip (tone, noise, blips) and its settings panel
   files.rs         open, save, import, unsaved-changes question
   export.rs        export panel and "export again" to the project's export target
@@ -64,6 +65,10 @@ the part the effect hears and its tail (at the end, or at the start when reverse
 outside it and ranges in a lane never meet. New settings keep the range's edges and move the tail's
 boundary inside it. With a loop a range past the loop end goes on at the start. The window makes the
 mixdown in the background after each edit; playback, the level row and export use it.
+
+Region lanes hold named parts of the mix. Each region is exported as a plain cut of the mixdown to
+`folder/name` with its lane's format; a `/` in a name makes a subfolder. One export call writes the mix
+and any regions from one mixdown.
 
 ## 3. Clean room
 

@@ -372,6 +372,7 @@ mod tests {
             relocated: vec![],
             mix_effects: vec![],
             export: Default::default(),
+            region_lanes: vec![],
         }
     }
 

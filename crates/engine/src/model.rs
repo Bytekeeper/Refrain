@@ -190,6 +190,8 @@ pub struct Project {
     /// audio, not the path, so audio read later from the new file at the old path is not affected.
     pub(crate) relocated: Vec<(Arc<Source>, PathBuf)>,
     pub export: crate::ExportTarget,
+    /// Named parts of the mix to export as files of their own, shown above the tracks.
+    pub region_lanes: Vec<crate::RegionLane>,
 }
 
 impl Project {
@@ -245,6 +247,15 @@ impl Project {
     pub fn lane(&self, id: LaneId) -> Option<&EffectLane> {
         let mut lanes = self.tracks.iter().flat_map(|t| &t.effects).chain(&self.mix_effects);
         lanes.find(|l| l.id == id)
+    }
+
+    pub fn region_lane(&self, id: LaneId) -> Option<&crate::RegionLane> {
+        self.region_lanes.iter().find(|l| l.id == id)
+    }
+
+    /// The region with this id and the lane holding it.
+    pub fn region(&self, id: crate::RangeId) -> Option<(&crate::RegionLane, &crate::Region)> {
+        self.region_lanes.iter().find_map(|l| Some((l, l.region(id)?)))
     }
 
     /// End of the last clip. With a loop, this can be past the loop end.
