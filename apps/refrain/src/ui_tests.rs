@@ -1092,5 +1092,9 @@ fn a_clip_speed_is_typed_into_its_menu() {
     h.run();
     save(&mut h, "clip_speed_menu");
     let clip = &h.state().session.project().tracks[0].clips[0];
-    assert_eq!((clip.speed(), clip.len), (2.0, 3 * RATE as i64 / 2), "an octave up, half as long");
+    assert_eq!(
+        (clip.speed(), clip.len),
+        (2.0, 3 * RATE as i64 / 2),
+        "an octave up, half as long"
+    );
 }

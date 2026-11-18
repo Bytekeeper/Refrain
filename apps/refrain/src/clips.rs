@@ -418,7 +418,9 @@ fn mixed(source: &Source) -> Vec<f32> {
 /// The clip's name, its speed when changed, and which channels it plays when that is not simply stereo.
 fn clip_label(clip: &Clip) -> String {
     let mut label = clip.source.name.clone();
-    if clip.sped.is_some() {
+    if clip.keeps_pitch() {
+        label += &format!(" · {:.0} %, same pitch", clip.speed() * 100.0);
+    } else if clip.sped.is_some() {
         label += &format!(" · {}", speed_text(clip.speed()));
     }
     if clip.source.channels.len() > 1 {

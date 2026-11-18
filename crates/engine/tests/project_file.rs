@@ -700,32 +700,81 @@ fn a_faster_clip_is_shorter_and_higher_and_keeps_its_speed() {
     s.execute(Command::AddTrack { name: "t".into() }).unwrap();
     let track = s.project().tracks[0].id;
     let source = Arc::new(load_source(&file).unwrap());
-    s.execute(Command::AddClip { track, source, start: 0 }).unwrap();
+    s.execute(Command::AddClip {
+        track,
+        source,
+        start: 0,
+    })
+    .unwrap();
     let clip = s.project().tracks[0].clips[0].id;
-    s.execute(Command::TrimClip { clip, start: 4000, end: 12_000 }).unwrap();
+    s.execute(Command::TrimClip {
+        clip,
+        start: 4000,
+        end: 12_000,
+    })
+    .unwrap();
     let crossings = |s: &Session| {
         let [left, _] = render(s.project(), 4000, 4000);
         left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count()
     };
     let before = crossings(&s);
 
-    s.execute(Command::SetClipSpeed { clip, speed: 2.0 }).unwrap();
+    s.execute(Command::SetClipSpeed {
+        clip,
+        speed: 2.0,
+        keep_pitch: false,
+    })
+    .unwrap();
     let c = &s.project().tracks[0].clips[0];
-    assert_eq!((c.start, c.offset, c.len), (4000, 2000, 4000), "starts in place, plays the same part in half the time");
+    assert_eq!(
+        (c.start, c.offset, c.len),
+        (4000, 2000, 4000),
+        "starts in place, plays the same part in half the time"
+    );
     let after = crossings(&s);
-    assert!(before >= 99 && after.abs_diff(2 * before) <= 2, "an octave higher: {before} then {after}");
+    assert!(
+        before >= 99 && after.abs_diff(2 * before) <= 2,
+        "an octave higher: {before} then {after}"
+    );
 
     let saved = dir.join("speed.refrain");
     save_project(s.project(), &saved, None).unwrap();
     let (opened, _) = open_project(&saved).unwrap();
     assert_same_sound(&s, &opened);
 
+    s.execute(Command::SetClipSpeed {
+        clip,
+        speed: 2.0,
+        keep_pitch: true,
+    })
+    .unwrap();
+    let c = &s.project().tracks[0].clips[0];
+    assert_eq!((c.offset, c.len), (2000, 4000), "the same part in half the time");
+    let [left, _] = render(s.project(), 4000, 4000);
+    let same_pitch = left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+    assert!(
+        same_pitch.abs_diff(before) <= 2,
+        "keeps its pitch: {before} then {same_pitch}"
+    );
+    save_project(s.project(), &saved, None).unwrap();
+    let (opened, _) = open_project(&saved).unwrap();
+    assert_same_sound(&s, &opened);
+
     s.execute(Command::SetSampleRate { rate: 16_000 }).unwrap();
     let c = &s.project().tracks[0].clips[0];
-    assert_eq!((c.speed(), c.start, c.len), (2.0, 8000, 8000));
+    assert_eq!((c.speed(), c.keeps_pitch(), c.start, c.len), (2.0, true, 8000, 8000));
 
     s.execute(Command::SetSampleRate { rate: RATE }).unwrap();
-    s.execute(Command::SetClipSpeed { clip, speed: 1.0 }).unwrap();
+    s.execute(Command::SetClipSpeed {
+        clip,
+        speed: 1.0,
+        keep_pitch: false,
+    })
+    .unwrap();
     let c = &s.project().tracks[0].clips[0];
-    assert_eq!((c.offset, c.len, c.sped.is_none()), (4000, 8000, true), "back to the trim it had");
+    assert_eq!(
+        (c.offset, c.len, c.sped.is_none()),
+        (4000, 8000, true),
+        "back to the trim it had"
+    );
 }

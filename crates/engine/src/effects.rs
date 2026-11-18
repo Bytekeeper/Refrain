@@ -1222,7 +1222,10 @@ mod tests {
         let [left, _] = render(s.project(), 0, 48_000);
         let first = left.iter().position(|v| v.abs() > 0.05).unwrap();
         let full = left.iter().position(|v| v.abs() > 0.4).unwrap();
-        assert!((23_500..24_000).contains(&first) && (24_000..24_500).contains(&full), "{first} {full}");
+        assert!(
+            (23_500..24_000).contains(&first) && (24_000..24_500).contains(&full),
+            "{first} {full}"
+        );
     }
 
     /// The shift builds each moment on the one before, so round a whole loop its ends did not meet: a click.

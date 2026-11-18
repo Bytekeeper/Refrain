@@ -216,6 +216,8 @@ struct ClipFile {
     channels: ChannelMode,
     #[serde(default = "normal_speed", skip_serializing_if = "is_normal_speed")]
     speed: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    keep_pitch: bool,
 }
 
 fn normal_speed() -> f64 {
@@ -271,6 +273,7 @@ pub fn save_project(project: &Project, path: &Path, view: Option<&serde_json::Va
                 gain: clip.gain.clone(),
                 channels: clip.channels,
                 speed: clip.speed(),
+                keep_pitch: clip.keeps_pitch(),
             });
         }
         tracks.push(TrackFile {
@@ -372,7 +375,7 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
         ..Project::default()
     };
     // Clips of one file at one speed share the converted audio, as they did before saving.
-    let mut sped: Vec<(usize, u64, Arc<Source>)> = vec![];
+    let mut sped: SpedAudio = vec![];
     for track in file.tracks {
         let id = TrackId(project.new_id());
         let mut clips = vec![];
@@ -417,33 +420,39 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
     Ok((Session::open(project)?, file.view))
 }
 
+/// Audio made for a speed: by source index, speed and whether it keeps the pitch.
+type SpedAudio = Vec<((usize, u64, bool), Arc<Source>)>;
+
 fn clip_from_file(
     id: ClipId,
     c: ClipFile,
     sources: &[Arc<Source>],
-    made: &mut Vec<(usize, u64, Arc<Source>)>,
+    made: &mut SpedAudio,
 ) -> Result<Clip> {
     let bad = |what: &str| Error::ProjectFile(what.into());
     let original = sources
         .get(c.source)
         .ok_or_else(|| bad("a clip refers to an audio file that is not listed"))?;
-    let (source, sped) = if c.speed == 1.0 {
+    let (source, sped) = if c.speed == 1.0 && !c.keep_pitch {
         (original.clone(), None)
     } else {
         if original.generated.is_some() {
-            return Err(bad("generated sound has a speed; it can only change through its settings"));
+            return Err(bad(
+                "generated sound has a speed; it can only change through its settings",
+            ));
         }
-        let found = made.iter().find(|(i, bits, _)| *i == c.source && *bits == c.speed.to_bits());
-        let source = match found {
-            Some((_, _, s)) => s.clone(),
+        let how = (c.source, c.speed.to_bits(), c.keep_pitch);
+        let source = match made.iter().find(|(h, _)| *h == how) {
+            Some((_, s)) => s.clone(),
             None => {
-                let s = Arc::new(crate::change_speed(original, c.speed)?);
-                made.push((c.source, c.speed.to_bits(), s.clone()));
+                let s = crate::change_speed(original, c.speed, c.keep_pitch)?;
+                made.push((how, s.clone()));
                 s
             }
         };
         let sped = crate::Sped {
             speed: c.speed,
+            keep_pitch: c.keep_pitch,
             original: original.clone(),
         };
         (source, Some(sped))

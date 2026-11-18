@@ -55,7 +55,8 @@ removed later. Results that depend on the audio (a normalize gain, a match) are 
 each time, never stored as a fixed number.
 A clip's speed works like a tape: faster is higher. The clip plays its audio resampled once per speed
 change (`engine::change_speed`), and its trim counts in that resampled audio; the original stays with
-the clip, so speed 1 gives the clip back exactly. Generated sound changes speed through its settings.
+the clip, so speed 1 gives the clip back exactly. With "keep pitch" the speed change stretches the audio with the pitch effect's phase vocoder instead.
+Generated sound changes speed through its settings.
 The pitch effect keeps the length: a phase vocoder (`engine::pitch`) stretches the sound by the pitch ratio
 and resampling plays it back at the original length.
 Sound the editor makes (tone, noise, blips) is stored as its settings, never as samples, and made again

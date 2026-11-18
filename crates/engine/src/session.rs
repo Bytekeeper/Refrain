@@ -174,6 +174,8 @@ pub enum Command {
     SetClipSpeed {
         clip: ClipId,
         speed: f64,
+        /// Stretched at the same pitch instead of higher or lower.
+        keep_pitch: bool,
     },
     /// Converts all audio to `rate` and moves every position along, so everything stays at the same
     /// time. Audio from a file is converted again from the file, so changing the rate twice loses nothing.
@@ -915,7 +917,11 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 clip_mut(p, clip)?.channels = mode;
             }
         }
-        Command::SetClipSpeed { clip, speed } => {
+        Command::SetClipSpeed {
+            clip,
+            speed,
+            keep_pitch,
+        } => {
             let (_, c) = p.clip(clip).ok_or(Error::NoClip(clip))?;
             if c.source.generated.is_some() {
                 return Err(Error::Invalid(
@@ -923,18 +929,15 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 ));
             }
             let (old, original) = (c.speed(), c.original().clone());
-            let source = if speed == 1.0 {
-                original.clone()
-            } else {
-                // Split and duplicated clips share the converted audio, as they share the file.
-                let same = p.tracks.iter().flat_map(|t| &t.clips).find_map(|c| {
-                    let s = c.sped.as_ref()?;
-                    (s.speed == speed && Arc::ptr_eq(&s.original, &original)).then(|| c.source.clone())
-                });
-                match same {
-                    Some(source) => source,
-                    None => Arc::new(change_speed(&original, speed)?),
-                }
+            // Split and duplicated clips share the converted audio, as they share the file.
+            let same = p.tracks.iter().flat_map(|t| &t.clips).find_map(|c| {
+                let s = c.sped.as_ref()?;
+                let alike = s.speed == speed && s.keep_pitch == keep_pitch && Arc::ptr_eq(&s.original, &original);
+                alike.then(|| c.source.clone())
+            });
+            let source = match same {
+                Some(source) => source,
+                None => change_speed(&original, speed, keep_pitch)?,
             };
             let frames = source.frames();
             if frames <= 0 {
@@ -950,7 +953,11 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 point.at = scale(point.at);
             }
             c.source = source;
-            c.sped = (speed != 1.0).then_some(crate::Sped { speed, original });
+            c.sped = (speed != 1.0 || keep_pitch).then_some(crate::Sped {
+                speed,
+                keep_pitch,
+                original,
+            });
         }
         Command::SetGainCurve { clip, mut points } => {
             for point in &mut points {
@@ -1044,7 +1051,7 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
     let mut converted: HashMap<usize, (Arc<Source>, Arc<Source>)> = HashMap::new();
     // Converted audio is read from where its file is now, so the old relocations are no longer needed.
     let relocated = std::mem::take(&mut p.relocated);
-    let mut sped: HashMap<(usize, u64), Arc<Source>> = HashMap::new();
+    let mut sped: HashMap<(usize, u64, bool), Arc<Source>> = HashMap::new();
     for clip in p.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
         let key = Arc::as_ptr(clip.original()) as usize;
         let original = match converted.get(&key) {
@@ -1077,12 +1084,12 @@ fn set_sample_rate(p: &mut Project, rate: u32) -> Result<()> {
             None => original,
             Some(s) => {
                 s.original = original.clone();
-                let made = sped.get(&(key, s.speed.to_bits())).cloned();
-                match made {
+                let how = (key, s.speed.to_bits(), s.keep_pitch);
+                match sped.get(&how).cloned() {
                     Some(source) => source,
                     None => {
-                        let source = Arc::new(change_speed(&original, s.speed)?);
-                        sped.insert((key, s.speed.to_bits()), source.clone());
+                        let source = change_speed(&original, s.speed, s.keep_pitch)?;
+                        sped.insert(how, source.clone());
                         source
                     }
                 }

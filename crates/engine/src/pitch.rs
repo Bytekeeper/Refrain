@@ -24,12 +24,17 @@ pub(crate) fn shift(semitones: f32, rate: u32, sound: &mut [Vec<f32>; 2], weight
         return;
     }
     let stretched = stretch(sound, frames, ratio, window_len(rate));
+    let stretched_len = stretched.first().map_or(0, Vec::len);
     // On failure the sound stays as it was, like an effect that is off.
-    let Ok(wet) = crate::io::speed_up(&stretched, stretched[0].len(), ratio) else {
+    let Ok(wet) = crate::io::speed_up(&stretched, stretched_len, ratio) else {
         return;
     };
     for (channel, wet) in sound.iter_mut().zip(&wet) {
-        for ((s, w), weight) in channel.iter_mut().zip(wet.iter().chain(std::iter::repeat(&0.0))).zip(weights) {
+        for ((s, w), weight) in channel
+            .iter_mut()
+            .zip(wet.iter().chain(std::iter::repeat(&0.0)))
+            .zip(weights)
+        {
             *s += weight * (w - *s);
         }
     }
@@ -39,9 +44,9 @@ fn principal(phase: f64) -> f64 {
     phase - TAU * (phase / TAU).round()
 }
 
-/// The sound `ratio` times as long at the same pitch. Both sides get the same phase changes, taken from their
-/// sum, so the stereo picture stays in place.
-fn stretch(sound: &[Vec<f32>; 2], frames: usize, ratio: f64, n: usize) -> [Vec<f32>; 2] {
+/// The first `frames` of each channel `ratio` times as long at the same pitch, with windows `n` frames long. All
+/// channels get the same phase changes, taken from their sum, so the stereo picture stays in place.
+pub(crate) fn stretch(sound: &[Vec<f32>], frames: usize, ratio: f64, n: usize) -> Vec<Vec<f32>> {
     let (hop, half, bins) = (n / 4, n / 2, n / 2 + 1);
     let out_len = (frames as f64 * ratio).round() as usize;
     let window: Vec<f32> = (0..n)
@@ -50,9 +55,10 @@ fn stretch(sound: &[Vec<f32>; 2], frames: usize, ratio: f64, n: usize) -> [Vec<f
     let mut planner = RealFftPlanner::<f32>::new();
     let (forward, inverse) = (planner.plan_fft_forward(n), planner.plan_fft_inverse(n));
     let mut grain = forward.make_input_vec();
-    let mut spectra = [forward.make_output_vec(), forward.make_output_vec()];
+    let mut spectra: Vec<_> = sound.iter().map(|_| forward.make_output_vec()).collect();
+    let mut sum = forward.make_output_vec();
     // Room for half a window on each side; frame `i` of the result is `out[i + half]`.
-    let mut out = [vec![0.0f32; out_len + n], vec![0.0f32; out_len + n]];
+    let mut out = vec![vec![0.0f32; out_len + n]; sound.len()];
     let mut norm = vec![0.0f32; out_len + n];
     let mut last_phase = vec![0.0f64; bins];
     let mut last_made = vec![0.0f64; bins];
@@ -66,19 +72,26 @@ fn stretch(sound: &[Vec<f32>; 2], frames: usize, ratio: f64, n: usize) -> [Vec<f
         for (channel, spectrum) in sound.iter().zip(&mut spectra) {
             for (i, (g, w)) in grain.iter_mut().zip(&window).enumerate() {
                 let t = at_in + i as i64 - half as i64;
-                *g = usize::try_from(t).ok().and_then(|t| channel.get(t)).copied().unwrap_or(0.0) * w;
+                *g = usize::try_from(t)
+                    .ok()
+                    .and_then(|t| channel.get(t))
+                    .copied()
+                    .unwrap_or(0.0)
+                    * w;
             }
             if forward.process(&mut grain, spectrum).is_err() {
-                return [sound[0].clone(), sound[1].clone()];
+                return sound.to_vec();
             }
         }
-        let [left, right] = &spectra;
-        for (k, (l, r)) in left.iter().zip(right).enumerate() {
-            let sum = l + r;
-            if let (Some(m), Some(p)) = (magnitude.get_mut(k), phase.get_mut(k)) {
-                *m = f64::from(sum.norm());
-                *p = f64::from(sum.arg());
+        sum.fill(Complex::default());
+        for spectrum in &spectra {
+            for (s, c) in sum.iter_mut().zip(spectrum) {
+                *s += c;
             }
+        }
+        for ((m, p), s) in magnitude.iter_mut().zip(&mut phase).zip(&sum) {
+            *m = f64::from(s.norm());
+            *p = f64::from(s.arg());
         }
         match last_in {
             None => rotation.fill(0.0),
@@ -128,7 +141,7 @@ fn stretch(sound: &[Vec<f32>; 2], frames: usize, ratio: f64, n: usize) -> [Vec<f
                 }
             }
             if inverse.process(spectrum, &mut grain).is_err() {
-                return [sound[0].clone(), sound[1].clone()];
+                return sound.to_vec();
             }
             let scale = 1.0 / n as f32;
             for ((o, g), w) in out.iter_mut().skip(at_out).zip(&grain).zip(&window) {
@@ -139,15 +152,17 @@ fn stretch(sound: &[Vec<f32>; 2], frames: usize, ratio: f64, n: usize) -> [Vec<f
             *s += w * w;
         }
     }
-    out.map(|channel| {
-        channel
-            .iter()
-            .zip(&norm)
-            .skip(half)
-            .take(out_len)
-            .map(|(s, w)| s / w.max(0.1))
-            .collect()
-    })
+    out.into_iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .zip(&norm)
+                .skip(half)
+                .take(out_len)
+                .map(|(s, w)| s / w.max(0.1))
+                .collect()
+        })
+        .collect()
 }
 
 fn at(values: &[f64], k: usize) -> f64 {
@@ -175,4 +190,3 @@ fn lowest_between(magnitude: &[f64], peaks: &[usize]) -> usize {
         .min_by(|&x, &y| at(magnitude, x).total_cmp(&at(magnitude, y)))
         .unwrap_or(b)
 }
-

@@ -99,12 +99,14 @@ pub struct Clip {
     pub sped: Option<Sped>,
 }
 
-/// A clip played faster or slower, and so higher or lower, like a tape. `Clip::source` is then
-/// `original` resampled, and the clip's frames count in it.
+/// A clip played faster or slower. `Clip::source` is then made from `original`, and the clip's frames count in it.
 #[derive(Debug, Clone)]
 pub struct Sped {
-    /// 2 is twice as fast and an octave higher.
+    /// 2 is twice as fast.
     pub speed: f64,
+    /// Stretched in time at the same pitch, instead of higher or lower like a tape. Kept at speed 1 too, so
+    /// the choice stays while the speed is set.
+    pub keep_pitch: bool,
     pub original: Arc<Source>,
 }
 
@@ -114,6 +116,10 @@ pub const MAX_SPEED: f64 = 4.0;
 impl Clip {
     pub fn speed(&self) -> f64 {
         self.sped.as_ref().map_or(1.0, |s| s.speed)
+    }
+
+    pub fn keeps_pitch(&self) -> bool {
+        self.sped.as_ref().is_some_and(|s| s.keep_pitch)
     }
 
     /// The audio as read from the file or made by a generator, before any speed change.

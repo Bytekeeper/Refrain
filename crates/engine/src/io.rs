@@ -1,6 +1,7 @@
 //! Reading audio files, converting the sample rate, and exporting the mix.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use craft_audio::{AudioBuffer, BitDepth, DecodeOptions, EncodeFormat, EncodeOptions};
 use rubato::audioadapter::Adapter;
@@ -32,8 +33,12 @@ pub fn load_source(path: &Path) -> Result<Source> {
     })
 }
 
-/// The audio played `speed` times as fast, at the same sample rate: shorter and higher above 1.
-pub fn change_speed(source: &Source, speed: f64) -> Result<Source> {
+/// The audio played `speed` times as fast, at the same sample rate: shorter and higher above 1, or with
+/// `keep_pitch` stretched in time at the same pitch. At speed 1 it is `source` itself.
+pub fn change_speed(source: &Arc<Source>, speed: f64, keep_pitch: bool) -> Result<Arc<Source>> {
+    if speed == 1.0 {
+        return Ok(source.clone());
+    }
     if !(crate::MIN_SPEED..=crate::MAX_SPEED).contains(&speed) {
         return Err(Error::Invalid(format!(
             "a speed must be between {}% and {}%",
@@ -45,13 +50,19 @@ pub fn change_speed(source: &Source, speed: f64) -> Result<Source> {
     if frames == 0 || source.channels.is_empty() {
         return Err(Error::EmptySource);
     }
-    Ok(Source {
+    let channels = if keep_pitch {
+        let n = crate::pitch::window_len(source.sample_rate);
+        crate::pitch::stretch(&source.channels, frames, 1.0 / speed, n)
+    } else {
+        speed_up(&source.channels, frames, speed)?
+    };
+    Ok(Arc::new(Source {
         path: source.path.clone(),
         name: source.name.clone(),
         sample_rate: source.sample_rate,
-        channels: speed_up(&source.channels, frames, speed)?,
+        channels,
         generated: None,
-    })
+    }))
 }
 
 /// The first `frames` of each channel played `speed` times as fast. The sinc filter takes any ratio, where the

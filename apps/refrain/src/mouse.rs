@@ -466,45 +466,74 @@ impl Editor {
 
     /// Tape speed: semitones and percent are two views of one number, as pitch and speed move together.
     fn speed_menu_ui(&mut self, ui: &mut egui::Ui, id: ClipId) {
-        let Some((_, clip)) = self.session.project().clip(id) else { return };
-        let current = clip.speed();
+        let Some((_, clip)) = self.session.project().clip(id) else {
+            return;
+        };
+        let (current, mut keep_pitch) = (clip.speed(), clip.keeps_pitch());
         if clip.source.generated.is_some() {
             ui.weak("Generated sound: change its pitch and length in its settings");
             return;
         }
-        ui.label("Speed (the pitch follows)");
+        ui.label(if keep_pitch {
+            "Speed (the pitch stays)"
+        } else {
+            "Speed (the pitch follows)"
+        });
         let speed = match self.speed_edit {
             Some((clip, speed)) if clip == id => speed,
             _ => current,
         };
-        let mut semitones = (12.0 * speed.log2()) as f32;
         let mut percent = (speed * 100.0) as f32;
         let (max, min) = (refrain_engine::MAX_SPEED as f32, refrain_engine::MIN_SPEED as f32);
-        let (by_semitones, done_semitones) = crate::effect_menu::number_rows(
-            ui,
-            [("Semitones", &mut semitones, -24.0..=24.0, 0.05, " st", 1)],
-        );
-        let (by_percent, done_percent) = crate::effect_menu::number_rows(
-            ui,
-            [("Speed", &mut percent, min * 100.0..=max * 100.0, 0.25, " %", 1)],
-        );
-        if by_semitones {
-            self.speed_edit = Some((id, 2f64.powf(f64::from(semitones) / 12.0)));
-        } else if by_percent {
+        // Semitones only mean something while the pitch moves with the speed.
+        if !keep_pitch {
+            let mut semitones = (12.0 * speed.log2()) as f32;
+            let (changed, done) =
+                crate::effect_menu::number_rows(ui, [("Semitones", &mut semitones, -24.0..=24.0, 0.05, " st", 1)]);
+            if changed {
+                self.speed_edit = Some((id, 2f64.powf(f64::from(semitones) / 12.0)));
+            }
+            self.finish_speed(id, current, keep_pitch, done);
+        }
+        let (changed, done) =
+            crate::effect_menu::number_rows(ui, [("Speed", &mut percent, min * 100.0..=max * 100.0, 0.25, " %", 1)]);
+        if changed {
             self.speed_edit = Some((id, f64::from(percent) / 100.0));
         }
-        if (done_semitones || done_percent)
-            && let Some((clip, speed)) = self.speed_edit.take()
-            && speed != current
-        {
-            self.run(Command::SetClipSpeed { clip, speed });
+        self.finish_speed(id, current, keep_pitch, done);
+        let hint = "Stretches the sound in time instead of playing it faster like a tape. \
+                    Sharp hits get a little softer.";
+        if ui.checkbox(&mut keep_pitch, "Keep pitch").on_hover_text(hint).changed() {
+            self.run(Command::SetClipSpeed {
+                clip: id,
+                speed: current,
+                keep_pitch,
+            });
         }
         if ui
             .add_enabled(current != 1.0, egui::Button::new("As recorded (100 %)"))
             .clicked()
         {
-            self.run(Command::SetClipSpeed { clip: id, speed: 1.0 });
+            self.run(Command::SetClipSpeed {
+                clip: id,
+                speed: 1.0,
+                keep_pitch: false,
+            });
             ui.close();
+        }
+    }
+
+    /// Puts a speed dragged or typed in the clip's menu into the project once the change is finished.
+    fn finish_speed(&mut self, id: ClipId, current: f64, keep_pitch: bool, done: bool) {
+        if done
+            && let Some((clip, speed)) = self.speed_edit.take_if(|(clip, _)| *clip == id)
+            && speed != current
+        {
+            self.run(Command::SetClipSpeed {
+                clip,
+                speed,
+                keep_pitch,
+            });
         }
     }
 
