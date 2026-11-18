@@ -5,34 +5,29 @@ use crate::effects::Biquad;
 /// Integrated loudness in LUFS after ITU-R BS.1770 of a whole piece of sound. None when it is all near silence.
 #[cfg(test)]
 pub(crate) fn loudness(audio: &[Vec<f32>; 2], rate: u32) -> Option<f64> {
-    from_slices(slices(audio, rate, 0).iter())
+    from_slices(slices(audio.each_ref().map(|c| c.as_slice()), rate, 0).iter())
 }
 
 /// The weighted power of the sound (weighted like the ear hears it) in slices on a 100 ms grid of the timeline,
 /// as (energy, frames). The audio starts at timeline frame `first`. Slices at the ends may be shorter.
-pub(crate) fn slices(audio: &[Vec<f32>; 2], rate: u32, first: i64) -> Vec<(f64, usize)> {
+pub(crate) fn slices(audio: [&[f32]; 2], rate: u32, first: i64) -> Vec<(f64, usize)> {
     let slice = slice_len(rate);
-    let weighted: Vec<Vec<f32>> = audio
-        .iter()
-        .map(|channel| {
-            let mut weighted = channel.clone();
-            for (biquad, mut memory) in k_weighting(rate).iter().zip([[0.0; 4]; 2]) {
-                biquad.run(&mut memory, &mut weighted);
-            }
-            weighted
-        })
-        .collect();
+    let [shelf, high_pass] = k_weighting(rate);
+    let mut memory = [[0.0; 4]; 4];
     let mut out: Vec<(f64, usize)> = vec![];
-    for (i, at) in (0..audio[0].len()).zip(first..) {
-        let energy: f64 = weighted
-            .iter()
-            .filter_map(|w| w.get(i))
-            .map(|s| f64::from(*s) * f64::from(*s))
-            .sum();
+    let [left, right] = audio;
+    let mut into_slice = first.rem_euclid(slice);
+    // Both channels and both filters in one pass: each filter waits on its own last output, so stepping four
+    // at once lets the processor work on them side by side.
+    for (l, r) in left.iter().zip(right) {
+        let [m0, m1, m2, m3] = &mut memory;
+        let l = high_pass.step(m1, shelf.step(m0, f64::from(*l)));
+        let r = high_pass.step(m3, shelf.step(m2, f64::from(*r)));
         match out.last_mut() {
-            Some((sum, frames)) if at.rem_euclid(slice) != 0 => (*sum, *frames) = (*sum + energy, *frames + 1),
-            _ => out.push((energy, 1)),
+            Some((sum, frames)) if into_slice != 0 => (*sum, *frames) = (*sum + l * l + r * r, *frames + 1),
+            _ => out.push((l * l + r * r, 1)),
         }
+        into_slice = if into_slice + 1 == slice { 0 } else { into_slice + 1 };
     }
     out
 }

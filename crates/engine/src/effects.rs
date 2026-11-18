@@ -438,10 +438,8 @@ fn range_change(
     let weights: Vec<f32> = (from..).take(n).map(weight).collect();
     let gain = match range.effect {
         Effect::Normalize { .. } | Effect::Loudness { .. } => {
-            let under = dry
-                .clone()
-                .map(|c| c.into_iter().skip(before).take(len).collect::<Vec<f32>>());
-            Some(measured_gain(&range.effect, &under, rate, range.start))
+            let under = dry.each_ref().map(|c| c.get(before..before + len).unwrap_or(&[]));
+            Some(measured_gain(&range.effect, under, rate, range.start))
         }
         _ => None,
     };
@@ -459,8 +457,8 @@ fn range_change(
 }
 
 /// The gain normalize or loudness gives `audio`, the sound under a range that starts at timeline frame `start`.
-fn measured_gain(effect: &Effect, audio: &[Vec<f32>; 2], rate: u32, start: Frames) -> Gain {
-    let peak = audio.iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
+fn measured_gain(effect: &Effect, audio: [&[f32]; 2], rate: u32, start: Frames) -> Gain {
+    let peak = audio.into_iter().flatten().fold(0.0f32, |m, s| m.max(s.abs()));
     let lufs = match effect {
         Effect::Loudness { .. } => from_slices(slices(audio, rate, start).iter()),
         _ => None,
@@ -555,14 +553,17 @@ impl Biquad {
 
     /// Filters in place, going on from the last two inputs and outputs in `memory`.
     pub(crate) fn run(&self, memory: &mut [f64; 4], samples: &mut [f32]) {
-        let [mut x1, mut x2, mut y1, mut y2] = *memory;
         for s in samples {
-            let x = f64::from(*s);
-            let y = self.b[0] * x + self.b[1] * x1 + self.b[2] * x2 - self.a[0] * y1 - self.a[1] * y2;
-            (x2, x1, y2, y1) = (x1, x, y1, y);
-            *s = y as f32;
+            *s = self.step(memory, f64::from(*s)) as f32;
         }
-        *memory = [x1, x2, y1, y2];
+    }
+
+    #[inline]
+    pub(crate) fn step(&self, memory: &mut [f64; 4], x: f64) -> f64 {
+        let [x1, x2, y1, y2] = *memory;
+        let y = self.b[0] * x + self.b[1] * x1 + self.b[2] * x2 - self.a[0] * y1 - self.a[1] * y2;
+        *memory = [x, x1, y, y1];
+        y
     }
 }
 
