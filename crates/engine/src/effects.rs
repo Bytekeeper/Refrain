@@ -41,7 +41,30 @@ pub enum Effect {
         #[serde(default)]
         reversed: bool,
     },
+    /// Raises or lowers the sound around `hz` by `gain_db`: a bell `octaves` wide, or a shelf that moves
+    /// everything below (low) or above (high) it.
+    Eq {
+        shape: EqShape,
+        hz: f32,
+        gain_db: f32,
+        octaves: f32,
+    },
+    /// Keeps every sample at or below `ceiling_db`: turns the sound down smoothly just before a peak that
+    /// would pass it, and back up over `release_ms`.
+    Limiter { ceiling_db: f32, release_ms: f32 },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EqShape {
+    Bell,
+    LowShelf,
+    HighShelf,
+}
+
+/// How far ahead the limiter starts turning down for a peak: short enough to keep the attack of drums and
+/// clicks, long enough that the turn down itself is not heard as a click.
+const LOOKAHEAD_MS: f32 = 5.0;
 
 impl Effect {
     /// One of each kind with its usual settings, in menu order.
@@ -68,6 +91,16 @@ impl Effect {
                 level_db: -12.0,
                 reversed: false,
             },
+            Effect::Eq {
+                shape: EqShape::Bell,
+                hz: 1000.0,
+                gain_db: -3.0,
+                octaves: 1.0,
+            },
+            Effect::Limiter {
+                ceiling_db: -1.0,
+                release_ms: 100.0,
+            },
         ]
     }
 
@@ -87,13 +120,20 @@ impl Effect {
             Effect::LowPass { .. } => "Low-pass",
             Effect::Echo { .. } => "Echo",
             Effect::Reverb { .. } => "Reverb",
+            Effect::Eq { .. } => "EQ",
+            Effect::Limiter { .. } => "Limiter",
         }
     }
 
     /// How long after a range the effect still sounds: until it is 60 dB below the sound that went in.
     pub fn tail(&self, rate: u32) -> Frames {
         match *self {
-            Effect::Normalize { .. } | Effect::Loudness { .. } | Effect::HighPass { .. } | Effect::LowPass { .. } => 0,
+            Effect::Normalize { .. }
+            | Effect::Loudness { .. }
+            | Effect::HighPass { .. }
+            | Effect::LowPass { .. }
+            | Effect::Eq { .. }
+            | Effect::Limiter { .. } => 0,
             Effect::Echo {
                 delay_ms,
                 fade_db,
@@ -163,26 +203,30 @@ impl Effect {
     /// How much sound before a range a filter hears, so it is settled where the range starts: its memory of the
     /// past fades to -80 dB in this time. The other effects start from silence at the range start.
     pub(crate) fn warmup(&self, rate: u32) -> Frames {
-        let Some((hz, stages)) = self.filter() else { return 0 };
-        let w0 = std::f64::consts::TAU * f64::from(cutoff(hz, rate)) / f64::from(rate.max(1));
-        // The slowest stage decays by exp(-w0 / (2 q)) per frame.
-        let q = stages.iter().copied().fold(0.0f64, f64::max);
-        let frames = 9.21 * 2.0 * q / w0.max(1e-9);
+        let stages = self.filter_stages(rate);
+        let frames = stages.iter().map(Biquad::settle_frames).fold(0.0f64, f64::max);
         (frames.ceil() as Frames)
             .saturating_mul(stages.len() as Frames)
             .min(Frames::from(rate) * 2)
     }
 
-    /// Cutoff and the Q of each stage, for the filters.
-    fn filter(&self) -> Option<(f32, &'static [f64])> {
+    /// The filter stages of high-pass, low-pass and EQ; none for the other effects.
+    fn filter_stages(&self, rate: u32) -> Vec<Biquad> {
         // Butterworth: flat until the cutoff; the steep one is two stages.
         const GENTLE: &[f64] = &[std::f64::consts::FRAC_1_SQRT_2];
         const STEEP: &[f64] = &[0.541_196_1, 1.306_563];
         match *self {
-            Effect::HighPass { hz, steep } | Effect::LowPass { hz, steep } => {
-                Some((hz, if steep { STEEP } else { GENTLE }))
-            }
-            _ => None,
+            Effect::HighPass { hz, steep } | Effect::LowPass { hz, steep } => (if steep { STEEP } else { GENTLE })
+                .iter()
+                .map(|&q| Biquad::pass(*self, hz, q, rate))
+                .collect(),
+            Effect::Eq {
+                shape,
+                hz,
+                gain_db,
+                octaves,
+            } => vec![Biquad::eq(shape, hz, gain_db, octaves, rate)],
+            _ => vec![],
         }
     }
 
@@ -192,11 +236,27 @@ impl Effect {
             Effect::Normalize { peak_db } if !within(peak_db, -60.0..=0.0) => {
                 "normalize goes to a peak between -60 and 0 dB"
             }
-            Effect::Loudness { lufs, peak_db } if !within(lufs, -60.0..=0.0) || !within(peak_db, -60.0..=0.0) => {
-                "the loudness and the peak limit must be between -60 and 0"
+            Effect::Loudness { lufs, .. } if !within(lufs, -60.0..=0.0) => {
+                "the loudness must be between -60 and 0 LUFS"
             }
-            Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. } if !within(hz, 10.0..=40_000.0) => {
+            // Above 0 dB only makes sense with a limiter after it, which brings the peaks back down.
+            Effect::Loudness { peak_db, .. } if !within(peak_db, -60.0..=20.0) => {
+                "the peak limit must be between -60 and +20 dB"
+            }
+            Effect::HighPass { hz, .. } | Effect::LowPass { hz, .. } | Effect::Eq { hz, .. }
+                if !within(hz, 10.0..=40_000.0) =>
+            {
                 "a filter's frequency must be between 10 Hz and 40 kHz"
+            }
+            Effect::Eq { gain_db, .. } if !within(gain_db, -24.0..=24.0) => "an EQ raises or lowers by at most 24 dB",
+            Effect::Eq { octaves, .. } if !within(octaves, 0.1..=4.0) => {
+                "a bell must be between 0.1 and 4 octaves wide"
+            }
+            Effect::Limiter { ceiling_db, .. } if !within(ceiling_db, -40.0..=0.0) => {
+                "a limiter's ceiling must be between -40 and 0 dB"
+            }
+            Effect::Limiter { release_ms, .. } if !within(release_ms, 1.0..=2000.0) => {
+                "a limiter's release must be between 1 ms and 2 s"
             }
             Effect::Echo { delay_ms, .. } if !within(delay_ms, 10.0..=2000.0) => {
                 "an echo's delay must be between 10 ms and 2 s"
@@ -441,7 +501,10 @@ fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) ->
             c.reverse();
         });
     } else {
-        buffer.iter_mut().chain([&mut weights]).for_each(|c| c.resize(c.len() + tail, 0.0));
+        buffer
+            .iter_mut()
+            .chain([&mut weights])
+            .for_each(|c| c.resize(c.len() + tail, 0.0));
     }
     apply(effect, rate, gain.map_or(1.0, |g| g.0), &mut buffer, &weights);
     if effect.reversed() {
@@ -479,13 +542,28 @@ fn measured_gain(effect: &Effect, audio: [&[f32]; 2], rate: u32, start: Frames) 
 fn apply(effect: Effect, rate: u32, gain: f32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
     match effect {
         Effect::Normalize { .. } | Effect::Loudness { .. } => apply_gain(gain, sound, weights),
-        Effect::HighPass { .. } | Effect::LowPass { .. } => filter(effect, rate, sound, weights),
+        Effect::HighPass { .. } | Effect::LowPass { .. } | Effect::Eq { .. } => {
+            filter(&effect.filter_stages(rate), sound, weights);
+        }
+        Effect::Limiter { ceiling_db, release_ms } => limiter(
+            db_to_amp(ceiling_db),
+            usize::try_from(ms_frames(LOOKAHEAD_MS, rate)).unwrap_or(1),
+            1.0 - (-1.0 / ms_frames(release_ms, rate) as f32).exp(),
+            sound,
+            weights,
+        ),
         Effect::Echo {
             delay_ms,
             fade_db,
             level_db,
             ..
-        } => echo(ms_frames(delay_ms, rate), db_to_amp(-fade_db), db_to_amp(level_db), sound, weights),
+        } => echo(
+            ms_frames(delay_ms, rate),
+            db_to_amp(-fade_db),
+            db_to_amp(level_db),
+            sound,
+            weights,
+        ),
         Effect::Reverb { seconds, level_db, .. } => {
             Reverb::new(seconds, rate).run(sound, weights, db_to_amp(level_db));
         }
@@ -500,9 +578,7 @@ fn apply_gain(gain: f32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
     }
 }
 
-fn filter(effect: Effect, rate: u32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
-    let Some((hz, qs)) = effect.filter() else { return };
-    let stages: Vec<Biquad> = qs.iter().map(|&q| Biquad::new(effect, hz, q, rate)).collect();
+fn filter(stages: &[Biquad], sound: &mut [Vec<f32>; 2], weights: &[f32]) {
     for channel in sound {
         let mut memory = vec![[0.0; 4]; stages.len()];
         for (s, weight) in channel.iter_mut().zip(weights) {
@@ -514,6 +590,63 @@ fn filter(effect: Effect, rate: u32, sound: &mut [Vec<f32>; 2], weights: &[f32])
             *s = dry + weight * (wet - dry);
         }
     }
+}
+
+/// Turns both sides down together, so the sound stays in place, by the gain each frame needs to stay at or below
+/// `ceiling`. The whole sound is there, so it can see a peak `lookahead` frames before it comes.
+fn limiter(ceiling: f32, lookahead: usize, release: f32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
+    let [left, right] = &*sound;
+    let needed: Vec<f32> = left
+        .iter()
+        .zip(right)
+        .map(|(l, r)| {
+            let peak = l.abs().max(r.abs());
+            if peak > ceiling { ceiling / peak } else { 1.0 }
+        })
+        .collect();
+    // The lowest need of the next `lookahead` frames, averaged over the last `lookahead`: every frame of that
+    // average holds the need of the peak, so it is low enough there, and it slopes down smoothly before it.
+    let lowest = lowest_ahead(&needed, lookahead.max(1));
+    let mut sum = 0.0f64;
+    let mut gain = 1.0f32;
+    let gains: Vec<f32> = (0..lowest.len())
+        .map(|i| {
+            sum += f64::from(lowest.get(i).copied().unwrap_or(1.0));
+            if let Some(gone) = i.checked_sub(lookahead).and_then(|j| lowest.get(j)) {
+                sum -= f64::from(*gone);
+            }
+            let smooth = (sum / (i + 1).min(lookahead) as f64) as f32;
+            // Down at once, up slowly: coming back fast would be heard as pumping.
+            gain = smooth.min(gain + (1.0 - gain) * release);
+            gain
+        })
+        .collect();
+    for channel in sound {
+        for ((s, weight), gain) in channel.iter_mut().zip(weights).zip(&gains) {
+            *s += weight * (*s * gain - *s);
+        }
+    }
+}
+
+/// For each frame, the lowest of it and the `n - 1` after it.
+fn lowest_ahead(values: &[f32], n: usize) -> Vec<f32> {
+    let mut out = vec![1.0; values.len()];
+    // Frames still to come, from the lowest; a later one that is lower makes the ones before it irrelevant.
+    let mut window: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for i in (0..values.len()).rev() {
+        let value = values.get(i).copied().unwrap_or(1.0);
+        while window.back().and_then(|&j| values.get(j)).is_some_and(|v| *v >= value) {
+            window.pop_back();
+        }
+        window.push_back(i);
+        while window.front().is_some_and(|&j| j >= i + n) {
+            window.pop_front();
+        }
+        if let (Some(o), Some(v)) = (out.get_mut(i), window.front().and_then(|&j| values.get(j))) {
+            *o = *v;
+        }
+    }
+    out
 }
 
 /// Repeats every `delay` frames, `feedback` as loud as the one before, the first at `level`.
@@ -533,6 +666,11 @@ fn echo(delay: Frames, feedback: f32, level: f32, sound: &mut [Vec<f32>; 2], wei
     }
 }
 
+/// The frequency as an angle per frame, kept below the highest frequency the rate can hold.
+fn angle(hz: f32, rate: u32) -> f64 {
+    std::f64::consts::TAU * f64::from(cutoff(hz, rate)) / f64::from(rate.max(1))
+}
+
 /// Keeps the cutoff below the highest frequency the rate can hold.
 fn cutoff(hz: f32, rate: u32) -> f32 {
     hz.min(rate as f32 * 0.45).max(1.0)
@@ -545,18 +683,74 @@ pub(crate) struct Biquad {
 }
 
 impl Biquad {
-    fn new(effect: Effect, hz: f32, q: f64, rate: u32) -> Biquad {
-        let w0 = std::f64::consts::TAU * f64::from(cutoff(hz, rate)) / f64::from(rate.max(1));
-        let (sin, cos) = w0.sin_cos();
+    /// A high-pass or low-pass stage.
+    fn pass(effect: Effect, hz: f32, q: f64, rate: u32) -> Biquad {
+        let (sin, cos) = angle(hz, rate).sin_cos();
         let alpha = sin / (2.0 * q);
-        let a0 = 1.0 + alpha;
         let b = match effect {
             Effect::HighPass { .. } => [(1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0],
             _ => [(1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0],
         };
+        Biquad::normalized(b, [1.0 + alpha, -2.0 * cos, 1.0 - alpha])
+    }
+
+    /// A bell or shelf; shelves with the cookbook's steepest slope that does not overshoot.
+    fn eq(shape: EqShape, hz: f32, gain_db: f32, octaves: f32, rate: u32) -> Biquad {
+        let w0 = angle(hz, rate);
+        let (sin, cos) = w0.sin_cos();
+        let a = 10f64.powf(f64::from(gain_db) / 40.0);
+        match shape {
+            EqShape::Bell => {
+                let alpha = sin * (std::f64::consts::LN_2 / 2.0 * f64::from(octaves) * w0 / sin).sinh();
+                Biquad::normalized(
+                    [1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a],
+                    [1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a],
+                )
+            }
+            EqShape::LowShelf | EqShape::HighShelf => {
+                let k = 2.0 * a.sqrt() * sin / std::f64::consts::SQRT_2;
+                // A high shelf is the low shelf mirrored in frequency: the cosine changes sign.
+                let (c, s) = if shape == EqShape::LowShelf {
+                    (cos, 1.0)
+                } else {
+                    (-cos, -1.0)
+                };
+                Biquad::normalized(
+                    [
+                        a * ((a + 1.0) - (a - 1.0) * c + k),
+                        s * 2.0 * a * ((a - 1.0) - (a + 1.0) * c),
+                        a * ((a + 1.0) - (a - 1.0) * c - k),
+                    ],
+                    [
+                        (a + 1.0) + (a - 1.0) * c + k,
+                        s * -2.0 * ((a - 1.0) + (a + 1.0) * c),
+                        (a + 1.0) + (a - 1.0) * c - k,
+                    ],
+                )
+            }
+        }
+    }
+
+    fn normalized(b: [f64; 3], [a0, a1, a2]: [f64; 3]) -> Biquad {
         Biquad {
             b: b.map(|v| v / a0),
-            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+            a: [a1 / a0, a2 / a0],
+        }
+    }
+
+    /// How many frames its memory of the past takes to fade to -80 dB: set by its slowest pole.
+    fn settle_frames(&self) -> f64 {
+        let [a1, a2] = self.a;
+        let disc = a1 * a1 - 4.0 * a2;
+        let radius = if disc < 0.0 {
+            a2.max(0.0).sqrt()
+        } else {
+            ((-a1).abs() + disc.sqrt()) / 2.0
+        };
+        if radius >= 1.0 {
+            f64::MAX
+        } else {
+            9.21 / -radius.max(1e-12).ln()
         }
     }
 
@@ -915,6 +1109,76 @@ mod tests {
     }
 
     #[test]
+    fn eq_raises_a_bell_and_a_shelf_and_leaves_the_rest() {
+        let eq = |shape, hz| Effect::Eq {
+            shape,
+            hz,
+            gain_db: 6.0,
+            octaves: 1.0,
+        };
+        let db = |s: &Session| 20.0 * (level_after(s) / 0.5).log10();
+        let near = |got: f32, want: f32| (got - want).abs() < 0.3;
+        // The tone at the bell's centre is raised by the gain; two octaves off, hardly at all.
+        assert!(near(db(&tone_session(1000.0, eq(EqShape::Bell, 1000.0))), 6.0));
+        assert!(near(db(&tone_session(4000.0, eq(EqShape::Bell, 1000.0))), 0.0));
+        // A shelf moves everything on its side, the far side stays.
+        assert!(near(db(&tone_session(50.0, eq(EqShape::LowShelf, 500.0))), 6.0));
+        assert!(near(db(&tone_session(5000.0, eq(EqShape::LowShelf, 500.0))), 0.0));
+        assert!(near(db(&tone_session(10_000.0, eq(EqShape::HighShelf, 1000.0))), 6.0));
+        assert!(near(db(&tone_session(100.0, eq(EqShape::HighShelf, 1000.0))), 0.0));
+    }
+
+    #[test]
+    fn a_limiter_after_loudness_reaches_the_target_without_passing_the_ceiling() {
+        // The tone peaks at -6 dB and reads -6 LUFS, so 0 LUFS takes its peaks to 0 dB; the limiter holds them at -3.
+        let mut s = tone_session(
+            997.0,
+            Effect::Loudness {
+                lufs: 0.0,
+                peak_db: 20.0,
+            },
+        );
+        let track = s.project().tracks[0].id;
+        s.execute(Command::AddEffectLane {
+            track: Some(track),
+            effect: Effect::Limiter {
+                ceiling_db: -3.0,
+                release_ms: 50.0,
+            },
+        })
+        .unwrap();
+        let lane = s.project().tracks[0].effects[1].id;
+        s.execute(Command::AddEffectRange {
+            lane,
+            start: 0,
+            end: 48_000,
+        })
+        .unwrap();
+        let sound = render(s.project(), 0, 48_000);
+        let peak = sound.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak <= db_to_amp(-3.0) + 1e-6, "{peak}");
+        let lufs = loudness(&render(s.project(), 12_000, 24_000), 48_000).unwrap();
+        // A steady tone held 3 dB down reads 3 dB quieter: turned down smoothly, not cut off at the ceiling.
+        assert!((lufs + 3.0).abs() < 0.1, "{lufs}");
+    }
+
+    #[test]
+    fn a_limiter_turns_down_just_around_a_spike() {
+        // Quiet sound with one spike at frame 1000; 5 frames of lookahead, back up within about 10 frames.
+        let mut sound: [Vec<f32>; 2] = [vec![0.1; 2000], vec![0.1; 2000]];
+        sound[0][1000] = 1.0;
+        let weights = vec![1.0; 2000];
+        limiter(0.5, 5, 0.1, &mut sound, &weights);
+        assert!((sound[0][1000] - 0.5).abs() < 1e-6, "the spike at the ceiling");
+        assert!(sound[1][1000] < 0.06, "the other side turned down with it");
+        assert!(
+            sound[0][996] < 0.1 && sound[0][990] == 0.1,
+            "down shortly before, not long before"
+        );
+        assert!((sound[0][1100] - 0.1).abs() < 1e-4, "back up after the release");
+    }
+
+    #[test]
     fn high_pass_removes_hum_and_low_pass_removes_hiss() {
         let high = Effect::HighPass {
             hz: 1000.0,
@@ -968,7 +1232,11 @@ mod tests {
         .unwrap();
         let lane = s.project().tracks[0].effects[0].id;
         let tail = effect.tail(RATE);
-        let (start, end) = if effect.reversed() { (-tail, 200) } else { (0, 200 + tail) };
+        let (start, end) = if effect.reversed() {
+            (-tail, 200)
+        } else {
+            (0, 200 + tail)
+        };
         s.execute(Command::AddEffectRange { lane, start, end }).unwrap();
         s
     }
@@ -1029,7 +1297,11 @@ mod tests {
         })
         .unwrap();
         let tail = reverb(0.3).tail(RATE);
-        assert_eq!(edges(&s), (start, end, (start, end - tail)), "it hears more, the edges stay");
+        assert_eq!(
+            edges(&s),
+            (start, end, (start, end - tail)),
+            "it hears more, the edges stay"
+        );
         assert!(
             s.execute(Command::SetEffect {
                 range,

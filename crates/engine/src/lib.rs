@@ -10,7 +10,7 @@ mod model;
 mod project_file;
 mod session;
 
-pub use effects::{Effect, EffectLane, EffectRange, Gain, LaneId, RangeId};
+pub use effects::{Effect, EffectLane, EffectRange, EqShape, Gain, LaneId, RangeId};
 pub use generate::{Generated, Generator, NoiseColor, Wave, color_name, played_hz, wave_name};
 pub use io::{ExportFormat, ExportSettings, ExportTarget, Written, export, load_source, resample};
 pub use mix::{

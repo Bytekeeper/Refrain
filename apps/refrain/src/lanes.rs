@@ -1,7 +1,7 @@
 //! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
-use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, Gain, LaneId, Project, RangeId};
+use refrain_engine::{Command, Effect, EffectLane, EffectRange, EqShape, Frames, Gain, LaneId, Project, RangeId};
 
 use crate::{Editor, HANDLE, HEADER_W};
 
@@ -295,11 +295,16 @@ impl Editor {
             let reversed = dragged.is_some_and(|r| r.effect.reversed());
             // A range is longer than its tail, so the effect hears something.
             let tail = dragged.map_or_else(
-                || project.lane(drag.lane).map_or(0, |l| l.effect.tail(project.sample_rate)),
+                || {
+                    project
+                        .lane(drag.lane)
+                        .map_or(0, |l| l.effect.tail(project.sample_rate))
+                },
                 |r| r.effect.tail(project.sample_rate),
             );
             let hears = dragged.map_or((drag.start, drag.end), |r| {
-                r.effect.input((drag.start, drag.end), project.sample_rate, project.loop_end)
+                r.effect
+                    .input((drag.start, drag.end), project.sample_rate, project.loop_end)
             });
             match &mut drag.kind {
                 &mut RangeDragKind::New { anchor } => {
@@ -596,6 +601,15 @@ impl Editor {
                     (Effect::Reverb { seconds, reversed, .. }, _) => {
                         format!("{seconds:.1} s room{}", if reversed { ", reversed" } else { "" })
                     }
+                    (Effect::Eq { shape, hz, gain_db, .. }, _) => {
+                        let shape = match shape {
+                            EqShape::Bell => "at ",
+                            EqShape::LowShelf => "below ",
+                            EqShape::HighShelf => "above ",
+                        };
+                        format!("{gain_db:+.1} dB {shape}{}", hz_text(hz))
+                    }
+                    (Effect::Limiter { ceiling_db, .. }, _) => format!("at most {ceiling_db:.1} dB"),
                 };
                 for x in handles
                     .filter(|_| selected)

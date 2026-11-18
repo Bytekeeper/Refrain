@@ -1,7 +1,7 @@
 //! The menu of an effect lane: the settings of one range or of all, fades, order, removing; and the FX menu.
 
 use egui::Ui;
-use refrain_engine::{Command, Effect, EffectRange, Frames, LaneId, RangeId, TrackId};
+use refrain_engine::{Command, Effect, EffectRange, EqShape, Frames, LaneId, RangeId, TrackId};
 
 use crate::Editor;
 
@@ -196,7 +196,7 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
         Effect::Loudness { lufs, peak_db } => {
             let rows = [
                 ("As loud as", lufs, -60.0..=0.0, 0.1, " LUFS", 1),
-                ("Loudest point at most", peak_db, -60.0..=0.0, 0.1, " dB", 1),
+                ("Loudest point at most", peak_db, -60.0..=20.0, 0.1, " dB", 1),
             ];
             number_rows(ui, rows)
         }
@@ -249,5 +249,43 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
             let flipped = reversed_box(ui, reversed, "The room comes before the sound and swells into it");
             (changed || flipped, done || flipped)
         }
+        Effect::Eq {
+            shape,
+            hz,
+            gain_db,
+            octaves,
+        } => {
+            let mut picked = false;
+            ui.horizontal(|ui| {
+                for (value, text, hint) in [
+                    (EqShape::Bell, "Bell", "Around the frequency"),
+                    (EqShape::LowShelf, "Low shelf", "Everything below the frequency"),
+                    (EqShape::HighShelf, "High shelf", "Everything above the frequency"),
+                ] {
+                    picked |= ui.radio_value(shape, value, text).on_hover_text(hint).changed();
+                }
+            });
+            // Each pixel dragged moves the frequency by 1 %, so low and high frequencies are equally easy to set.
+            let speed = f64::from(hz.max(10.0) * 0.01);
+            let (mut changed, mut done) = number_rows(
+                ui,
+                [
+                    ("Frequency", hz, 10.0..=20_000.0, speed, " Hz", 0),
+                    ("Change by", gain_db, -24.0..=24.0, 0.1, " dB", 1),
+                ],
+            );
+            if *shape == EqShape::Bell {
+                let (c, d) = number_rows(ui, [("Width", octaves, 0.1..=4.0, 0.01, " octaves", 2)]);
+                (changed, done) = (changed || c, done || d);
+            }
+            (changed || picked, done || picked)
+        }
+        Effect::Limiter { ceiling_db, release_ms } => number_rows(
+            ui,
+            [
+                ("Loudest point at most", ceiling_db, -40.0..=0.0, 0.1, " dB", 1),
+                ("Back up in", release_ms, 1.0..=2000.0, 1.0, " ms", 0),
+            ],
+        ),
     }
 }
