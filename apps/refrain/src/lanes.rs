@@ -1,4 +1,5 @@
-//! Effect lanes below the tracks and below the mix: their layout, drawing, and editing ranges with the mouse.
+//! Effect lanes below each track and, for the mix, above the tracks: their layout, drawing, and editing ranges
+//! with the mouse.
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
 use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, Gain, LaneId, Project, RangeId};
@@ -71,22 +72,9 @@ impl Editor {
         }
     }
 
-    /// The Mix title row and its lanes, below everything else; nothing until the mix has an effect.
+    /// The mix's lanes, at the top of the timeline right under the Mix row, which they belong to.
     pub(crate) fn mix_height(&self) -> f32 {
-        match self.session.project().mix_effects.len() {
-            0 => 0.0,
-            n => (n + 1) as f32 * LANE_H,
-        }
-    }
-
-    /// Right below the last track's lanes, above the row that adds tracks.
-    fn mix_title(&self, rect: Rect) -> Rect {
-        let tracks = self.session.project().tracks.len();
-        let top = rect.top()
-            + (0..tracks)
-                .map(|r| self.row_height(r) + self.lanes_height(r))
-                .sum::<f32>();
-        Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), LANE_H))
+        self.session.project().mix_effects.len() as f32 * LANE_H
     }
 
     fn lane_rows(&self, rect: Rect) -> Vec<LaneRow> {
@@ -105,7 +93,7 @@ impl Editor {
                 lane: l.id,
             }));
         }
-        let top = self.mix_title(rect).bottom();
+        let top = rect.top();
         rows.extend(project.mix_effects.iter().enumerate().map(|(k, l)| LaneRow {
             rect: row(top, k),
             lane: l.id,
@@ -452,24 +440,6 @@ impl Editor {
         let lane_left = rect.left() + HEADER_W;
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals().clone();
-        if !project.mix_effects.is_empty() {
-            let title = self.mix_title(rect);
-            painter.rect_filled(title, 0.0, visuals.faint_bg_color);
-            painter.text(
-                title.left_center() + vec2(8.0, 0.0),
-                Align2::LEFT_CENTER,
-                "Mix",
-                FontId::proportional(13.0),
-                visuals.text_color(),
-            );
-            painter.text(
-                pos2(lane_left + 8.0, title.center().y),
-                Align2::LEFT_CENTER,
-                "effects on all tracks together",
-                FontId::proportional(11.0),
-                visuals.weak_text_color(),
-            );
-        }
         for row in self.lane_rows(rect) {
             let Some(lane) = project.lane(row.lane) else { continue };
             let header = Rect::from_min_max(row.rect.min, pos2(lane_left, row.rect.bottom()));

@@ -913,18 +913,18 @@ fn effect_ranges_are_edited_with_the_mouse() {
         lanes.flat_map(|l| l.ranges.iter().map(|r| (r.start, r.end))).collect()
     };
 
-    // The track lane is at y 218, the mix lane at y 266; x = 146 + frame / 50.
-    drag(&mut h, egui::pos2(226.0, 266.0), egui::pos2(466.0, 266.0));
+    // The mix lane is at y 108, above the track; the track lane at y 242; x = 146 + frame / 50.
+    drag(&mut h, egui::pos2(226.0, 108.0), egui::pos2(466.0, 108.0));
     assert_eq!(ranges(&h), [(8000, 32000), (4000, 16000)]);
-    drag(&mut h, egui::pos2(520.0, 218.0), egui::pos2(570.0, 218.0));
+    drag(&mut h, egui::pos2(520.0, 242.0), egui::pos2(570.0, 242.0));
     assert_eq!(ranges(&h), [(10_500, 34_500), (4000, 16000)]);
-    drag(&mut h, egui::pos2(836.0, 218.0), egui::pos2(806.0, 218.0));
+    drag(&mut h, egui::pos2(836.0, 242.0), egui::pos2(806.0, 242.0));
     assert_eq!(ranges(&h), [(10_500, 33_000), (4000, 16000)]);
     save(&mut h, "effect_lanes");
 
-    click(&mut h, 40.0, 218.0);
+    click(&mut h, 40.0, 242.0);
     assert!(!h.state().session.project().tracks[0].effects[0].enabled);
-    click(&mut h, 320.0, 266.0);
+    click(&mut h, 320.0, 108.0);
     h.key_press(egui::Key::Delete);
     h.run();
     assert_eq!(ranges(&h), [(10_500, 33_000)]);
@@ -939,8 +939,13 @@ fn effect_ranges_are_edited_with_the_mouse() {
 #[test]
 fn a_filter_is_added_and_set_from_the_menus() {
     let mut h = harness_sized(overlapping(), 400.0);
-    h.get_by_label("FX").click();
-    h.run();
+    // The track's, below the mix's in the Mix row.
+    let fx = h
+        .get_all_by_label("FX")
+        .map(|n| n.rect().center())
+        .max_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap();
+    click(&mut h, fx.x, fx.y);
     h.get_by_label("High-pass").click();
     h.run();
     let lane = |h: &Harness<'_, Editor>| h.state().session.project().tracks[0].effects[0].clone();

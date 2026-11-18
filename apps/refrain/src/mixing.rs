@@ -1,5 +1,5 @@
 //! The mixdown of the open project: the whole project as heard, made in the background after each edit, so
-//! editing never waits for it. Playback and the Mix level row use the latest one.
+//! editing never waits for it. Playback and the Mix row use the latest one.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

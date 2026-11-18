@@ -1,4 +1,4 @@
-//! The mix level row under the ruler: the loudest point of the whole mix over time, red where it goes over
+//! The Mix row under the ruler: the loudest point of the whole mix over time, red where it goes over
 //! 0 dB. It shows the latest mixdown (`mixing.rs`).
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -90,23 +90,35 @@ impl Editor {
         let title = painter.text(
             pos2(rect.left() + 8.0, rect.top() + 13.0),
             Align2::LEFT_CENTER,
-            "Mix level",
+            "Mix",
             FontId::proportional(12.0),
             ui.visuals().weak_text_color(),
         );
-        // Export lanes cut the mix this row shows, so they are added here.
-        let place = Rect::from_min_max(
+        // The mix's effects and export lanes sit right below and above this row, so they are added here.
+        let buttons = Rect::from_min_max(
             pos2(title.right() + 6.0, rect.top() + 4.0),
-            pos2(lane_left - 4.0, rect.top() + 22.0),
+            pos2(lane_left, rect.top() + 22.0),
         );
-        let add = egui::Button::new(egui::RichText::new("+ Export lane").small()).wrap_mode(egui::TextWrapMode::Extend);
-        if ui
-            .put(place, add)
-            .on_hover_text("Add an export lane: named ranges of the mix, each exported to a file of its own")
-            .clicked()
-        {
-            self.run(Command::AddRegionLane);
-        }
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(buttons).layout(layout), |ui| {
+            // Both fit next to "Mix" only this tight.
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.spacing_mut().button_padding.x = 2.0;
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let fx = match self.session.project().mix_effects.len() {
+                0 => "FX".to_string(),
+                n => format!("FX {n}"),
+            };
+            ui.menu_button(egui::RichText::new(fx).small(), |ui| self.effects_menu_ui(ui, None))
+                .response
+                .on_hover_text("Effects on all tracks together, such as normalizing the whole loop");
+            let add = ui
+                .add(egui::Button::new(egui::RichText::new("+ Export lane").small()))
+                .on_hover_text("Add an export lane: named ranges of the mix, each exported to a file of its own");
+            if add.clicked() {
+                self.run(Command::AddRegionLane);
+            }
+        });
         let area = Rect::from_min_max(
             pos2(lane_left, rect.top() + 2.0),
             pos2(rect.right(), rect.bottom() - 2.0),

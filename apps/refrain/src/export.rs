@@ -350,7 +350,7 @@ impl Editor {
             .collect();
         self.fail(format!(
             "{text}{kept} But samples went over 0 dB and {fate}; the loudest: {}. \
-             Lower a volume, or the target of a normalize. The Mix level row shows where.",
+             Lower a volume, or the target of a normalize. The Mix row shows where.",
             loudest.join(", ")
         ));
     }

@@ -12,7 +12,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   timeline.rs      the timeline: track rows and headers, ruler, scrollbar, layout
   clips.rs         drawing one clip and the overlap zone of a crossfade
   mixing.rs        the mixdown of the project, made in the background after each edit
-  levels.rs        the Mix level row: the mixdown's peaks over the whole project
+  levels.rs        the Mix row: the mixdown's peaks over the whole project
   mouse.rs         mouse editing: hit-testing, drags, snapping, and the clip, fade and channel menus
   lanes.rs         effect lanes under tracks and the mix: layout, drawing, range editing
   effect_menu.rs   an effect lane's menu (settings, fades, order) and the FX menu

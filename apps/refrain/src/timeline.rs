@@ -90,14 +90,6 @@ impl Editor {
             let name = format!("Track {}", project.tracks.len() + 1);
             self.run(Command::AddTrack { name });
         }
-        if !dropping_new {
-            let mix = Rect::from_min_size(add.right_top() + vec2(12.0, 0.0), vec2(60.0, 20.0));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(mix), |ui| {
-                ui.menu_button("Mix FX", |ui| self.effects_menu_ui(ui, None))
-                    .response
-                    .on_hover_text("Effects on all tracks together, such as normalizing the whole loop");
-            });
-        }
         if dropping_new {
             let row = last_row.shrink(2.0);
             let dash = Stroke::new(1.0, ui.visuals().weak_text_color());
@@ -529,10 +521,8 @@ impl Editor {
     }
 
     pub(crate) fn row_rect(&self, rect: Rect, row: usize) -> Rect {
-        let mut top = rect.top() + (0..row).map(|r| self.row_height(r) + self.lanes_height(r)).sum::<f32>();
-        if row >= self.session.project().tracks.len() {
-            top += self.mix_height();
-        }
+        let top =
+            rect.top() + self.mix_height() + (0..row).map(|r| self.row_height(r) + self.lanes_height(r)).sum::<f32>();
         Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), self.row_height(row)))
     }
 
