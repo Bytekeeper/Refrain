@@ -353,40 +353,10 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, rate: u32, loop_end: Option<Frame
     Ok(())
 }
 
-enum State {
-    Nothing,
-    /// The last two inputs and outputs of each stage, per channel.
-    Filter(Vec<[[f64; 4]; 2]>),
-    Echo {
-        lines: [Vec<f32>; 2],
-        at: usize,
-    },
-    Reverb(Box<Reverb>),
-}
-
-impl State {
-    fn new(effect: Effect, rate: u32) -> State {
-        match effect {
-            Effect::Normalize { .. } | Effect::Loudness { .. } => State::Nothing,
-            Effect::HighPass { .. } | Effect::LowPass { .. } => {
-                State::Filter(vec![[[0.0; 4]; 2]; effect.filter().map_or(0, |(_, s)| s.len())])
-            }
-            Effect::Echo { delay_ms, .. } => {
-                let len = usize::try_from(ms_frames(delay_ms, rate)).unwrap_or(1);
-                State::Echo {
-                    lines: [vec![0.0; len], vec![0.0; len]],
-                    at: 0,
-                }
-            }
-            Effect::Reverb { seconds, .. } => State::Reverb(Box::new(Reverb::new(seconds, rate))),
-        }
-    }
-}
-
-/// Applies the lane to `sound`: the whole project from frame 0, with a loop one loop. Each range works out
-/// what it changes over its span (the range with its tail) from the sound that came into the lane; then all
-/// changes are added, so a lane costs what its ranges cover. With a loop a change past the loop end goes on at
-/// the start, as in a loop that has always been playing.
+/// Applies the lane to `sound`: the whole project from frame 0, with a loop one loop. Each range makes the
+/// sound of its span from the sound that came into the lane, then all are copied in: a filter hears a little
+/// before its range, which must be the lane's input, not what a range before it made. A lane costs what its
+/// ranges cover. With a loop a range past the loop end goes on at the start.
 /// Normalize and loudness ranges put what they measured into `gains`.
 pub(crate) fn lane_into(
     lane: &EffectLane,
@@ -397,88 +367,101 @@ pub(crate) fn lane_into(
     if !lane.enabled {
         return;
     }
-    let mut changes = vec![];
+    let mut made = vec![];
     for range in &lane.ranges {
-        let (from, change, gain) = range_change(range, project, sound);
+        let (range_sound, gain) = range_sound(range, project, sound);
         if let Some(gain) = gain {
             gains.insert(range.id, gain);
         }
-        changes.push((from, change));
+        made.push((range.start, range_sound));
     }
     let loop_end = project.loop_end.filter(|l| *l > 0);
-    for (from, change) in changes {
-        for (channel, change) in sound.iter_mut().zip(&change) {
-            for (t, d) in (from..).zip(change) {
-                let at = loop_end.map_or(t, |l| t.rem_euclid(l));
-                if let Some(s) = usize::try_from(at).ok().and_then(|i| channel.get_mut(i)) {
-                    *s += d;
-                }
-            }
+    for (from, made) in made {
+        for (channel, made) in sound.iter_mut().zip(&made) {
+            write(channel, loop_end, from, made);
         }
     }
 }
 
-/// What one range adds to `sound`, from the frame returned on; and for normalize and loudness the gain.
-fn range_change(
-    range: &EffectRange,
-    project: &Project,
-    sound: &[Vec<f32>; 2],
-) -> (Frames, [Vec<f32>; 2], Option<Gain>) {
+/// Copies `made` into `channel` from timeline frame `from`; with a loop round it, otherwise what lies outside
+/// is left out.
+fn write(channel: &mut [f32], loop_end: Option<Frames>, from: Frames, mut made: &[f32]) {
+    let mut at = from;
+    while !made.is_empty() {
+        let pos = loop_end.map_or(at, |l| at.rem_euclid(l));
+        let to_loop_end = loop_end.map_or(usize::MAX, |l| usize::try_from(l - pos).unwrap_or(0).max(1));
+        let (piece, rest) = made.split_at(made.len().min(to_loop_end));
+        let skip = usize::try_from(pos.saturating_neg()).unwrap_or(0);
+        let first = usize::try_from(pos).unwrap_or(0);
+        for (to, from) in channel.iter_mut().skip(first).zip(piece.iter().skip(skip)) {
+            *to = *from;
+        }
+        at = at.saturating_add(Frames::try_from(piece.len()).unwrap_or(Frames::MAX));
+        made = rest;
+    }
+}
+
+/// The sound of one range's span, from the range start, made from the sound that came into the lane; for
+/// normalize and loudness also what they measured.
+fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) -> ([Vec<f32>; 2], Option<Gain>) {
     let rate = project.sample_rate;
     let loop_end = project.loop_end.filter(|l| *l > 0);
+    let effect = range.effect;
     // A range round the whole loop has no edges: its end runs straight into its start.
-    let whole_loop = loop_end.is_some_and(|l| range.end - range.start >= l);
-    let (start, end) = range.effect.input((range.start, range.end), rate, loop_end);
+    let whole_loop = loop_end.filter(|l| range.end - range.start >= *l);
+    let (start, end) = effect.input((range.start, range.end), rate, loop_end);
     let (fade_in, fade_out) = (range.fade_in.max(1) as f32, range.fade_out.max(1) as f32);
     let weight = |t: Frames| {
         let (into, left) = ((t - start) as f32, (end - t) as f32);
-        match (t >= start && t < end, whole_loop) {
+        match (t >= start && t < end, whole_loop.is_some()) {
             (false, _) => 0.0,
             (true, true) => 1.0,
             (true, false) => ((into + 1.0) / fade_in).min(left / fade_out).min(1.0),
         }
     };
-    let len = usize::try_from(end - start).unwrap_or(0);
-    let tail = usize::try_from(range.effect.tail(rate)).unwrap_or(0);
-    let state = &mut State::new(range.effect, rate);
-    if range.effect.reversed() {
-        // Backwards through what it hears, so the tail comes before it.
-        let mut dry = read(sound, loop_end, start, len);
-        let mut weights: Vec<f32> = (start..end).map(weight).collect();
-        weights.reverse();
-        weights.resize(len + tail, 0.0);
-        for channel in &mut dry {
-            channel.reverse();
-            channel.resize(len + tail, 0.0);
-        }
-        let mut change = [vec![0.0; len + tail], vec![0.0; len + tail]];
-        apply_range(range, 1.0, rate, &dry, &weights, &mut change, state);
-        change.iter_mut().for_each(|c| c.reverse());
-        return (start - tail as Frames, change, None);
-    }
-    let before = usize::try_from(range.effect.warmup(rate)).unwrap_or(0);
-    let from = start - before as Frames;
-    let n = before + len + tail;
-    let dry = read(sound, loop_end, from, n);
-    let weights: Vec<f32> = (from..).take(n).map(weight).collect();
-    let gain = match range.effect {
+    // A filter first hears a little before the range, so it is settled where the range starts.
+    let before = effect.warmup(rate);
+    let from = range.start - before;
+    let mut buffer = read(sound, loop_end, from, usize::try_from(range.end - from).unwrap_or(0));
+    let mut weights: Vec<f32> = (from..range.end).map(weight).collect();
+    let gain = match effect {
         Effect::Normalize { .. } | Effect::Loudness { .. } => {
-            let under = dry.each_ref().map(|c| c.get(before..before + len).unwrap_or(&[]));
-            Some(measured_gain(&range.effect, under, rate, start))
+            let heard = usize::try_from(start - from).unwrap_or(0)..usize::try_from(end - from).unwrap_or(0);
+            let heard = buffer.each_ref().map(|c| c.get(heard.clone()).unwrap_or(&[]));
+            Some(measured_gain(&effect, heard, rate, start))
         }
         _ => None,
     };
-    let mut change = [vec![0.0; n], vec![0.0; n]];
-    apply_range(
-        range,
-        gain.map_or(1.0, |g| g.0),
-        rate,
-        &dry,
-        &weights,
-        &mut change,
-        state,
-    );
-    (from, change, gain)
+    // Round the whole loop the tail goes on into the range's own start, so it is made into silence after
+    // the loop and added there.
+    let tail = whole_loop.map_or(0, |_| usize::try_from(effect.tail(rate)).unwrap_or(0));
+    if effect.reversed() {
+        buffer.iter_mut().chain([&mut weights]).for_each(|c| {
+            c.splice(0..0, std::iter::repeat_n(0.0, tail));
+            c.reverse();
+        });
+    } else {
+        buffer.iter_mut().chain([&mut weights]).for_each(|c| c.resize(c.len() + tail, 0.0));
+    }
+    apply(effect, rate, gain.map_or(1.0, |g| g.0), &mut buffer, &weights);
+    if effect.reversed() {
+        buffer.iter_mut().for_each(|c| c.reverse());
+    }
+    let before = usize::try_from(before).unwrap_or(0);
+    buffer.iter_mut().for_each(|c| drop(c.drain(..before.min(c.len()))));
+    if let Some(l) = whole_loop {
+        let first = if effect.reversed() { -(tail as Frames) } else { 0 };
+        buffer = buffer.map(|c| {
+            let mut folded = vec![0.0; usize::try_from(l).unwrap_or(0)];
+            for (t, v) in (first..).zip(c) {
+                if let Some(f) = usize::try_from(t.rem_euclid(l)).ok().and_then(|i| folded.get_mut(i)) {
+                    *f += v;
+                }
+            }
+            folded
+        });
+    }
+    (buffer, gain)
 }
 
 /// The gain normalize or loudness gives `audio`, the sound under a range that starts at timeline frame `start`.
@@ -491,60 +474,61 @@ fn measured_gain(effect: &Effect, audio: [&[f32]; 2], rate: u32, start: Frames) 
     gain_for(effect, peak, lufs)
 }
 
-fn apply_range(
-    range: &EffectRange,
-    gain: f32,
-    rate: u32,
-    dry: &[Vec<f32>; 2],
-    weights: &[f32],
-    out: &mut [Vec<f32>; 2],
-    state: &mut State,
-) {
-    let wet: [Vec<f32>; 2] = match state {
-        State::Nothing => dry.clone().map(|c| c.iter().map(|s| s * gain).collect()),
-        State::Filter(stages) => {
-            let mut wet = dry.clone();
-            if let Some((hz, qs)) = range.effect.filter() {
-                for (&q, memory) in qs.iter().zip(stages.iter_mut()) {
-                    let biquad = Biquad::new(range.effect, hz, q, rate);
-                    for (channel, memory) in wet.iter_mut().zip(memory.iter_mut()) {
-                        biquad.run(memory, channel);
-                    }
-                }
+/// Runs the effect over `sound` in place. Every effect gets the same: both sides as flat arrays, and how much
+/// of the effect each frame gets, so each can be made as fast as it likes on its own.
+fn apply(effect: Effect, rate: u32, gain: f32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
+    match effect {
+        Effect::Normalize { .. } | Effect::Loudness { .. } => apply_gain(gain, sound, weights),
+        Effect::HighPass { .. } | Effect::LowPass { .. } => filter(effect, rate, sound, weights),
+        Effect::Echo {
+            delay_ms,
+            fade_db,
+            level_db,
+            ..
+        } => echo(ms_frames(delay_ms, rate), db_to_amp(-fade_db), db_to_amp(level_db), sound, weights),
+        Effect::Reverb { seconds, level_db, .. } => {
+            Reverb::new(seconds, rate).run(sound, weights, db_to_amp(level_db));
+        }
+    }
+}
+
+fn apply_gain(gain: f32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
+    for channel in sound {
+        for (s, weight) in channel.iter_mut().zip(weights) {
+            *s += weight * (*s * gain - *s);
+        }
+    }
+}
+
+fn filter(effect: Effect, rate: u32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
+    let Some((hz, qs)) = effect.filter() else { return };
+    let stages: Vec<Biquad> = qs.iter().map(|&q| Biquad::new(effect, hz, q, rate)).collect();
+    for channel in sound {
+        let mut memory = vec![[0.0; 4]; stages.len()];
+        for (s, weight) in channel.iter_mut().zip(weights) {
+            let dry = *s;
+            let mut wet = dry;
+            for (stage, memory) in stages.iter().zip(&mut memory) {
+                wet = stage.step(memory, f64::from(wet)) as f32;
             }
-            wet
+            *s = dry + weight * (wet - dry);
         }
-        State::Echo { lines, at } => {
-            let Effect::Echo { fade_db, level_db, .. } = range.effect else {
-                return;
-            };
-            let (feedback, level) = (db_to_amp(-fade_db), db_to_amp(level_db));
-            let len = lines[0].len().max(1);
-            for ((channel, dry), line) in out.iter_mut().zip(dry).zip(lines.iter_mut()) {
-                let mut i = *at;
-                for ((sample, dry), weight) in channel.iter_mut().zip(dry).zip(weights) {
-                    if let Some(slot) = line.get_mut(i) {
-                        let delayed = *slot;
-                        *slot = dry * weight + feedback * delayed;
-                        *sample += level * delayed;
-                    }
-                    i = next(i, len);
-                }
+    }
+}
+
+/// Repeats every `delay` frames, `feedback` as loud as the one before, the first at `level`.
+fn echo(delay: Frames, feedback: f32, level: f32, sound: &mut [Vec<f32>; 2], weights: &[f32]) {
+    for channel in sound {
+        let mut line = vec![0.0f32; usize::try_from(delay).unwrap_or(0)];
+        let len = line.len().max(1);
+        let mut at = 0;
+        for (s, weight) in channel.iter_mut().zip(weights) {
+            if let Some(slot) = line.get_mut(at) {
+                let delayed = *slot;
+                *slot = *s * weight + feedback * delayed;
+                *s += level * delayed;
             }
-            *at = (*at + weights.len()) % len;
-            return;
-        }
-        State::Reverb(reverb) => {
-            let Effect::Reverb { level_db, .. } = range.effect else {
-                return;
-            };
-            reverb.run(dry, weights, db_to_amp(level_db), out);
-            return;
-        }
-    };
-    for ((channel, dry), wet) in out.iter_mut().zip(dry).zip(wet) {
-        for (((sample, dry), wet), weight) in channel.iter_mut().zip(dry).zip(wet).zip(weights) {
-            *sample += weight * (wet - dry);
+            at = next(at, len);
         }
     }
 }
@@ -576,13 +560,7 @@ impl Biquad {
         }
     }
 
-    /// Filters in place, going on from the last two inputs and outputs in `memory`.
-    pub(crate) fn run(&self, memory: &mut [f64; 4], samples: &mut [f32]) {
-        for s in samples {
-            *s = self.step(memory, f64::from(*s)) as f32;
-        }
-    }
-
+    /// One frame through the filter, going on from the last two inputs and outputs in `memory`.
     #[inline]
     pub(crate) fn step(&self, memory: &mut [f64; 4], x: f64) -> f64 {
         let [x1, x2, y1, y2] = *memory;
@@ -658,15 +636,16 @@ impl Reverb {
         }
     }
 
-    /// Adds the room to `out`, fed with both sides of `dry` times `weights`.
-    fn run(&mut self, dry: &[Vec<f32>; 2], weights: &[f32], level: f32, out: &mut [Vec<f32>; 2]) {
-        let feed: Vec<f32> = dry[0]
+    /// Adds the room to `sound`, fed with both sides of it times `weights`.
+    fn run(&mut self, sound: &mut [Vec<f32>; 2], weights: &[f32], level: f32) {
+        let [left, right] = &*sound;
+        let feed: Vec<f32> = left
             .iter()
-            .zip(&dry[1])
+            .zip(right)
             .zip(weights)
             .map(|((l, r), w)| (l + r) * 0.5 * w * self.scale)
             .collect();
-        for ((channel, combs), passes) in out.iter_mut().zip(&mut self.combs).zip(&mut self.passes) {
+        for ((channel, combs), passes) in sound.iter_mut().zip(&mut self.combs).zip(&mut self.passes) {
             for (sample, &input) in channel.iter_mut().zip(&feed) {
                 let mut room = 0.0;
                 for comb in combs.iter_mut() {
