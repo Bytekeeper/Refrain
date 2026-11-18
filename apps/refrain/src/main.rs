@@ -205,6 +205,7 @@ impl Editor {
         self.autosave(ui.ctx());
         self.export_panel(ui.ctx());
         self.generate_panel(ui.ctx());
+        self.take_dropped_files(ui.ctx());
         egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal_wrapped(|ui| self.toolbar(ui)));
         egui::Panel::bottom("status").show(ui, |ui| {
             if self.status.is_empty() {

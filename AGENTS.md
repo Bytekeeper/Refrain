@@ -19,7 +19,7 @@ apps/refrain       the egui window. Reads the project, sends commands, shows err
   regions.rs       export lanes above the level row (regions in the engine): named ranges of the mix,
                    each exported as a file of its own
   generate.rs      adding a generated clip (tone, noise, blips) and its settings panel
-  files.rs         open, save, import, unsaved-changes question
+  files.rs         open, save, import, files dropped from outside, unsaved-changes question
   export.rs        export panel and "export again" to the project's export target
   recovery.rs      copies of unsaved work, restored after a crash
   playback.rs      audio output (cpal): plays the latest mixdown

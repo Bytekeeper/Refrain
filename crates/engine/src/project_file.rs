@@ -423,12 +423,7 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
 /// Audio made for a speed: by source index, speed and whether it keeps the pitch.
 type SpedAudio = Vec<((usize, u64, bool), Arc<Source>)>;
 
-fn clip_from_file(
-    id: ClipId,
-    c: ClipFile,
-    sources: &[Arc<Source>],
-    made: &mut SpedAudio,
-) -> Result<Clip> {
+fn clip_from_file(id: ClipId, c: ClipFile, sources: &[Arc<Source>], made: &mut SpedAudio) -> Result<Clip> {
     let bad = |what: &str| Error::ProjectFile(what.into());
     let original = sources
         .get(c.source)

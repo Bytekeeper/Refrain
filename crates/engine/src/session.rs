@@ -44,6 +44,11 @@ pub enum Command {
         source: Arc<Source>,
         start: Frames,
     },
+    /// Each audio on a new track of its own, named after it, starting at `start`. One undo step for all.
+    AddClipsOnNewTracks {
+        sources: Vec<Arc<Source>>,
+        start: Frames,
+    },
     /// A clip of sound the editor makes, `len` frames long. Without a track, on a new one named after the sound.
     AddGeneratedClip {
         track: Option<TrackId>,
@@ -598,6 +603,20 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
                 clips: vec![],
                 effects: vec![],
             });
+        }
+        Command::AddClipsOnNewTracks { sources, start } => {
+            for source in sources {
+                let track = TrackId(p.new_id());
+                p.tracks.push(Track {
+                    id: track,
+                    name: source.name.clone(),
+                    gain_db: 0.0,
+                    muted: false,
+                    clips: vec![],
+                    effects: vec![],
+                });
+                apply(p, Command::AddClip { track, source, start })?;
+            }
         }
         Command::RemoveTrack { track } => {
             let before = p.tracks.len();

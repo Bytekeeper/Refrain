@@ -777,7 +777,7 @@ fn export_panel_and_overwriting_a_source() {
         recovery: Some(super::Recovery::named(dir.join("editor"), "test")),
         ..Editor::default()
     };
-    e.import_files(std::slice::from_ref(&wav));
+    e.import_files(std::slice::from_ref(&wav), 0);
     assert!(e.run(Command::SetLoopEnd { at: Some(24_000) }));
     let target = |format| refrain_engine::ExportTarget {
         file: Some(wav.clone()),

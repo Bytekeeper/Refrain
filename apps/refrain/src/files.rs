@@ -197,36 +197,59 @@ impl Editor {
         let Some(paths) = rfd::FileDialog::new().add_filter("Audio", AUDIO_FILES).pick_files() else {
             return;
         };
-        self.import_files(&paths);
+        self.import_files(&paths, 0);
     }
 
-    /// Each file goes onto a new track at 0.
-    pub(crate) fn import_files(&mut self, paths: &[PathBuf]) {
+    /// Each file goes onto a new track at `start`, all in one undo step. Files that cannot be read are named
+    /// in the status line; the others are still added.
+    pub(crate) fn import_files(&mut self, paths: &[PathBuf], start: refrain_engine::Frames) {
+        let mut sources = vec![];
+        let mut failed = vec![];
         for path in paths {
-            let source = match load_source(path) {
-                Ok(source) => Arc::new(source),
-                Err(e) => {
-                    self.fail(format!("{}: {e}", path.display()));
-                    continue;
+            match load_source(path) {
+                Ok(source) => sources.push(Arc::new(source)),
+                Err(e) => failed.push(format!("{}: {e}", path.display())),
+            }
+        }
+        if !sources.is_empty() {
+            self.run(Command::AddClipsOnNewTracks { sources, start });
+        }
+        if !failed.is_empty() {
+            self.fail(failed.join(" · "));
+        }
+    }
+
+    /// Files dropped on the window from outside: audio goes onto new tracks at the play position, a project
+    /// opens. The window is not told where they were dropped, so they cannot go under the mouse.
+    pub(crate) fn take_dropped_files(&mut self, ctx: &egui::Context) {
+        let (hovering, dropped) = ctx.input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.clone()));
+        if hovering {
+            let screen = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop")));
+            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop audio to add it on new tracks at the play position, or a project to open it",
+                egui::FontId::proportional(18.0),
+                egui::Color32::WHITE,
+            );
+        }
+        let paths: Vec<PathBuf> = dropped.iter().map(|f| f.path().to_path_buf()).collect();
+        let is_project = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION));
+        let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(is_project);
+        match projects.as_slice() {
+            [] if audio.is_empty() => {}
+            [] => {
+                let start = self.player.position();
+                self.import_files(&audio, start);
+            }
+            [project] if audio.is_empty() => {
+                if self.may_discard_changes() {
+                    self.open_from(project);
                 }
-            };
-            if !self.run(Command::AddTrack {
-                name: source.name.clone(),
-            }) {
-                continue;
             }
-            let Some(track) = self.session.project().tracks.last().map(|t| t.id) else {
-                continue;
-            };
-            if !self.run(Command::AddClip {
-                track,
-                source,
-                start: 0,
-            }) {
-                let error = std::mem::take(&mut self.status);
-                self.undo();
-                self.fail(format!("{}: {error}", path.display()));
-            }
+            _ => self.fail("Drop one project on its own to open it, or only audio files to add them".into()),
         }
     }
 }
