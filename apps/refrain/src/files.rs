@@ -47,18 +47,9 @@ impl Editor {
     pub(crate) fn open_from(&mut self, path: &Path) -> bool {
         match open_project(path) {
             Ok((session, view)) => {
-                self.player.stop();
-                self.player.seek(0);
-                self.session = session;
-                self.saved = self.session.project().clone();
-                self.file = Some(path.to_path_buf());
-                self.selected = None;
-                self.drag = None;
-                self.scroll = 0.0;
-                self.track_heights.clear();
+                self.start_over(session, Some(path.to_path_buf()));
                 self.apply_view(view);
                 self.saved_heights = self.heights();
-                self.peaks.retain(|_, wave| wave.source.strong_count() > 0);
                 self.info(format!("Opened {}", path.display()));
                 true
             }
@@ -67,6 +58,45 @@ impl Editor {
                 false
             }
         }
+    }
+
+    /// File > New: an empty project, after asking about unsaved changes.
+    pub(crate) fn new_project(&mut self) {
+        if !self.may_discard_changes() {
+            return;
+        }
+        self.start_over(refrain_engine::Session::default(), None);
+        self.info("New project.".into());
+    }
+
+    /// Everything the window holds about the project goes with it: ids start again in every project, so a
+    /// selection or open menu left over could point at something else in the next.
+    fn start_over(&mut self, session: refrain_engine::Session, file: Option<PathBuf>) {
+        self.player.stop();
+        self.player.seek(0);
+        self.session = session;
+        self.saved = self.session.project().clone();
+        self.file = file;
+        self.selected = None;
+        self.selected_range = None;
+        self.drag = None;
+        self.loop_drag = None;
+        self.range_drag = None;
+        self.region_drag = None;
+        self.menu = None;
+        self.region_menu = None;
+        self.region_name = None;
+        self.effect_edit = None;
+        self.fade_edit = None;
+        self.gain_edit = None;
+        self.name_edit = None;
+        self.resizing = None;
+        self.generate = None;
+        self.folded.clear();
+        self.track_heights.clear();
+        self.saved_heights = vec![];
+        self.scroll = 0.0;
+        self.peaks.retain(|_, wave| wave.source.strong_count() > 0);
     }
 
     /// Returns whether the project is saved afterwards.

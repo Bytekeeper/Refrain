@@ -406,7 +406,11 @@ impl Editor {
             self.run(Command::SetLoopEnd { at: Some(at) });
         }
         let project = self.session.project().clone();
-        let rate = self.session.project().sample_rate.max(1);
+        // Without audio there is no rate yet; 48 kHz is the one a generated clip then sets.
+        let rate = match self.session.project().sample_rate {
+            0 => 48_000,
+            r => r,
+        };
         let painter = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
         let color = ui.visuals().weak_text_color();
         let secs_per_px = self.frames_per_px / f64::from(rate);
@@ -414,8 +418,9 @@ impl Editor {
             0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0,
         ]
         .into_iter()
+        .chain(std::iter::successors(Some(1800.0), |s| Some(s * 2.0)).take(40))
         .find(|s| s / secs_per_px >= 90.0)
-        .unwrap_or(1800.0);
+        .unwrap_or(f64::MAX);
         let first = (self.scroll / f64::from(rate) / step).floor() as i64;
         let count = ((rect.width() as f64 * secs_per_px) / step).ceil() as i64 + 2;
         for n in first..first.saturating_add(count) {

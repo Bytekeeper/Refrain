@@ -247,6 +247,9 @@ impl Editor {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.menu_button("File", |ui| {
+            if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
+                self.new_project();
+            }
             if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                 self.open();
             }
@@ -337,6 +340,10 @@ impl Editor {
 
     fn shortcuts(&mut self, ui: &mut Ui) {
         let typing = ui.ctx().egui_wants_keyboard_input();
+        let new = ui.input(|i| i.modifiers.command && i.key_pressed(Key::N));
+        if new {
+            self.new_project();
+        }
         let (undo, redo, delete, save, save_as, open, export, duplicate, fit) = ui.input(|i| {
             let (cmd, shift) = (i.modifiers.command, i.modifiers.shift);
             (
