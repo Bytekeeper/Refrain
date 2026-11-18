@@ -191,23 +191,22 @@ impl Editor {
         if browse {
             self.browse_export_file();
         }
-        ui.separator();
-        ui.label("Regions export named parts of the mix, each to a file of its own, into the folder of their lane.");
-        if ui
-            .button("Add region lane")
-            .on_hover_text("A row above the tracks: drag in it to mark a region")
-            .clicked()
-        {
-            self.run(Command::AddRegionLane);
-        }
         ui.add_space(4.0);
-        let ready = can_export && !self.export_parts().is_empty();
+        let parts = self.export_parts();
+        let ranges = self.ranges_text();
+        if !ranges.is_empty() {
+            ui.weak(format!("Export also writes {ranges} of the export lanes."));
+        }
         if ui
-            .add_enabled(ready, egui::Button::new("Export"))
-            .on_hover_text(self.export_tooltip())
+            .add_enabled(can_export && !parts.is_empty(), egui::Button::new("Export"))
+            .on_hover_text(match (self.session.project().export.file.is_some(), ranges) {
+                (true, r) if r.is_empty() => "The mix. Ctrl+E exports again, also when this panel is closed".into(),
+                (true, r) => format!("The mix and {r} of the export lanes. Ctrl+E exports them again"),
+                (false, r) => format!("{r} of the export lanes; choose a file to export the mix too"),
+            })
             .clicked()
         {
-            self.export_again();
+            self.write_export(&parts);
         }
     }
     fn browse_export_file(&mut self) {
@@ -258,42 +257,45 @@ impl Editor {
         mix.into_iter().chain(regions).collect()
     }
 
-    /// The toolbar button and Ctrl+E: writes everything again, or opens the panel when nothing has a place yet.
+    /// The toolbar button and Ctrl+E: writes the mix and the ranges again, or opens the panel while the mix has
+    /// no file, so the panel can always be reached.
     pub(crate) fn export_again(&mut self) {
-        let parts = self.export_parts();
-        if parts.is_empty() {
-            self.export_open = true;
+        if self.session.project().export.file.is_some() {
+            self.write_export(&self.export_parts());
         } else {
-            self.write_export(&parts);
+            self.export_open = true;
+        }
+    }
+
+    /// "and 3 ranges" for the ranges written with the mix; empty without any.
+    fn ranges_text(&self) -> String {
+        let project = self.session.project();
+        match self.export_parts().len() - usize::from(project.export.file.is_some()) {
+            0 => String::new(),
+            1 => "1 range".into(),
+            n => format!("{n} ranges"),
         }
     }
 
     pub(crate) fn export_tooltip(&self) -> String {
         let project = self.session.project();
         let target = &project.export;
-        let regions = match self.export_parts().len() - usize::from(target.file.is_some()) {
-            0 => String::new(),
-            1 => "1 region".into(),
-            n => format!("{n} regions"),
+        let Some(file) = &target.file else {
+            return "Choose where and how to export. Ctrl+E".into();
         };
-        match (&target.file, regions.is_empty()) {
-            (Some(file), _) => {
-                let wanted = target.settings.sample_rate.unwrap_or(project.sample_rate);
-                let rate = target.settings.format.rate_for(wanted);
-                let and = if regions.is_empty() {
-                    String::new()
-                } else {
-                    format!(", and {regions}")
-                };
-                format!(
-                    "Export to {} ({}){and}. Ctrl+E",
-                    file.display(),
-                    summary(&target.settings, rate)
-                )
-            }
-            (None, false) => format!("Export {regions}. Ctrl+E"),
-            (None, true) => "Choose where and how to export. Ctrl+E".into(),
-        }
+        let wanted = target.settings.sample_rate.unwrap_or(project.sample_rate);
+        let rate = target.settings.format.rate_for(wanted);
+        let ranges = self.ranges_text();
+        let and = if ranges.is_empty() {
+            ranges
+        } else {
+            format!(", and {ranges}")
+        };
+        format!(
+            "Export to {} ({}){and}. Ctrl+E",
+            file.display(),
+            summary(&target.settings, rate)
+        )
     }
 
     /// Writes `parts`. Audio the project uses is kept in this window's originals folder first, so the clips keep

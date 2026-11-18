@@ -987,3 +987,43 @@ fn a_click_in_the_mix_level_row_moves_the_play_position() {
         "left of the bars: the left edge shown"
     );
 }
+
+/// A click into the name field of a range's menu closed the menu, and once an export lane had a folder the
+/// Export button wrote its ranges instead of opening the panel, which then could not be reached.
+#[test]
+fn an_export_range_is_renamed_in_its_menu_and_the_panel_stays_reachable() {
+    let mut h = harness_sized(overlapping(), 400.0);
+    h.get_by_label("+ Export lane").click();
+    h.run();
+    let lane = h.state().session.project().region_lanes[0].id;
+    h.state_mut().run(Command::AddRegion {
+        lane,
+        start: 0,
+        end: 8000,
+    });
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-export-lane");
+    h.state_mut().run(Command::SetRegionLane {
+        lane,
+        folder: Some(folder),
+        settings: Default::default(),
+    });
+    h.run();
+    right_click(&mut h, 200.0, 79.0);
+    let name = h.get_by_label("Name").rect().center();
+    click(&mut h, name.x, name.y);
+    h.get_by_label("Name").type_text(" big");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert!(h.state().region_menu.is_some(), "still open");
+    assert_eq!(
+        h.state().session.project().region_lanes[0].regions[0].name,
+        "sound 1 big"
+    );
+
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.get_by_label("Export").click();
+    h.run();
+    assert!(h.state().export_open, "the mix has no file yet, so the panel opens");
+    save(&mut h, "export_lane_panel");
+}

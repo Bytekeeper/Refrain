@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
-use refrain_engine::Levels;
+use refrain_engine::{Command, Levels};
 
 use crate::{Editor, HEADER_W};
 
@@ -85,17 +85,30 @@ impl Editor {
         }
     }
 
-    pub(crate) fn draw_level_row(&mut self, ui: &Ui, (rect, response): (Rect, egui::Response)) {
+    pub(crate) fn draw_level_row(&mut self, ui: &mut Ui, (rect, response): (Rect, egui::Response)) {
         self.level_row_mouse(rect, &response);
         let lane_left = rect.left() + HEADER_W;
         let painter = ui.painter_at(rect);
-        painter.text(
-            rect.left_center() + vec2(8.0, 0.0),
+        let title = painter.text(
+            pos2(rect.left() + 8.0, rect.top() + 13.0),
             Align2::LEFT_CENTER,
             "Mix level",
             FontId::proportional(12.0),
             ui.visuals().weak_text_color(),
         );
+        // Export lanes cut the mix this row shows, so they are added here.
+        let place = Rect::from_min_max(
+            pos2(title.right() + 6.0, rect.top() + 4.0),
+            pos2(lane_left - 4.0, rect.top() + 22.0),
+        );
+        let add = egui::Button::new(egui::RichText::new("+ Export lane").small()).wrap_mode(egui::TextWrapMode::Extend);
+        if ui
+            .put(place, add)
+            .on_hover_text("Add an export lane: named ranges of the mix, each exported to a file of its own")
+            .clicked()
+        {
+            self.run(Command::AddRegionLane);
+        }
         let area = Rect::from_min_max(
             pos2(lane_left, rect.top() + 2.0),
             pos2(rect.right(), rect.bottom() - 2.0),

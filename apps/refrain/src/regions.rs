@@ -43,7 +43,11 @@ impl Editor {
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         self.region_mouse(&project, rect, &response);
         if let Some(menu) = self.region_menu
-            && response.context_menu(|ui| self.region_menu_ui(ui, menu)).is_none()
+            // A click in the name field must not close it; the buttons close it themselves.
+            && egui::Popup::context_menu(&response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| self.region_menu_ui(ui, menu))
+                .is_none()
         {
             self.region_menu = None;
             self.commit_region_name();
@@ -261,13 +265,13 @@ impl Editor {
                 None => ui.weak("Choose a folder for the lane to export it"),
             };
             if ui
-                .add_enabled(lane.folder.is_some(), egui::Button::new("Export this region"))
+                .add_enabled(lane.folder.is_some(), egui::Button::new("Export this range"))
                 .clicked()
             {
                 self.write_export(&[ExportPart::Region(r.id)]);
                 ui.close();
             }
-            if ui.button("Remove region").clicked() {
+            if ui.button("Remove range").clicked() {
                 self.run(Command::RemoveRegion { region: r.id });
                 ui.close();
             }
@@ -318,7 +322,7 @@ impl Editor {
             });
         }
         let parts: Vec<ExportPart> = lane.regions.iter().map(|r| ExportPart::Region(r.id)).collect();
-        let export = egui::Button::new(format!("Export all regions of the lane ({})", parts.len()));
+        let export = egui::Button::new(format!("Export all ranges of the lane ({})", parts.len()));
         if ui
             .add_enabled(lane.folder.is_some() && !parts.is_empty(), export)
             .clicked()
@@ -327,11 +331,11 @@ impl Editor {
             ui.close();
         }
         ui.separator();
-        if ui.button("Add region lane").clicked() {
+        if ui.button("Add export lane").clicked() {
             self.run(Command::AddRegionLane);
             ui.close();
         }
-        if ui.button("Remove region lane").clicked() {
+        if ui.button("Remove export lane").clicked() {
             self.run(Command::RemoveRegionLane { lane: lane.id });
             ui.close();
         }
@@ -360,9 +364,9 @@ impl Editor {
             let (title, color) = match lane.folder.as_deref() {
                 Some(folder) => {
                     let name = folder.file_name().unwrap_or(folder.as_os_str()).to_string_lossy();
-                    (format!("Regions: {name}"), visuals.text_color())
+                    (format!("Export: {name}"), visuals.text_color())
                 }
-                None => ("Regions: no folder".into(), visuals.weak_text_color()),
+                None => ("Export: no folder".into(), visuals.weak_text_color()),
             };
             painter.with_clip_rect(header.shrink(2.0)).text(
                 header.left_center() + vec2(8.0, 0.0),
