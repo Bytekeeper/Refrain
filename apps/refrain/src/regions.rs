@@ -307,12 +307,7 @@ impl Editor {
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                crate::export::settings_rows(
-                    ui,
-                    &format!("region lane {}", lane.id.0),
-                    &mut settings,
-                    project.sample_rate,
-                )
+                crate::export::settings_rows(ui, &mut settings, project.sample_rate)
             });
         if settings != lane.settings {
             self.run(Command::SetRegionLane {

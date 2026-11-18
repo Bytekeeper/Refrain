@@ -39,49 +39,23 @@ fn fit_bits(settings: &mut ExportSettings) {
     }
 }
 
-/// The rows of a two-column grid that set how audio is written. `salt` keeps the boxes of two grids apart.
-pub(crate) fn settings_rows(ui: &mut Ui, salt: &str, s: &mut ExportSettings, project_rate: u32) {
+/// The rows of a two-column grid that set how audio is written.
+pub(crate) fn settings_rows(ui: &mut Ui, s: &mut ExportSettings, project_rate: u32) {
     let old = s.format;
-    let label = ui.label("Format");
-    egui::ComboBox::from_id_salt((salt, "format"))
-        .selected_text(s.format.name())
-        .show_ui(ui, |ui| {
-            for format in ExportFormat::ALL {
-                ui.selectable_value(&mut s.format, format, format.name());
-            }
-        })
-        .response
-        .labelled_by(label.id);
-    ui.end_row();
+    let formats = ExportFormat::ALL.map(|f| (f, f.name().to_string()));
+    choice(ui, "Format", &mut s.format, &formats);
     if s.format.is_lossy() {
-        let label = ui.label("Bit rate");
-        egui::ComboBox::from_id_salt((salt, "kbps"))
-            .selected_text(format!("{} kbit/s", s.kbps))
-            .show_ui(ui, |ui| {
-                for kbps in KBPS {
-                    ui.selectable_value(&mut s.kbps, kbps, format!("{kbps} kbit/s"));
-                }
-            })
-            .response
-            .labelled_by(label.id);
+        let rates = KBPS.map(|k| (k, format!("{k} kbit/s")));
+        choice(ui, "Bit rate", &mut s.kbps, &rates);
     } else {
-        let label = ui.label("Bit depth");
         let depths: &[u16] = if s.format == ExportFormat::Wav {
             &[16, 24, 32]
         } else {
             &[16, 24]
         };
-        egui::ComboBox::from_id_salt((salt, "bits"))
-            .selected_text(depth_name(s.bits))
-            .show_ui(ui, |ui| {
-                for &bits in depths {
-                    ui.selectable_value(&mut s.bits, bits, depth_name(bits));
-                }
-            })
-            .response
-            .labelled_by(label.id);
+        let depths: Vec<_> = depths.iter().map(|&b| (b, depth_name(b))).collect();
+        choice(ui, "Bit depth", &mut s.bits, &depths);
     }
-    ui.end_row();
     ui.label("Channels");
     ui.horizontal(|ui| {
         ui.radio_value(&mut s.mono, false, "Stereo");
@@ -89,22 +63,43 @@ pub(crate) fn settings_rows(ui: &mut Ui, salt: &str, s: &mut ExportSettings, pro
             .on_hover_text("Left and right mixed into one channel, as game engines want for sounds placed in space");
     });
     ui.end_row();
-    let label = ui.label("Sample rate");
-    let project_choice = format!("Project ({})", khz(project_rate));
-    egui::ComboBox::from_id_salt((salt, "rate"))
-        .selected_text(s.sample_rate.map_or(project_choice.clone(), khz))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut s.sample_rate, None, project_choice);
-            for rate in RATES {
-                ui.selectable_value(&mut s.sample_rate, Some(rate), khz(rate));
+    let mut rates = vec![(None, format!("Project ({})", khz(project_rate)))];
+    rates.extend(RATES.map(|r| (Some(r), khz(r))));
+    choice(ui, "Sample rate", &mut s.sample_rate, &rates);
+    if s.format != old {
+        fit_bits(s);
+    }
+}
+
+/// A grid row with a list to pick from. A submenu, not a combo box: egui keeps one popup open at a time, so a
+/// combo box would close the menu these settings also appear in.
+fn choice<T: PartialEq + Copy>(ui: &mut Ui, label: &str, value: &mut T, options: &[(T, String)]) {
+    let label = ui.label(label);
+    let shown = options
+        .iter()
+        .find(|(v, _)| v == value)
+        .map_or("", |(_, name)| name.as_str());
+    // Room on the right for the arrow, which no bundled font has, so it is drawn.
+    let response = ui
+        .menu_button(format!("{shown}     "), |ui| {
+            for (option, name) in options {
+                // No `ui.close()`: it would close the menu around these settings too. The list closes as soon
+                // as the pointer moves on.
+                if ui.selectable_label(option == value, name).clicked() {
+                    *value = *option;
+                }
             }
         })
         .response
         .labelled_by(label.id);
+    let tip = egui::pos2(response.rect.right() - 10.0, response.rect.center().y + 2.5);
+    let color = ui.style().interact(&response).fg_stroke.color;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![tip, tip + vec2(-4.0, -5.0), tip + vec2(4.0, -5.0)],
+        color,
+        egui::Stroke::NONE,
+    ));
     ui.end_row();
-    if s.format != old {
-        fit_bits(s);
-    }
 }
 
 impl Editor {
@@ -136,7 +131,7 @@ impl Editor {
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                settings_rows(ui, "export", &mut target.settings, project_rate);
+                settings_rows(ui, &mut target.settings, project_rate);
                 ui.label("File");
                 ui.horizontal(|ui| {
                     let name = target.file.as_deref().and_then(Path::file_name);

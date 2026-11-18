@@ -1034,3 +1034,35 @@ fn an_export_range_is_renamed_in_its_menu_and_the_panel_stays_reachable() {
     assert!(h.state().export_open, "the mix has no file yet, so the panel opens");
     save(&mut h, "export_lane_panel");
 }
+
+/// The format lists in a range's menu were combo boxes, whose own popup replaced the menu, so nothing could be
+/// picked.
+#[test]
+fn the_format_of_an_export_lane_is_picked_in_its_menu() {
+    let mut h = harness_sized(overlapping(), 500.0);
+    h.get_by_label("+ Export lane").click();
+    h.run();
+    let lane = h.state().session.project().region_lanes[0].id;
+    h.state_mut().run(Command::AddRegion {
+        lane,
+        start: 0,
+        end: 8000,
+    });
+    h.run();
+    right_click(&mut h, 200.0, 79.0);
+    for (list, entry) in [("Format", "FLAC"), ("Bit depth", "16-bit")] {
+        let at = h.get_by_label(list).rect().center();
+        click(&mut h, at.x, at.y);
+        let at = h.get_by_label(entry).rect().center();
+        click(&mut h, at.x, at.y);
+    }
+    let settings = &h.state().session.project().region_lanes[0].settings;
+    assert_eq!(
+        (settings.format, settings.bits),
+        (refrain_engine::ExportFormat::Flac, 16)
+    );
+    assert!(
+        h.state().region_menu.is_some(),
+        "the menu stays open for the next setting"
+    );
+}
