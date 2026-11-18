@@ -192,9 +192,17 @@ pub struct Project {
     pub export: crate::ExportTarget,
     /// Named parts of the mix to export as files of their own, shown above the tracks.
     pub region_lanes: Vec<crate::RegionLane>,
+    /// See [`Project::sound_id`].
+    pub(crate) sound_id: u64,
 }
 
 impl Project {
+    /// The same for two snapshots only when they sound the same, so a mixdown made from one serves the other.
+    /// Edits that only change what is exported keep it.
+    pub fn sound_id(&self) -> u64 {
+        self.sound_id
+    }
+
     /// Where the audio is stored on disk now.
     pub fn file_of<'a>(&'a self, source: &'a Arc<Source>) -> Option<&'a Path> {
         let moved = self.relocated.iter().find(|(s, _)| Arc::ptr_eq(s, source));

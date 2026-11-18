@@ -1,8 +1,6 @@
 //! The mix level row under the ruler: the loudest point of the whole mix over time, red where it goes over
 //! 0 dB. It shows the latest mixdown (`mixing.rs`).
 
-use std::sync::Arc;
-
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
 use refrain_engine::{Command, Levels};
 
@@ -130,7 +128,7 @@ impl Editor {
         if let Some(mixed) = &self.mixer.latest {
             let levels = &mixed.levels;
             // Shown dimmed while the mixdown of the latest edit is still being made.
-            let fresh = Arc::ptr_eq(&mixed.project, self.session.project());
+            let fresh = mixed.project.sound_id() == self.session.project().sound_id();
             let dim = |c: Color32| if fresh { c } else { c.gamma_multiply(0.4) };
             let end = (levels.peaks.len() * Levels::BLOCK) as i64;
             let mut x = area.left();

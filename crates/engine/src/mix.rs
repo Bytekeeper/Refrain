@@ -373,6 +373,7 @@ mod tests {
             mix_effects: vec![],
             export: Default::default(),
             region_lanes: vec![],
+            sound_id: 0,
         }
     }
 

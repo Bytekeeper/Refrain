@@ -36,7 +36,7 @@ fn make(project: &Project, keep_going: impl Fn() -> bool) -> Option<Mixdown> {
 }
 
 impl crate::Editor {
-    /// Hands a finished mixdown to playback, and starts one when the project changed since the last.
+    /// Hands a finished mixdown to playback, and starts one when the sound changed since the last.
     pub(crate) fn mix(&mut self, ctx: &egui::Context) {
         let project = self.session.project().clone();
         if let Some(w) = &self.mixer.working {
@@ -50,7 +50,8 @@ impl crate::Editor {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        let current = |p: &Arc<Project>| Arc::ptr_eq(p, &project);
+        // Edits that only change what is exported keep the sound, and so the mixdown.
+        let current = |p: &Arc<Project>| p.sound_id() == project.sound_id();
         if self.mixer.latest.as_ref().is_some_and(|m| current(&m.project))
             || self.mixer.working.as_ref().is_some_and(|w| current(&w.project))
         {

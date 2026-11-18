@@ -242,6 +242,7 @@ impl Session {
             return Err(Error::Invalid("the loop end must be after 0".into()));
         }
         settle(&mut project)?;
+        project.sound_id = new_sound_id();
         Ok(Session {
             project: Arc::new(project),
             undo: vec![],
@@ -256,8 +257,22 @@ impl Session {
     /// Runs the command on a copy; the project only changes when it succeeds.
     pub fn execute(&mut self, command: Command) -> Result<()> {
         let mut next = Project::clone(&self.project);
+        let sound_stays = matches!(
+            command,
+            Command::SetExportTarget { .. }
+                | Command::AddRegionLane
+                | Command::RemoveRegionLane { .. }
+                | Command::SetRegionLane { .. }
+                | Command::AddRegion { .. }
+                | Command::SetRegion { .. }
+                | Command::RenameRegion { .. }
+                | Command::RemoveRegion { .. }
+        );
         apply(&mut next, command)?;
         settle(&mut next)?;
+        if !sound_stays {
+            next.sound_id = new_sound_id();
+        }
         let previous = std::mem::replace(&mut self.project, Arc::new(next));
         self.undo.push(previous);
         if self.undo.len() > MAX_UNDO {
@@ -458,6 +473,12 @@ impl Session {
             *snapshot = Arc::new(next);
         }
     }
+}
+
+/// Unique across sessions, so a mixdown of a closed project never passes for one of the open project.
+fn new_sound_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The same file, also in another case: on Windows and macOS that is one file. Files need not exist yet.
@@ -1236,6 +1257,42 @@ mod tests {
         .unwrap();
         let clip = s.project().tracks[0].clips[0].id;
         (s, track, clip)
+    }
+
+    #[test]
+    fn export_edits_keep_the_sound_id_and_sound_edits_change_it() {
+        let (mut s, _, clip) = ramp_session();
+        let before = s.project().sound_id();
+        s.execute(Command::AddRegionLane).unwrap();
+        let lane = s.project().region_lanes[0].id;
+        s.execute(Command::AddRegion {
+            lane,
+            start: 0,
+            end: 500,
+        })
+        .unwrap();
+        assert_eq!(s.project().sound_id(), before);
+        s.execute(Command::TrimClip {
+            clip,
+            start: 200,
+            end: 900,
+        })
+        .unwrap();
+        let trimmed = s.project().sound_id();
+        assert_ne!(trimmed, before);
+        s.undo().unwrap();
+        assert_eq!(s.project().sound_id(), before);
+        s.execute(Command::TrimClip {
+            clip,
+            start: 300,
+            end: 900,
+        })
+        .unwrap();
+        assert_ne!(
+            s.project().sound_id(),
+            trimmed,
+            "another edit after undo is another sound"
+        );
     }
 
     fn add(s: &mut Session, track: TrackId, start: Frames) -> Result<ClipId> {
