@@ -13,6 +13,8 @@ refrain-engine = { path = "crates/engine" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# MIT; rubato uses it too.
+realfft = "3.5.1"
 # Pinned to one commit: craft-libs has no crates.io releases, and all craft-* pins move together.
 rubato = "5.1.0"
 craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "c376774f15ae7cd3b06a7ac664f01a8645af4b83", default-features = false, features = ["decode", "pcm-encode", "flac-encode", "mp3-encode", "aac-encode", "vorbis-encode"] }

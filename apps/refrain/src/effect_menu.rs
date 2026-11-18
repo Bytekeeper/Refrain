@@ -299,5 +299,6 @@ fn effect_settings(ui: &mut Ui, effect: &mut Effect) -> (bool, bool) {
                 ("Back up in", release_ms, 1.0..=2000.0, 1.0, " ms", 0),
             ],
         ),
+        Effect::Pitch { semitones } => number_rows(ui, [("Semitones", semitones, -12.0..=12.0, 0.05, " st", 1)]),
     }
 }

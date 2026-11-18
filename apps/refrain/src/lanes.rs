@@ -574,6 +574,7 @@ impl Editor {
                     // Drawn as bars below; the bands as text are often wider than the range.
                     (Effect::Eq { .. }, _) => String::new(),
                     (Effect::Limiter { ceiling_db, .. }, _) => format!("at most {ceiling_db:.1} dB"),
+                    (Effect::Pitch { semitones }, _) => format!("{semitones:+.1} st"),
                 };
                 for x in handles
                     .filter(|_| selected)

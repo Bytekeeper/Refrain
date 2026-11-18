@@ -32,10 +32,8 @@ pub fn load_source(path: &Path) -> Result<Source> {
     })
 }
 
-/// The audio played `speed` times as fast, at the same sample rate: shorter and higher above 1. The sinc
-/// filter takes any ratio, where the FFT resampler needs two whole rates.
+/// The audio played `speed` times as fast, at the same sample rate: shorter and higher above 1.
 pub fn change_speed(source: &Source, speed: f64) -> Result<Source> {
-    let failed = |e: &dyn std::fmt::Display| Error::Resample(e.to_string());
     if !(crate::MIN_SPEED..=crate::MAX_SPEED).contains(&speed) {
         return Err(Error::Invalid(format!(
             "a speed must be between {}% and {}%",
@@ -44,30 +42,36 @@ pub fn change_speed(source: &Source, speed: f64) -> Result<Source> {
         )));
     }
     let frames = usize::try_from(source.frames()).unwrap_or(0);
-    let channels = source.channels.len();
-    if frames == 0 || channels == 0 {
+    if frames == 0 || source.channels.is_empty() {
         return Err(Error::EmptySource);
     }
-    let parameters = SincInterpolationParameters::new(256, WindowFunction::BlackmanHarris2);
-    let mut resampler = Async::<f32>::new_sinc(1.0 / speed, 1.0, &parameters, 1024, channels, FixedAsync::Input)
-        .map_err(|e| failed(&e))?;
-    let input = SequentialSliceOfVecs::new(source.channels.as_slice(), channels, frames).map_err(|e| failed(&e))?;
-    let output = resampler.process_all(&input, frames, None).map_err(|e| failed(&e))?;
-    // The resampler's output runs one frame early: measured with a sine, at every ratio.
-    let converted = (0..channels)
-        .map(|c| {
-            let first = source.channels.get(c).and_then(|c| c.first()).copied().unwrap_or(0.0);
-            let rest = (0..output.frames().saturating_sub(1)).map(|f| output.read_sample(c, f).unwrap_or(0.0));
-            std::iter::once(first).chain(rest).collect()
-        })
-        .collect();
     Ok(Source {
         path: source.path.clone(),
         name: source.name.clone(),
         sample_rate: source.sample_rate,
-        channels: converted,
+        channels: speed_up(&source.channels, frames, speed)?,
         generated: None,
     })
+}
+
+/// The first `frames` of each channel played `speed` times as fast. The sinc filter takes any ratio, where the
+/// FFT resampler needs two whole rates.
+pub(crate) fn speed_up(channels: &[Vec<f32>], frames: usize, speed: f64) -> Result<Vec<Vec<f32>>> {
+    let failed = |e: &dyn std::fmt::Display| Error::Resample(e.to_string());
+    let count = channels.len();
+    let parameters = SincInterpolationParameters::new(256, WindowFunction::BlackmanHarris2);
+    let mut resampler = Async::<f32>::new_sinc(1.0 / speed, 1.0, &parameters, 1024, count, FixedAsync::Input)
+        .map_err(|e| failed(&e))?;
+    let input = SequentialSliceOfVecs::new(channels, count, frames).map_err(|e| failed(&e))?;
+    let output = resampler.process_all(&input, frames, None).map_err(|e| failed(&e))?;
+    // The resampler's output runs one frame early: measured with a sine, at every ratio.
+    Ok((0..count)
+        .map(|c| {
+            let first = channels.get(c).and_then(|c| c.first()).copied().unwrap_or(0.0);
+            let rest = (0..output.frames().saturating_sub(1)).map(|f| output.read_sample(c, f).unwrap_or(0.0));
+            std::iter::once(first).chain(rest).collect()
+        })
+        .collect())
 }
 
 /// The same audio at `rate`, converted with an FFT resampler, which keeps everything below the lower

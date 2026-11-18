@@ -46,6 +46,8 @@ pub enum Effect {
     /// Keeps every sample at or below `ceiling_db`: turns the sound down smoothly just before a peak that
     /// would pass it, and back up over `release_ms`.
     Limiter { ceiling_db: f32, release_ms: f32 },
+    /// Moves the pitch up or down by `semitones`; the length and timing stay.
+    Pitch { semitones: f32 },
 }
 
 /// The centres of the EQ's bands, an octave apart, as on a classic graphic EQ.
@@ -87,6 +89,7 @@ impl Effect {
                 ceiling_db: -1.0,
                 release_ms: 100.0,
             },
+            Effect::Pitch { semitones: 2.0 },
         ]
     }
 
@@ -108,6 +111,7 @@ impl Effect {
             Effect::Reverb { .. } => "Reverb",
             Effect::Eq { .. } => "EQ",
             Effect::Limiter { .. } => "Limiter",
+            Effect::Pitch { .. } => "Pitch",
         }
     }
 
@@ -119,7 +123,8 @@ impl Effect {
             | Effect::HighPass { .. }
             | Effect::LowPass { .. }
             | Effect::Eq { .. }
-            | Effect::Limiter { .. } => 0,
+            | Effect::Limiter { .. }
+            | Effect::Pitch { .. } => 0,
             Effect::Echo {
                 delay_ms,
                 fade_db,
@@ -189,11 +194,23 @@ impl Effect {
     /// How much sound before a range a filter hears, so it is settled where the range starts: its memory of the
     /// past fades to -80 dB in this time. The other effects start from silence at the range start.
     pub(crate) fn warmup(&self, rate: u32) -> Frames {
+        if let Effect::Pitch { .. } = self {
+            return self.lookahead(rate);
+        }
         let stages = self.filter_stages(rate);
         let frames = stages.iter().map(Biquad::settle_frames).fold(0.0f64, f64::max);
         (frames.ceil() as Frames)
             .saturating_mul(stages.len() as Frames)
             .min(Frames::from(rate) * 2)
+    }
+
+    /// How much sound after a range the effect hears. The pitch shift works on windows of sound, and the last
+    /// window of the range reaches past it.
+    pub(crate) fn lookahead(&self, rate: u32) -> Frames {
+        match self {
+            Effect::Pitch { .. } => Frames::try_from(crate::pitch::window_len(rate)).unwrap_or(0),
+            _ => 0,
+        }
     }
 
     /// The filter stages of high-pass, low-pass and EQ; none for the other effects.
@@ -241,6 +258,9 @@ impl Effect {
             }
             Effect::Limiter { release_ms, .. } if !within(release_ms, 1.0..=2000.0) => {
                 "a limiter's release must be between 1 ms and 2 s"
+            }
+            Effect::Pitch { semitones } if !within(semitones, -12.0..=12.0) => {
+                "the pitch moves by at most 12 semitones up or down"
             }
             Effect::Echo { delay_ms, .. } if !within(delay_ms, 10.0..=2000.0) => {
                 "an echo's delay must be between 10 ms and 2 s"
@@ -458,16 +478,19 @@ fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) ->
     let weight = |t: Frames| {
         let (into, left) = ((t - start) as f32, (end - t) as f32);
         match (t >= start && t < end, whole_loop.is_some()) {
-            (false, _) => 0.0,
-            (true, true) => 1.0,
+            // Round the whole loop, before and after the range is the loop again.
+            (_, true) => 1.0,
+            (false, false) => 0.0,
             (true, false) => ((into + 1.0) / fade_in).min(left / fade_out).min(1.0),
         }
     };
     // A filter first hears a little before the range, so it is settled where the range starts.
     let before = effect.warmup(rate);
+    let after = usize::try_from(effect.lookahead(rate)).unwrap_or(0);
     let from = range.start - before;
-    let mut buffer = read(sound, loop_end, from, usize::try_from(range.end - from).unwrap_or(0));
-    let mut weights: Vec<f32> = (from..range.end).map(weight).collect();
+    let len = usize::try_from(range.end - from).unwrap_or(0);
+    let mut buffer = read(sound, loop_end, from, len + after);
+    let mut weights: Vec<f32> = (from..range.end.saturating_add(after as Frames)).map(weight).collect();
     let gain = match effect {
         Effect::Normalize { .. } | Effect::Loudness { .. } => {
             let heard = usize::try_from(start - from).unwrap_or(0)..usize::try_from(end - from).unwrap_or(0);
@@ -491,6 +514,10 @@ fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) ->
             .for_each(|c| c.resize(c.len() + tail, 0.0));
     }
     apply(effect, rate, gain.map_or(1.0, |g| g.0), &mut buffer, &weights);
+    if whole_loop.is_some() {
+        seam_fade(&mut buffer, usize::try_from(before).unwrap_or(0), len, after / 4);
+    }
+    buffer.iter_mut().for_each(|c| c.truncate(len.saturating_add(tail)));
     if effect.reversed() {
         buffer.iter_mut().for_each(|c| c.reverse());
     }
@@ -509,6 +536,22 @@ fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) ->
         });
     }
     (buffer, gain)
+}
+
+/// Crossfades what an effect made past the loop end into the loop start over `fade` frames. An effect that
+/// builds each moment on the one before, like the pitch shift, does not come out the same at both ends.
+fn seam_fade(buffer: &mut [Vec<f32>; 2], start: usize, end: usize, fade: usize) {
+    for channel in buffer {
+        for j in 0..fade {
+            let (Some(&past), Some(&at)) = (channel.get(end + j), channel.get(start + j)) else {
+                break;
+            };
+            let t = (j as f32 + 0.5) / fade as f32;
+            if let Some(s) = channel.get_mut(start + j) {
+                *s = past + t * (at - past);
+            }
+        }
+    }
 }
 
 /// The gain normalize or loudness gives `audio`, the sound under a range that starts at timeline frame `start`.
@@ -551,6 +594,7 @@ fn apply(effect: Effect, rate: u32, gain: f32, sound: &mut [Vec<f32>; 2], weight
         Effect::Reverb { seconds, level_db, .. } => {
             Reverb::new(seconds, rate).run(sound, weights, db_to_amp(level_db));
         }
+        Effect::Pitch { semitones } => crate::pitch::shift(semitones, rate, sound, weights),
     }
 }
 
@@ -1156,6 +1200,43 @@ mod tests {
     }
 
     /// One click at frame 100 on a track, with a lane of `effect` that hears 0..200; its tail is added on.
+    #[test]
+    fn pitch_moves_a_tone_and_keeps_its_level_and_timing() {
+        for (semitones, hz) in [(12.0, 880), (-7.0, 294)] {
+            let s = tone_session(440.0, Effect::Pitch { semitones });
+            let [left, _] = render(s.project(), 12_000, 24_000);
+            // Half a second: two upward zero crossings per cycle per second.
+            let crossings = left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as i32 * 2;
+            assert!((crossings - hz).abs() <= 2, "{semitones} st: {crossings} Hz");
+            assert!((level_after(&s) - 0.5).abs() < 0.01, "{}", level_after(&s));
+        }
+        // A tone starting in the middle still starts there; the shift only softens it by a few ms.
+        let mut s = tone_session(300.0, Effect::Pitch { semitones: 5.0 });
+        let clip = s.project().tracks[0].clips[0].id;
+        s.execute(Command::TrimClip {
+            clip,
+            start: 24_000,
+            end: 48_000,
+        })
+        .unwrap();
+        let [left, _] = render(s.project(), 0, 48_000);
+        let first = left.iter().position(|v| v.abs() > 0.05).unwrap();
+        let full = left.iter().position(|v| v.abs() > 0.4).unwrap();
+        assert!((23_500..24_000).contains(&first) && (24_000..24_500).contains(&full), "{first} {full}");
+    }
+
+    /// The shift builds each moment on the one before, so round a whole loop its ends did not meet: a click.
+    #[test]
+    fn a_pitch_range_round_the_whole_loop_has_no_seam() {
+        let mut s = tone_session(440.0, Effect::Pitch { semitones: 3.0 });
+        s.execute(Command::SetLoopEnd { at: Some(48_000) }).unwrap();
+        let [left, _] = render(s.project(), 47_000, 2_000);
+        let step = left.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+        // The steepest a 0.5 sine at the shifted pitch gets in one frame.
+        let clean = 0.5 * 440.0 * 2f32.powf(0.25) * std::f32::consts::TAU / 48_000.0;
+        assert!(step < clean * 1.05, "{step} against {clean}");
+    }
+
     fn click_session(effect: Effect) -> Session {
         let mut samples = vec![0.0; 300];
         samples[100] = 1.0;

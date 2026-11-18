@@ -7,6 +7,7 @@ mod io;
 mod loudness;
 mod mix;
 mod model;
+mod pitch;
 mod project_file;
 mod regions;
 mod session;
