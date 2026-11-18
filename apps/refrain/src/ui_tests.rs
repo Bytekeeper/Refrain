@@ -941,7 +941,7 @@ fn a_filter_is_added_and_set_from_the_menus() {
     let mut h = harness_sized(overlapping(), 400.0);
     // The track's, below the mix's in the Mix row.
     let fx = h
-        .get_all_by_label("FX")
+        .get_all_by_label("+ FX")
         .map(|n| n.rect().center())
         .max_by(|a, b| a.y.total_cmp(&b.y))
         .unwrap();

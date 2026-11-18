@@ -105,11 +105,7 @@ impl Editor {
             ui.spacing_mut().item_spacing.x = 3.0;
             ui.spacing_mut().button_padding.x = 2.0;
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            let fx = match self.session.project().mix_effects.len() {
-                0 => "FX".to_string(),
-                n => format!("FX {n}"),
-            };
-            ui.menu_button(egui::RichText::new(fx).small(), |ui| self.effects_menu_ui(ui, None))
+            ui.menu_button(egui::RichText::new("+ FX").small(), |ui| self.effects_menu_ui(ui, None))
                 .response
                 .on_hover_text("Effects on all tracks together, such as normalizing the whole loop");
             let add = ui

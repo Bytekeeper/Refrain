@@ -286,10 +286,11 @@ impl Editor {
         }
 
         let delete = Rect::from_min_size(pos2(row.left() + 6.0, row.bottom() - 28.0), vec2(24.0, 24.0));
-        let fx = Rect::from_min_size(delete.right_top() + vec2(4.0, 2.0), vec2(56.0, 20.0));
+        let fx = Rect::from_min_size(delete.right_top() + vec2(4.0, 2.0), vec2(80.0, 20.0));
+        // The lanes show what is there; only hidden ones need counting.
         let label = match track.effects.len() {
-            0 => "FX".to_string(),
-            n => format!("FX {n}"),
+            n if n > 0 && self.folded.contains(&track.id) => format!("+ FX ({n})"),
+            _ => "+ FX".to_string(),
         };
         ui.scope_builder(egui::UiBuilder::new().max_rect(fx), |ui| {
             ui.menu_button(label, |ui| self.effects_menu_ui(ui, Some(track.id)))
