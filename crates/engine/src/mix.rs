@@ -192,7 +192,11 @@ fn clips_into(project: &Project, track: &Track, out: &mut [Vec<f32>; 2]) {
             // The clip's own frames that land in `out`.
             let first = clip_start.saturating_neg().max(0);
             let end = clip.len.min(len.saturating_sub(clip_start)).min(in_source);
-            let parts = [(first, flat_from, false), (flat_from, flat_to, true), (flat_to, end, false)];
+            let parts = [
+                (first, flat_from, false),
+                (flat_from, flat_to, true),
+                (flat_to, end, false),
+            ];
             for (from, to, flat) in parts {
                 let (from, to) = (from.max(first), to.min(end));
                 let (Ok(at), Ok(src), Ok(n)) = (
@@ -374,12 +378,15 @@ mod tests {
     #[test]
     fn a_fade_in_that_runs_into_a_crossfade_counts_each_frame_once() {
         let mut a = clip(1, constant(1.0, 1000), 0, FadeShape::Linear);
-        a.fade_in = Fade { len: 800, shape: FadeShape::Linear };
+        a.fade_in = Fade {
+            len: 800,
+            shape: FadeShape::Linear,
+        };
         let p = one_track(vec![a, clip(2, constant(1.0, 1000), 600, FadeShape::Linear)]);
         let [left, _] = render(&p, 700, 1);
         let clips = &p.tracks[0].clips;
-        let expected = clip_amp(&clips[0], edge_fades(clips, 0, None), 700)
-            + clip_amp(&clips[1], edge_fades(clips, 1, None), 100);
+        let expected =
+            clip_amp(&clips[0], edge_fades(clips, 0, None), 700) + clip_amp(&clips[1], edge_fades(clips, 1, None), 100);
         assert!((left[0] - expected).abs() < 1e-6, "{} vs {expected}", left[0]);
     }
 
@@ -503,4 +510,3 @@ mod tests {
         assert_eq!(envelope_db(&points, 500), -20.0);
     }
 }
-

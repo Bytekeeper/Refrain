@@ -483,7 +483,8 @@ fn older_ranges_grow_by_their_tail() {
     let file = dir.join("song.refrain");
     save_project(s.project(), &file, None).unwrap();
     let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    let echo = serde_json::json!({"kind": "echo", "delay_ms": 100.0, "fade_db": 6.0, "level_db": -6.0, "reversed": false});
+    let echo =
+        serde_json::json!({"kind": "echo", "delay_ms": 100.0, "fade_db": 6.0, "level_db": -6.0, "reversed": false});
     let range = |start: i64, end: i64| serde_json::json!({"start": start, "end": end, "effect": echo, "fade_in": 0, "fade_out": 0});
     json["version"] = 1.into();
     json["tracks"][0]["effects"] = serde_json::json!([{

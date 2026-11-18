@@ -138,7 +138,9 @@ fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>, version: u32) ->
         // Ranges whose tails crossed now overlap, so they go to lanes of their own right below.
         let mut split: Vec<EffectLane> = vec![];
         for range in ranges {
-            let free = split.iter_mut().find(|l| l.ranges.last().is_none_or(|last| last.end <= range.start));
+            let free = split
+                .iter_mut()
+                .find(|l| l.ranges.last().is_none_or(|last| last.end <= range.start));
             match free {
                 Some(lane) => lane.ranges.push(range),
                 None => {
@@ -169,7 +171,11 @@ fn grown_by_tail(effect: Effect, start: Frames, end: Frames, rate: u32, loop_end
     };
     match loop_end.filter(|l| *l > 0) {
         Some(l) => {
-            let (start, end) = if effect.reversed() { (start.max(end - l), end) } else { (start, end.min(start + l)) };
+            let (start, end) = if effect.reversed() {
+                (start.max(end - l), end)
+            } else {
+                (start, end.min(start + l))
+            };
             let shift = if start < 0 { l } else { 0 };
             (start + shift, end + shift)
         }
