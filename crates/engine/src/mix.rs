@@ -5,7 +5,7 @@ use std::f32::consts::FRAC_PI_2;
 use std::collections::HashMap;
 
 use crate::effects::{Gain, lane_into};
-use crate::{Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, RangeId, Track};
+use crate::{ChannelMode, Clip, Fade, FadeShape, Frames, GainPoint, MIN_DB, Project, RangeId, Track};
 
 /// Gain of a fade-in at progress `t` (0 = start, 1 = done).
 pub fn fade_gain(shape: FadeShape, t: f32) -> f32 {
@@ -115,7 +115,7 @@ pub fn mixdown(project: &Project, keep_going: impl Fn() -> bool) -> Option<Mixdo
     let mut sound = [vec![0.0; len], vec![0.0; len]];
     for track in project.tracks.iter().filter(|t| !t.muted) {
         sound.iter_mut().for_each(|c| c.fill(0.0));
-        clips_into(project, track, &mut sound, 0, 0, len);
+        clips_into(project, track, &mut sound);
         for lane in &track.effects {
             if !keep_going() {
                 return None;
@@ -163,27 +163,68 @@ impl Levels {
     }
 }
 
-/// Adds the track's timeline frames `from..from + n` to `out` from index `at`. With a loop end, this range must
-/// lie in one loop.
-fn clips_into(project: &Project, track: &Track, out: &mut [Vec<f32>; 2], at: usize, from: Frames, n: usize) {
-    let to = from.saturating_add(Frames::try_from(n).unwrap_or(Frames::MAX));
+/// Adds the track's clips to `out`, which starts at timeline frame 0 (with a loop end: one loop).
+fn clips_into(project: &Project, track: &Track, out: &mut [Vec<f32>; 2]) {
     let [left, right] = out;
+    let len = Frames::try_from(left.len().min(right.len())).unwrap_or(0);
     for (index, clip) in track.clips.iter().enumerate() {
         let fades = edge_fades(&track.clips, index, project.loop_end);
-        for shift in loop_shifts(clip, from, to, project.loop_end) {
+        let channels = &clip.source.channels;
+        let Some(a) = channels.first() else { continue };
+        let b = channels.get(1).unwrap_or(a);
+        let (from_l, from_r) = match clip.channels {
+            ChannelMode::Stereo | ChannelMode::Mono => (a, b),
+            ChannelMode::Left => (a, a),
+            ChannelMode::Right => (b, b),
+        };
+        let mono = clip.channels == ChannelMode::Mono && channels.len() > 1;
+        // Between the fades a flat volume is one gain for every frame, and the loop needs no gain maths.
+        let flat_volume = clip.gain.windows(2).all(|p| matches!(p, [a, b] if a.db == b.db));
+        let (flat_from, flat_to) = if flat_volume {
+            (fades.0.len, clip.len.saturating_sub(fades.1.len).max(fades.0.len))
+        } else {
+            (clip.len, clip.len)
+        };
+        let flat_amp = db_to_amp(envelope_db(&clip.gain, 0));
+        let in_source = clip.source.frames().saturating_sub(clip.offset);
+        for shift in loop_shifts(clip, 0, len, project.loop_end) {
             let clip_start = clip.start.saturating_sub(shift);
-            for pos in clip_start.max(from)..clip_start.saturating_add(clip.len).min(to) {
-                let Ok(i) = usize::try_from(pos - from) else { continue };
-                let rel = pos - clip_start;
-                let src = clip.offset.saturating_add(rel);
-                let amp = clip_amp(clip, fades, rel);
-                let (l, r) = clip.frame(src);
-                if let (Some(ol), Some(or)) = (left.get_mut(at + i), right.get_mut(at + i)) {
-                    *ol += l * amp;
-                    *or += r * amp;
+            // The clip's own frames that land in `out`.
+            let first = clip_start.saturating_neg().max(0);
+            let end = clip.len.min(len.saturating_sub(clip_start)).min(in_source);
+            let parts = [(first, flat_from, false), (flat_from, flat_to, true), (flat_to, end, false)];
+            for (from, to, flat) in parts {
+                let (from, to) = (from.max(first), to.min(end));
+                let (Ok(at), Ok(src), Ok(n)) = (
+                    usize::try_from(clip_start.saturating_add(from)),
+                    usize::try_from(clip.offset.saturating_add(from)),
+                    usize::try_from(to - from),
+                ) else {
+                    continue;
+                };
+                let (Some(ol), Some(or), Some(il), Some(ir)) = (
+                    left.get_mut(at..at + n),
+                    right.get_mut(at..at + n),
+                    from_l.get(src..src + n),
+                    from_r.get(src..src + n),
+                ) else {
+                    continue;
+                };
+                if flat {
+                    add_scaled([ol, or], [il, ir], mono, std::iter::repeat(flat_amp));
+                } else {
+                    add_scaled([ol, or], [il, ir], mono, (from..).map(|rel| clip_amp(clip, fades, rel)));
                 }
             }
         }
+    }
+}
+
+fn add_scaled([ol, or]: [&mut [f32]; 2], [il, ir]: [&[f32]; 2], mono: bool, amps: impl Iterator<Item = f32>) {
+    for ((((ol, or), l), r), amp) in ol.iter_mut().zip(or).zip(il).zip(ir).zip(amps) {
+        let (l, r) = if mono { ((l + r) * 0.5, (l + r) * 0.5) } else { (*l, *r) };
+        *ol += l * amp;
+        *or += r * amp;
     }
 }
 
@@ -331,6 +372,18 @@ mod tests {
     }
 
     #[test]
+    fn a_fade_in_that_runs_into_a_crossfade_counts_each_frame_once() {
+        let mut a = clip(1, constant(1.0, 1000), 0, FadeShape::Linear);
+        a.fade_in = Fade { len: 800, shape: FadeShape::Linear };
+        let p = one_track(vec![a, clip(2, constant(1.0, 1000), 600, FadeShape::Linear)]);
+        let [left, _] = render(&p, 700, 1);
+        let clips = &p.tracks[0].clips;
+        let expected = clip_amp(&clips[0], edge_fades(clips, 0, None), 700)
+            + clip_amp(&clips[1], edge_fades(clips, 1, None), 100);
+        assert!((left[0] - expected).abs() < 1e-6, "{} vs {expected}", left[0]);
+    }
+
+    #[test]
     fn linear_crossfade_keeps_constant_level() {
         let a = clip(1, constant(1.0, 100), 0, FadeShape::Linear);
         let b = clip(2, constant(1.0, 100), 50, FadeShape::Linear);
@@ -450,3 +503,4 @@ mod tests {
         assert_eq!(envelope_db(&points, 500), -20.0);
     }
 }
+
