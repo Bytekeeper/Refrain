@@ -367,14 +367,15 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// Checks the rules every project keeps after a change, then measures what the effects need from the audio.
 fn settle(p: &mut Project) -> Result<()> {
+    let rate = p.sample_rate;
     for track in &mut p.tracks {
         tidy(track, p.loop_end)?;
         for lane in &mut track.effects {
-            tidy_lane(lane, p.loop_end)?;
+            tidy_lane(lane, rate, p.loop_end)?;
         }
     }
     for lane in &mut p.mix_effects {
-        tidy_lane(lane, p.loop_end)?;
+        tidy_lane(lane, rate, p.loop_end)?;
     }
     refit(p)?;
     Ok(())

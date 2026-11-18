@@ -109,6 +109,19 @@ impl Effect {
         }
     }
 
+    /// The part of a range from `start` to `end` that the effect hears: the range without its tail, which ends
+    /// it, or reversed starts it. A range round the whole loop has no edges, so it hears all of it.
+    pub fn input(&self, (start, end): (Frames, Frames), rate: u32, loop_end: Option<Frames>) -> (Frames, Frames) {
+        let tail = self.tail(rate);
+        if loop_end.is_some_and(|l| l > 0 && end - start >= l) {
+            (start, end)
+        } else if self.reversed() {
+            (start.saturating_add(tail).min(end), end)
+        } else {
+            (start, end.saturating_sub(tail).max(start))
+        }
+    }
+
     /// The settings that make the tail about `frames` long, as near as the limits allow. An echo keeps its
     /// delay and first volume and changes how many repeats are heard, so its tail is whole repeats long.
     pub fn with_tail(self, frames: Frames, rate: u32) -> Effect {
@@ -210,11 +223,12 @@ fn ms_frames(ms: f32, rate: u32) -> Frames {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRange {
     pub id: RangeId,
+    /// The whole effect, tail included: outside it the range changes nothing.
     pub start: Frames,
     pub end: Frames,
     /// Of the lane's kind.
     pub effect: Effect,
-    /// How long the effect takes to come in after the start and to go before the end, so it does not click.
+    /// How long the effect takes to come in and to go at the edges of what it hears, so it does not click.
     pub fade_in: Frames,
     pub fade_out: Frames,
 }
@@ -280,7 +294,7 @@ impl EffectLane {
 
 /// The fades between the plain and the processed sound at both edges of a range, so it never clicks.
 /// Sorts a lane's ranges and refuses ranges that are empty, overlap, or break the loop rules.
-pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Result<()> {
+pub(crate) fn tidy_lane(lane: &mut EffectLane, rate: u32, loop_end: Option<Frames>) -> Result<()> {
     lane.ranges.sort_by_key(|r| r.start);
     for range in &lane.ranges {
         if std::mem::discriminant(&range.effect) != std::mem::discriminant(&lane.effect) {
@@ -294,9 +308,19 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, loop_end: Option<Frames>) -> Resu
     if lane.ranges.iter().any(|r| r.fade_in < 0 || r.fade_out < 0) {
         return Err(Error::Invalid("a fade cannot be shorter than nothing".into()));
     }
+    let hears = |r: &EffectRange| r.effect.input((r.start, r.end), rate, loop_end);
+    if lane.ranges.iter().any(|r| {
+        let (from, to) = hears(r);
+        to <= from
+    }) {
+        return Err(Error::Invalid(
+            "the range is too short for the effect's tail: make the range longer or the tail shorter".into(),
+        ));
+    }
     // A range made shorter than its fades shortens both alike.
     for r in &mut lane.ranges {
-        let (len, both) = (r.end - r.start, r.fade_in.saturating_add(r.fade_out));
+        let (from, to) = hears(r);
+        let (len, both) = (to - from, r.fade_in.saturating_add(r.fade_out));
         if both > len {
             r.fade_in = (r.fade_in as f64 * len as f64 / both as f64).floor() as Frames;
             r.fade_out = len - r.fade_in;
@@ -404,22 +428,23 @@ fn range_change(
     let loop_end = project.loop_end.filter(|l| *l > 0);
     // A range round the whole loop has no edges: its end runs straight into its start.
     let whole_loop = loop_end.is_some_and(|l| range.end - range.start >= l);
+    let (start, end) = range.effect.input((range.start, range.end), rate, loop_end);
     let (fade_in, fade_out) = (range.fade_in.max(1) as f32, range.fade_out.max(1) as f32);
     let weight = |t: Frames| {
-        let (into, left) = ((t - range.start) as f32, (range.end - t) as f32);
-        match (t >= range.start && t < range.end, whole_loop) {
+        let (into, left) = ((t - start) as f32, (end - t) as f32);
+        match (t >= start && t < end, whole_loop) {
             (false, _) => 0.0,
             (true, true) => 1.0,
             (true, false) => ((into + 1.0) / fade_in).min(left / fade_out).min(1.0),
         }
     };
-    let len = usize::try_from(range.end - range.start).unwrap_or(0);
+    let len = usize::try_from(end - start).unwrap_or(0);
     let tail = usize::try_from(range.effect.tail(rate)).unwrap_or(0);
     let state = &mut State::new(range.effect, rate);
     if range.effect.reversed() {
-        // Backwards through the range, so the tail comes before it.
-        let mut dry = read(sound, loop_end, range.start, len);
-        let mut weights: Vec<f32> = (range.start..range.end).map(weight).collect();
+        // Backwards through what it hears, so the tail comes before it.
+        let mut dry = read(sound, loop_end, start, len);
+        let mut weights: Vec<f32> = (start..end).map(weight).collect();
         weights.reverse();
         weights.resize(len + tail, 0.0);
         for channel in &mut dry {
@@ -429,17 +454,17 @@ fn range_change(
         let mut change = [vec![0.0; len + tail], vec![0.0; len + tail]];
         apply_range(range, 1.0, rate, &dry, &weights, &mut change, state);
         change.iter_mut().for_each(|c| c.reverse());
-        return (range.start - tail as Frames, change, None);
+        return (start - tail as Frames, change, None);
     }
     let before = usize::try_from(range.effect.warmup(rate)).unwrap_or(0);
-    let from = range.start - before as Frames;
+    let from = start - before as Frames;
     let n = before + len + tail;
     let dry = read(sound, loop_end, from, n);
     let weights: Vec<f32> = (from..).take(n).map(weight).collect();
     let gain = match range.effect {
         Effect::Normalize { .. } | Effect::Loudness { .. } => {
             let under = dry.each_ref().map(|c| c.get(before..before + len).unwrap_or(&[]));
-            Some(measured_gain(&range.effect, under, rate, range.start))
+            Some(measured_gain(&range.effect, under, rate, start))
         }
         _ => None,
     };
@@ -937,7 +962,7 @@ mod tests {
         assert!(steep < gentle / 8.0, "{steep} {gentle}");
     }
 
-    /// One click at frame 100 on a track, with a lane of `effect` over 0..200.
+    /// One click at frame 100 on a track, with a lane of `effect` that hears 0..200; its tail is added on.
     fn click_session(effect: Effect) -> Session {
         let mut samples = vec![0.0; 300];
         samples[100] = 1.0;
@@ -963,12 +988,9 @@ mod tests {
         })
         .unwrap();
         let lane = s.project().tracks[0].effects[0].id;
-        s.execute(Command::AddEffectRange {
-            lane,
-            start: 0,
-            end: 200,
-        })
-        .unwrap();
+        let tail = effect.tail(RATE);
+        let (start, end) = if effect.reversed() { (-tail, 200) } else { (0, 200 + tail) };
+        s.execute(Command::AddEffectRange { lane, start, end }).unwrap();
         s
     }
 
@@ -1009,6 +1031,36 @@ mod tests {
     }
 
     #[test]
+    fn new_settings_keep_the_range_edges_and_a_tail_longer_than_the_range_is_refused() {
+        let reverb = |seconds| Effect::Reverb {
+            seconds,
+            level_db: 0.0,
+            reversed: false,
+        };
+        let mut s = click_session(reverb(0.5));
+        let edges = |s: &Session| {
+            let r = &s.project().tracks[0].effects[0].ranges[0];
+            (r.start, r.end, r.effect.input((r.start, r.end), RATE, None))
+        };
+        let (start, end, _) = edges(&s);
+        let range = s.project().tracks[0].effects[0].ranges[0].id;
+        s.execute(Command::SetEffect {
+            range,
+            effect: reverb(0.3),
+        })
+        .unwrap();
+        let tail = reverb(0.3).tail(RATE);
+        assert_eq!(edges(&s), (start, end, (start, end - tail)), "it hears more, the edges stay");
+        assert!(
+            s.execute(Command::SetEffect {
+                range,
+                effect: reverb(5.0),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn each_range_keeps_its_own_settings_and_new_ones_start_with_the_last_set() {
         let echo = |delay_ms| Effect::Echo {
             delay_ms,
@@ -1021,8 +1073,8 @@ mod tests {
         let first = s.project().tracks[0].effects[0].ranges[0].id;
         s.execute(Command::AddEffectRange {
             lane,
-            start: 500,
-            end: 600,
+            start: 1300,
+            end: 2400,
         })
         .unwrap();
         s.execute(Command::SetEffect {
@@ -1034,8 +1086,8 @@ mod tests {
         assert!(left[150] > 0.4 && left[200] < 0.3, "the first range echoes after 50 ms");
         s.execute(Command::AddEffectRange {
             lane,
-            start: 800,
-            end: 900,
+            start: 2500,
+            end: 3600,
         })
         .unwrap();
         let effects = |s: &Session| -> Vec<Effect> {
@@ -1146,6 +1198,14 @@ mod tests {
                 level_db: -6.0,
                 reversed: true,
             },
+        })
+        .unwrap();
+        // The tail before what it hears, 600..800, which the loop wraps round to 0..200 with the click.
+        let range = s.project().tracks[0].effects[0].ranges[0].id;
+        s.execute(Command::SetEffectRange {
+            range,
+            start: 240,
+            end: 800,
         })
         .unwrap();
         s.execute(Command::SetLoopEnd { at: Some(600) }).unwrap();

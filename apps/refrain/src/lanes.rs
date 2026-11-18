@@ -28,7 +28,7 @@ enum RangeDragKind {
     },
     Start,
     End,
-    /// The end of the tail, `frames` after the range end.
+    /// The tail's handle inside the range: the tail is `frames` long, the range edges stay.
     Tail {
         frames: Frames,
     },
@@ -150,7 +150,14 @@ impl Editor {
         }
     }
 
-    /// Where the fade handles of a range are; none for a range round the whole loop, which has no edges.
+    /// The part of a range the effect hears, which holds the fades.
+    fn hears(&self, effect: Effect, start: Frames, end: Frames) -> (Frames, Frames) {
+        let project = self.session.project();
+        effect.input((start, end), project.sample_rate, project.loop_end)
+    }
+
+    /// Where the fade handles of what a range hears are; none for a range round the whole loop, which has no
+    /// edges.
     fn fade_handles(&self, lane_left: f32, start: Frames, end: Frames, fades: (Frames, Frames)) -> Option<(f32, f32)> {
         let loop_end = self.session.project().loop_end.filter(|l| *l > 0);
         if loop_end.is_some_and(|l| end - start >= l) {
@@ -166,24 +173,22 @@ impl Editor {
 
     /// How much of the effect a frame of the range gets, as the engine computes it: 0 at the edges, 1 past
     /// the fades.
-    fn fade_weight(range: &ShownRange, frame: Frames) -> f32 {
+    fn fade_weight(range: &ShownRange, (start, end): (Frames, Frames), frame: Frames) -> f32 {
         let ramp = |done: Frames, fade: Frames| done as f32 / fade.max(1) as f32;
-        let (into, left) = (frame - range.start, range.end - frame);
+        let (into, left) = (frame - start, end - frame);
         ramp(into, range.fade_in)
             .min(ramp(left, range.fade_out))
             .clamp(0.0, 1.0)
     }
 
-    /// Where the tail of a range is drawn: after its end, or reversed before its start. With a loop it wraps,
-    /// and it is at most one loop long.
-    fn tail_span(&self, (start, end): (Frames, Frames), tail: Frames, reversed: bool) -> (Frames, Frames) {
-        let from = if reversed { start - tail } else { end };
-        match self.session.project().loop_end.filter(|l| *l > 0) {
-            Some(l) => {
-                let from = from.rem_euclid(l);
-                (from, from + tail.min(l))
-            }
-            None => (from, from + tail),
+    /// The tail inside a range: at its end, or reversed at its start. None for a range round the whole loop,
+    /// whose tail runs on into its own start.
+    fn tail_span(&self, effect: Effect, (start, end): (Frames, Frames)) -> Option<(Frames, Frames)> {
+        let (from, to) = self.hears(effect, start, end);
+        match (from > start, to < end) {
+            (true, _) => Some((start, from)),
+            (_, true) => Some((to, end)),
+            _ => None,
         }
     }
 
@@ -288,10 +293,19 @@ impl Editor {
             let dragged = drag.range.and_then(|id| project.lane(drag.lane)?.range(id));
             let other_fades = dragged.map_or((0, 0), |r| (r.fade_in, r.fade_out));
             let reversed = dragged.is_some_and(|r| r.effect.reversed());
+            // A range is longer than its tail, so the effect hears something.
+            let tail = dragged.map_or_else(
+                || project.lane(drag.lane).map_or(0, |l| l.effect.tail(project.sample_rate)),
+                |r| r.effect.tail(project.sample_rate),
+            );
+            let hears = dragged.map_or((drag.start, drag.end), |r| {
+                r.effect.input((drag.start, drag.end), project.sample_rate, project.loop_end)
+            });
             match &mut drag.kind {
                 &mut RangeDragKind::New { anchor } => {
                     let to = snap.apply(frame, &mut guide);
-                    (drag.start, drag.end) = (anchor.min(to), anchor.max(to));
+                    let start = anchor.min(to);
+                    (drag.start, drag.end) = (start, anchor.max(to).max(start + tail + 1));
                 }
                 &mut RangeDragKind::Move { grab, len } => {
                     let start = frame - grab;
@@ -303,28 +317,26 @@ impl Editor {
                     };
                     (drag.start, drag.end) = (start, start + len);
                 }
-                RangeDragKind::Start => drag.start = snap.apply(frame, &mut guide).min(drag.end - 1),
-                RangeDragKind::End => drag.end = snap.apply(frame, &mut guide).max(drag.start + 1),
+                RangeDragKind::Start => drag.start = snap.apply(frame, &mut guide).min(drag.end - tail - 1),
+                RangeDragKind::End => drag.end = snap.apply(frame, &mut guide).max(drag.start + tail + 1),
                 // With a loop the handle of a range past the loop end may sit at the start.
                 // A fade stops at the other one: past it the effect would never be fully in.
                 RangeDragKind::FadeIn { frames } => {
-                    let to = snap.apply(frame, &mut guide) - drag.start;
+                    let to = snap.apply(frame, &mut guide) - hears.0;
                     let to = loop_end.map_or(to, |l| to.rem_euclid(l));
-                    *frames = to.clamp(0, drag.end - drag.start - other_fades.1);
+                    *frames = to.clamp(0, hears.1 - hears.0 - other_fades.1);
                 }
                 RangeDragKind::FadeOut { frames } => {
-                    let to = drag.end - snap.apply(frame, &mut guide);
+                    let to = hears.1 - snap.apply(frame, &mut guide);
                     let to = loop_end.map_or(to, |l| to.rem_euclid(l));
-                    *frames = to.clamp(0, drag.end - drag.start - other_fades.0);
+                    *frames = to.clamp(0, hears.1 - hears.0 - other_fades.0);
                 }
                 RangeDragKind::Tail { frames } => {
                     let at = snap.apply(frame, &mut guide);
-                    let to = if reversed { drag.start - at } else { at - drag.end };
-                    // With a loop the handle may sit before the range, one loop later.
-                    *frames = match loop_end {
-                        Some(l) => to.rem_euclid(l).max(1),
-                        None => to.max(1),
-                    };
+                    let to = if reversed { at - drag.start } else { drag.end - at };
+                    // With a loop the handle may show one loop earlier.
+                    let to = loop_end.map_or(to, |l| to.rem_euclid(l));
+                    *frames = to.clamp(1, (drag.end - drag.start - 1).max(1));
                 }
             }
         }
@@ -380,20 +392,16 @@ impl Editor {
     /// The range under `pos`, and which part. Range edges win over the end of another range's tail.
     fn range_at(&self, project: &Project, row: LaneRow, lane_left: f32, pos: Pos2) -> Option<(RangeId, Edge)> {
         let lane = project.lane(row.lane)?;
-        let rate = project.sample_rate;
         let tail_end = |r: &EffectRange| {
             let effect = self.shown_effect(r);
-            let tail = effect.tail(rate);
             let shown = self.shown_range(lane.id, r.id, r.start, r.end);
-            let (from, to) = self.tail_span(shown, tail, effect.reversed());
-            // A reversed tail is done where it starts, on the left.
-            let handle = |&(x0, x1): &(f32, f32)| if effect.reversed() { x0 } else { x1 };
-            (tail > 0
-                && self
-                    .range_spans(lane_left, from, to)
-                    .iter()
-                    .any(|span| (pos.x - handle(span)).abs() <= HANDLE))
-            .then_some((r.id, Edge::Tail))
+            let (from, to) = self.tail_span(effect, shown)?;
+            // The handle is where the tail meets what the effect hears.
+            let handle = |&(x0, x1): &(f32, f32)| if effect.reversed() { x1 } else { x0 };
+            self.range_spans(lane_left, from, to)
+                .iter()
+                .any(|span| (pos.x - handle(span)).abs() <= HANDLE)
+                .then_some((r.id, Edge::Tail))
         };
         let fade_y = row.rect.top() + 3.0 + FADE_Y;
         let on_fade = (pos.y - fade_y).abs() <= HANDLE * 0.6;
@@ -536,18 +544,20 @@ impl Editor {
                 ..
             } = range;
             let selected = id.is_some() && id == self.selected_range;
-            let handles = self.fade_handles(lane_left, start, end, (range.fade_in, range.fade_out));
+            let hears = self.hears(effect, start, end);
+            let handles = self.fade_handles(lane_left, hears.0, hears.1, (range.fade_in, range.fade_out));
             let loop_end = self.session.project().loop_end.unwrap_or(0);
             // The second span is the same range one loop earlier.
             for ((x0, x1), shift) in self.range_spans(lane_left, start, end).into_iter().zip([0, loop_end]) {
                 let area = Rect::from_x_y_ranges(x0..=x1, body.y_range());
                 // Filled as high as the effect is in: the fades slope.
-                let mut frames = [start, start + range.fade_in, end - range.fade_out, end];
+                let (from, to) = hears;
+                let mut frames = [from, from + range.fade_in, to - range.fade_out, to];
                 frames.sort();
                 let mut outline = vec![area.left_bottom()];
                 outline.extend(frames.iter().map(|&frame| {
                     let weight = if handles.is_some() {
-                        Self::fade_weight(range, frame)
+                        Self::fade_weight(range, hears, frame)
                     } else {
                         1.0
                     };
@@ -609,8 +619,8 @@ impl Editor {
         }
     }
 
-    /// How long the effect keeps sounding after a range, fading out, with a handle where it is done. An echo
-    /// shows a mark at each repeat. With the loop on it wraps into the start, as it is heard.
+    /// The tail inside a range, fading out, with its handle where the effect stops hearing. An echo shows a mark
+    /// at each repeat.
     fn draw_tail(
         &self,
         painter: &egui::Painter,
@@ -621,12 +631,10 @@ impl Editor {
         color: Color32,
     ) {
         let rate = self.session.project().sample_rate;
-        let tail = effect.tail(rate);
-        if tail <= 0 {
+        let Some((from, to)) = self.tail_span(effect, range) else {
             return;
-        }
+        };
         let reversed = effect.reversed();
-        let (from, to) = self.tail_span(range, tail, reversed);
         let delay = match effect {
             Effect::Echo { delay_ms, .. } => (f64::from(delay_ms) * f64::from(rate) / 1000.0).round() as Frames,
             _ => 0,
@@ -660,9 +668,9 @@ impl Editor {
                     );
                 }
             }
-            let done = if reversed { x0 } else { x1 };
+            let handle = if reversed { x1 } else { x0 };
             painter.line_segment(
-                [pos2(done, body.top()), pos2(done, body.bottom())],
+                [pos2(handle, body.top()), pos2(handle, body.bottom())],
                 Stroke::new(2.0, color),
             );
         }

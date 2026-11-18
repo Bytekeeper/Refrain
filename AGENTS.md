@@ -59,8 +59,10 @@ of effect and the time ranges where it applies, each range with its own settings
 top down.
 The project is heard through its mixdown (`engine::mixdown`): the whole project rendered layer by layer,
 each track's clips, then its lanes, then the mix lanes. Every effect hears all of its input, before and
-after, so a reversed echo or reverb is the same effect run backwards. A range changes only its span (the
-range and its tail); with a loop a span past the loop end goes on at the start. The window makes the
+after, so a reversed echo or reverb is the same effect run backwards. A range holds its whole effect:
+the part the effect hears and its tail (at the end, or at the start when reversed), so nothing changes
+outside it and ranges in a lane never meet. New settings keep the range's edges and move the tail's
+boundary inside it. With a loop a range past the loop end goes on at the start. The window makes the
 mixdown in the background after each edit; playback, the level row and export use it.
 
 ## 3. Clean room

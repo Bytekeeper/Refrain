@@ -17,7 +17,9 @@ use crate::{
 };
 
 pub const PROJECT_EXTENSION: &str = "refrain";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Its ranges ended where the effect stopped hearing, and the tail came after.
+const TAILS_OUTSIDE: u32 = 1;
 /// A project file holds only edits; a file this large is not one.
 const MAX_FILE_BYTES: u64 = 64 << 20;
 
@@ -112,24 +114,67 @@ fn lanes_to_file(lanes: &[EffectLane]) -> Vec<LaneFile> {
         .collect()
 }
 
-fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>) -> Result<Vec<EffectLane>> {
+fn lanes_from_file(project: &mut Project, lanes: Vec<LaneFile>, version: u32) -> Result<Vec<EffectLane>> {
     let mut out = vec![];
     for file in lanes {
-        let mut lane = EffectLane::new(LaneId(project.new_id()), file.effect)?;
-        lane.enabled = file.enabled;
+        let mut ranges = vec![];
         for r in file.ranges {
-            lane.ranges.push(EffectRange {
+            let effect = r.effect.unwrap_or(file.effect);
+            let (start, end) = if version == TAILS_OUTSIDE {
+                grown_by_tail(effect, r.start, r.end, project.sample_rate, project.loop_end)
+            } else {
+                (r.start, r.end)
+            };
+            ranges.push(EffectRange {
                 id: RangeId(project.new_id()),
-                start: r.start,
-                end: r.end,
-                effect: r.effect.unwrap_or(file.effect),
+                start,
+                end,
+                effect,
                 fade_in: r.fade_in.unwrap_or(default_fade(project.sample_rate)),
                 fade_out: r.fade_out.unwrap_or(default_fade(project.sample_rate)),
             });
         }
-        out.push(lane);
+        ranges.sort_by_key(|r| r.start);
+        // Ranges whose tails crossed now overlap, so they go to lanes of their own right below.
+        let mut split: Vec<EffectLane> = vec![];
+        for range in ranges {
+            let free = split.iter_mut().find(|l| l.ranges.last().is_none_or(|last| last.end <= range.start));
+            match free {
+                Some(lane) => lane.ranges.push(range),
+                None => {
+                    let mut lane = EffectLane::new(LaneId(project.new_id()), file.effect)?;
+                    lane.enabled = file.enabled;
+                    lane.ranges.push(range);
+                    split.push(lane);
+                }
+            }
+        }
+        if split.is_empty() {
+            let mut lane = EffectLane::new(LaneId(project.new_id()), file.effect)?;
+            lane.enabled = file.enabled;
+            split.push(lane);
+        }
+        out.extend(split);
     }
     Ok(out)
+}
+
+/// A range of an older file, grown by its tail; with a loop at most one loop long and starting in it.
+fn grown_by_tail(effect: Effect, start: Frames, end: Frames, rate: u32, loop_end: Option<Frames>) -> (Frames, Frames) {
+    let tail = effect.tail(rate);
+    let (start, end) = if effect.reversed() {
+        (start.saturating_sub(tail), end)
+    } else {
+        (start, end.saturating_add(tail))
+    };
+    match loop_end.filter(|l| *l > 0) {
+        Some(l) => {
+            let (start, end) = if effect.reversed() { (start.max(end - l), end) } else { (start, end.min(start + l)) };
+            let shift = if start < 0 { l } else { 0 };
+            (start + shift, end + shift)
+        }
+        None => (start, end),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -228,7 +273,7 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
     let bytes = std::fs::read(path)?;
     let not_a_project = |e: serde_json::Error| Error::ProjectFile(format!("not a readable project: {e}"));
     let header: Header = serde_json::from_slice(&bytes).map_err(not_a_project)?;
-    if header.version != VERSION {
+    if header.version != VERSION && header.version != TAILS_OUTSIDE {
         return Err(Error::ProjectFile(format!(
             "version {} is not supported; this editor reads version {VERSION}",
             header.version
@@ -285,12 +330,12 @@ pub fn open_project(path: &Path) -> Result<(Session, Option<serde_json::Value>)>
             clips,
             effects: vec![],
         });
-        let effects = lanes_from_file(&mut project, track.effects)?;
+        let effects = lanes_from_file(&mut project, track.effects, header.version)?;
         if let Some(t) = project.tracks.last_mut() {
             t.effects = effects;
         }
     }
-    project.mix_effects = lanes_from_file(&mut project, file.mix_effects)?;
+    project.mix_effects = lanes_from_file(&mut project, file.mix_effects, header.version)?;
     Ok((Session::open(project)?, file.view))
 }
 

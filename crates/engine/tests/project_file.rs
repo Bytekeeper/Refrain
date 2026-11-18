@@ -334,7 +334,7 @@ fn damaged_files_are_refused() {
             let clip = v["tracks"][0]["clips"][1].clone();
             v["tracks"][0]["clips"].as_array_mut().unwrap().push(clip);
         }),
-        ("newer version", |v| v["version"] = 2.into()),
+        ("newer version", |v| v["version"] = 3.into()),
         ("loop end before 0", |v| v["loop_end"] = (-1).into()),
         ("clip after the loop end", |v| v["loop_end"] = 100.into()),
         ("wrong type", |v| v["tracks"] = "none".into()),
@@ -472,6 +472,35 @@ fn ranges_in_older_files_take_the_lane_settings() {
         assert!(lane.ranges.iter().all(|r| (r.fade_in, r.fade_out) == (fade, fade)));
     }
     assert_same_sound(&s, &opened);
+}
+
+/// Ranges in version 1 files ended where the effect stopped hearing; now they hold the tail too, and ranges
+/// whose tails crossed go to a lane of their own.
+#[test]
+fn older_ranges_grow_by_their_tail() {
+    let dir = folder("older_tails");
+    let s = edited_project(&dir);
+    let file = dir.join("song.refrain");
+    save_project(s.project(), &file, None).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let echo = serde_json::json!({"kind": "echo", "delay_ms": 100.0, "fade_db": 6.0, "level_db": -6.0, "reversed": false});
+    let range = |start: i64, end: i64| serde_json::json!({"start": start, "end": end, "effect": echo, "fade_in": 0, "fade_out": 0});
+    json["version"] = 1.into();
+    json["tracks"][0]["effects"] = serde_json::json!([{
+        "effect": echo,
+        "enabled": true,
+        "ranges": [range(0, 1000), range(2000, 3000), range(200_000, 201_000)],
+    }]);
+    std::fs::write(&file, json.to_string()).unwrap();
+
+    let (opened, _) = open_project(&file).unwrap();
+    let p = opened.project();
+    let lanes = &p.tracks[0].effects;
+    let tail = lanes[0].ranges[0].effect.tail(p.sample_rate);
+    let spans = |lane: usize| lanes[lane].ranges.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>();
+    assert_eq!(lanes.len(), 2);
+    assert_eq!(spans(0), [(0, 1000 + tail), (200_000, 201_000 + tail)]);
+    assert_eq!(spans(1), [(2000, 3000 + tail)]);
 }
 
 /// What the window does around exporting and saving, done by the engine alone, as another program would.

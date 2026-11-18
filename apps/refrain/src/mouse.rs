@@ -267,15 +267,6 @@ impl Editor {
                 .chain(&project.mix_effects);
             for range in lanes.flat_map(|l| &l.ranges).filter(|r| Some(r.id) != dragged) {
                 targets.extend([range.start, range.end]);
-                let tail = range.effect.tail(project.sample_rate);
-                if tail > 0 {
-                    let done = if range.effect.reversed() {
-                        range.start - tail
-                    } else {
-                        range.end.saturating_add(tail)
-                    };
-                    targets.push(project.loop_end.filter(|l| *l > 0).map_or(done, |l| done.rem_euclid(l)));
-                }
             }
         }
         Snap {
