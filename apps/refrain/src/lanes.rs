@@ -7,6 +7,8 @@ use refrain_engine::{Command, Effect, EffectLane, EffectRange, Frames, Gain, Lan
 use crate::{Editor, HANDLE, HEADER_W};
 
 pub(crate) const LANE_H: f32 = 24.0;
+/// Space after a track's lanes and after the mix's lanes, so a lane is seen to belong to the track above it.
+pub(crate) const GAP: f32 = 10.0;
 const EFFECT: Color32 = Color32::from_rgb(180, 130, 255);
 
 /// A range being drawn, moved or resized. The project only changes on release, as one undo step.
@@ -64,17 +66,19 @@ struct LaneRow {
 }
 
 impl Editor {
-    /// The height of a track's lanes; 0 when folded away.
+    /// The height below a track row: its lanes (none when folded away) and the gap to the next track.
     pub(crate) fn lanes_height(&self, row: usize) -> f32 {
         match self.session.project().tracks.get(row) {
-            Some(track) if !self.folded.contains(&track.id) => track.effects.len() as f32 * LANE_H,
-            _ => 0.0,
+            Some(track) if !self.folded.contains(&track.id) => track.effects.len() as f32 * LANE_H + GAP,
+            Some(_) => GAP,
+            None => 0.0,
         }
     }
 
     /// The mix's lanes, at the top of the timeline right under the Mix row, which they belong to.
     pub(crate) fn mix_height(&self) -> f32 {
-        self.session.project().mix_effects.len() as f32 * LANE_H
+        let lanes = self.session.project().mix_effects.len();
+        if lanes == 0 { 0.0 } else { lanes as f32 * LANE_H + GAP }
     }
 
     fn lane_rows(&self, rect: Rect) -> Vec<LaneRow> {

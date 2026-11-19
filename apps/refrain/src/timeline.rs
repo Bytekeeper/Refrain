@@ -4,6 +4,7 @@ use egui::{Align2, Color32, FontId, Key, Rect, Sense, Stroke, Ui, pos2, vec2};
 use refrain_engine::{Clip, Fade, Frames, MAX_DB, MIN_DB, Project, TrackId, edge_fades, overlap_after, overlap_before};
 
 use crate::clips::{Look, draw_trash_can, trash_button};
+use crate::lanes::GAP;
 use crate::mouse::Drag;
 use crate::{Command, Editor, HANDLE, HEADER_W, TRACK_H};
 
@@ -76,12 +77,19 @@ impl Editor {
                 0.0,
                 ui.visuals().faint_bg_color,
             );
-            let bottom = row.bottom() + self.lanes_height(i);
+            let y = row.bottom() + self.lanes_height(i) - GAP;
             painter.line_segment(
-                [pos2(row.left(), bottom), pos2(row.right(), bottom)],
+                [pos2(row.left(), y), pos2(row.right(), y)],
                 Stroke::new(1.0, ui.visuals().weak_text_color()),
             );
             self.track_controls(ui, row, track);
+        }
+        if !project.mix_effects.is_empty() {
+            let y = rect.top() + self.mix_height() - GAP;
+            painter.line_segment(
+                [pos2(rect.left(), y), pos2(rect.right(), y)],
+                Stroke::new(1.0, ui.visuals().weak_text_color()),
+            );
         }
         self.draw_lanes(ui, rect, &project);
         let lanes = ui.painter_at(Rect::from_min_max(pos2(lane_left, rect.top()), rect.max));
