@@ -514,8 +514,8 @@ fn dragging_the_line_below_a_track_changes_its_height() {
 #[test]
 fn changing_the_sample_rate_keeps_the_view() {
     let mut h = harness(overlapping());
-    // The sample rate choice in the toolbar.
-    click(&mut h, 340.0, 20.0);
+    // The sample rate choice at the end of the toolbar.
+    click(&mut h, 845.0, 20.0);
     h.get_by_label("48 kHz").click();
     h.run();
     let p = h.state().session.project();
@@ -1034,7 +1034,7 @@ fn an_export_range_is_renamed_in_its_menu_and_the_panel_stays_reachable() {
 
     h.key_press(egui::Key::Escape);
     h.run();
-    h.get_by_label("Export").click();
+    h.get_by_label("Export…").click();
     h.run();
     assert!(h.state().export_open, "the mix has no file yet, so the panel opens");
     save(&mut h, "export_lane_panel");

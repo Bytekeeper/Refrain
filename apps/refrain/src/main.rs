@@ -298,30 +298,21 @@ impl Editor {
         {
             self.add_generator();
         }
-        if ui.button("Export").on_hover_text(self.export_tooltip()).clicked() {
+        // Before the first export there is nothing to repeat: the button opens the panel, as File > Export… does.
+        let export = if self.session.project().export.file.is_some() {
+            "Export again"
+        } else {
+            "Export…"
+        };
+        if ui.button(export).on_hover_text(self.export_tooltip()).clicked() {
             self.export_again();
         }
-        self.rate_choice(ui);
         ui.separator();
         let label = if self.player.is_playing() { "Stop" } else { "Play" };
         if ui.button(label).clicked() {
             self.toggle_play();
         }
         ui.label(self.time_text(self.player.position()));
-        if ui
-            .button("Fit")
-            .on_hover_text("Zoom to show the whole project. F")
-            .clicked()
-        {
-            self.zoom_to_fit();
-        }
-        if ui
-            .selectable_label(self.snap, "Snap")
-            .on_hover_text("Dragged clips and edges snap to other clips' edges, 0, the loop end and the play position. Hold Shift while dragging to place freely.")
-            .clicked()
-        {
-            self.snap = !self.snap;
-        }
         let looping = self.session.project().loop_end.is_some();
         if ui
             .selectable_label(looping, "Loop")
@@ -342,16 +333,38 @@ impl Editor {
         }
         ui.separator();
         if ui
+            .button("Fit")
+            .on_hover_text("Zoom to show the whole project. F")
+            .clicked()
+        {
+            self.zoom_to_fit();
+        }
+        if ui
+            .selectable_label(self.snap, "Snap")
+            .on_hover_text("Dragged clips and edges snap to other clips' edges, 0, the loop end and the play position. Hold Shift while dragging to place freely.")
+            .clicked()
+        {
+            self.snap = !self.snap;
+        }
+        ui.separator();
+        if ui
             .add_enabled(self.session.can_undo(), egui::Button::new("Undo"))
+            .on_hover_text("Ctrl+Z")
             .clicked()
         {
             self.undo();
         }
         if ui
             .add_enabled(self.session.can_redo(), egui::Button::new("Redo"))
+            .on_hover_text("Ctrl+Y")
             .clicked()
         {
             self.redo();
+        }
+        // An empty project has no rate yet: the first audio file sets it.
+        if self.session.project().sample_rate != 0 {
+            ui.separator();
+            self.rate_choice(ui);
         }
     }
 
@@ -472,7 +485,7 @@ impl Editor {
         let mut chosen = None;
         ui.add_enabled_ui(!project.is_empty(), |ui| {
             egui::ComboBox::from_id_salt("sample rate")
-                .selected_text(if current == 0 { "– kHz".into() } else { khz(current) })
+                .selected_text(khz(current))
                 .show_ui(ui, |ui| {
                     for rate in RATES {
                         if ui.selectable_label(rate == current, khz(rate)).clicked() {
