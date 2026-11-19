@@ -46,8 +46,8 @@ pub(crate) enum Drag {
 #[derive(Clone, Copy)]
 pub(crate) enum Menu {
     Fade(FadeMenu),
-    /// The channels of one clip.
-    Clip(ClipId),
+    /// One clip, and the frame where it was right-clicked, to split it there.
+    Clip(ClipId, Frames),
     /// The channels of all clips on a track; opened from the track header.
     Track(TrackId),
     /// An effect lane, and the range that was right-clicked in it.
@@ -205,7 +205,7 @@ impl Editor {
                     _ => self
                         .crossfade_at(project, rect, pos)
                         .map(Menu::Fade)
-                        .or(hit.as_ref().map(|h| Menu::Clip(h.clip()))),
+                        .or(hit.as_ref().map(|h| Menu::Clip(h.clip(), frame))),
                 }
             };
             if let Some(Hit::Point(id, index)) = hit
@@ -462,11 +462,20 @@ impl Editor {
     pub(crate) fn menu_ui(&mut self, ui: &mut egui::Ui, menu: Menu) {
         match menu {
             Menu::Fade(fade) => self.fade_menu_ui(ui, fade),
-            Menu::Clip(clip) => {
+            Menu::Clip(clip, at) => {
+                if ui.add(egui::Button::new("Split here").shortcut_text("S")).clicked() {
+                    self.run(Command::SplitClip { clip, at });
+                    ui.close();
+                }
                 if ui.add(egui::Button::new("Duplicate").shortcut_text("Ctrl+D")).clicked() {
                     self.selected = Some(clip);
                     self.duplicate();
                     ui.close();
+                }
+                if ui.add(egui::Button::new("Delete").shortcut_text("Del")).clicked() {
+                    self.run(Command::DeleteClip { clip });
+                    ui.close();
+                    return;
                 }
                 let generated = self
                     .session
@@ -570,7 +579,7 @@ impl Editor {
                 "Channels of all clips",
                 project.track(id).map(|t| t.clips.iter().collect()).unwrap_or_default(),
             ),
-            Menu::Clip(id) => ("Channels", project.clip(id).map(|(_, c)| vec![c]).unwrap_or_default()),
+            Menu::Clip(id, _) => ("Channels", project.clip(id).map(|(_, c)| vec![c]).unwrap_or_default()),
             Menu::Fade(_) | Menu::Lane(..) => return,
         };
         ui.label(title);
