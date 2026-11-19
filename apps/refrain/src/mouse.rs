@@ -141,6 +141,31 @@ impl Editor {
         if trimming || matches!(on_edge, Some(Hit::TrimStart(_) | Hit::TrimEnd(_))) {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
+        if let Some(hover) = response.hover_pos() {
+            let crossfade = self.crossfade_at(project, rect, hover).is_some();
+            match on_edge {
+                Some(Hit::Trash(_)) => self.hint("Click: delete the clip (Del)"),
+                Some(Hit::Point(..)) => self.hint("Volume point · drag: move · right-click: remove"),
+                Some(Hit::FadeIn(_) | Hit::FadeOut(_)) => self.hint("Fade · drag: length · right-click: curve"),
+                Some(Hit::TrimStart(_) | Hit::TrimEnd(_)) => {
+                    self.hint("Drag: trim · drag over another clip: crossfade")
+                }
+                Some(Hit::Clip(..)) if crossfade => {
+                    self.hint("Crossfade · drag a clip to change it · right-click: curve")
+                }
+                Some(Hit::Clip(..)) => self.hint(
+                    "Clip · drag: move, over another clip: crossfade · double-click: volume point · drag top corners: fades \
+                     · click, then S: split at the mouse, Ctrl+D: duplicate, Del: delete · right-click: speed, channels, more",
+                ),
+                None if hover.x < rect.left() + HEADER_W
+                    && self.row_at(rect, hover.y) < project.tracks.len()
+                    && (self.row_rect(rect, self.row_at(rect, hover.y)).y_range()).contains(hover.y) =>
+                {
+                    self.hint("Track · double-click the name: rename · right-click: track menu")
+                }
+                None => {}
+            }
+        }
         let Some(pos) = response.interact_pointer_pos() else {
             return;
         };
@@ -659,6 +684,10 @@ impl Editor {
             return None;
         }
         let row = self.row_at(rect, pos.y);
+        // Below the clips are the track's lanes and the gap to the next track; above the first, the mix's lanes.
+        if !self.row_rect(rect, row).y_range().contains(pos.y) {
+            return None;
+        }
         let track = project.tracks.get(row)?;
         let lane_left = rect.left() + HEADER_W;
         let near = |p: Pos2| p.distance(pos) <= HANDLE + 2.0;

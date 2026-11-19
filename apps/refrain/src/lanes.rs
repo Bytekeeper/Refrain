@@ -215,6 +215,29 @@ impl Editor {
         let in_lane = |p: Pos2| rows.iter().find(|r| r.rect.contains(p)).copied();
         if let Some(hover) = response.hover_pos()
             && let Some(row) = in_lane(hover)
+            && let Some(lane) = project.lane(row.lane)
+        {
+            let name = lane.effect.name();
+            let hit = (hover.x >= lane_left)
+                .then(|| self.range_at(project, row, lane_left, hover))
+                .flatten();
+            let range = hit.as_ref().and_then(|(id, _)| lane.range(*id));
+            let rate = f64::from(project.sample_rate.max(1));
+            let hint = match (hit, range) {
+                (Some((_, Edge::Start | Edge::End)), _) => "Drag: resize the range".to_string(),
+                (Some((_, Edge::Tail)), _) => "Drag: the length of the effect's tail".to_string(),
+                (Some((_, Edge::FadeIn | Edge::FadeOut)), _) => "Drag: fade the effect in or out".to_string(),
+                (Some((_, Edge::Inside)), Some(r)) => format!(
+                    "{name}, {} ms · drag: move · click, then Del: remove · right-click: settings",
+                    ((r.end - r.start) as f64 * 1000.0 / rate).round()
+                ),
+                _ if hover.x < lane_left => format!("{name} lane · right-click: settings, order, remove"),
+                _ => format!("{name} lane · drag: add a range · right-click: settings, order, remove"),
+            };
+            self.hint(hint);
+        }
+        if let Some(hover) = response.hover_pos()
+            && let Some(row) = in_lane(hover)
             && hover.x >= lane_left
             && matches!(
                 self.range_at(project, row, lane_left, hover),

@@ -392,6 +392,13 @@ impl Editor {
         if response.drag_started() && on_flag {
             self.loop_drag = project.loop_end;
         }
+        if let Some(hover) = response.hover_pos() {
+            if loop_x.is_some_and(|x| (hover.x - x).abs() <= HANDLE + 2.0) {
+                self.hint("Loop end · drag: move it");
+            } else {
+                self.hint("Click or drag: the play position");
+            }
+        }
         if let Some(pos) = response.interact_pointer_pos() {
             let frame = self.frame_at(lane_left, pos.x);
             if self.loop_drag.is_some() {
@@ -553,6 +560,7 @@ impl Editor {
             |e: &Editor, y: f32| (0..project.tracks.len()).find(|&r| (e.row_rect(rect, r).bottom() - y).abs() <= 3.0);
         if response.hover_pos().is_some_and(|p| near_line(self, p.y).is_some()) || self.resizing.is_some() {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            self.hint("Drag: the track's height");
         }
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(origin) = response.ctx.input(|i| i.pointer.press_origin())

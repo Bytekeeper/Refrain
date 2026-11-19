@@ -65,6 +65,9 @@ impl Editor {
         let on_edge = |y: f32| (rect.bottom() - y).abs() <= 4.0;
         if response.hover_pos().is_some_and(|p| on_edge(p.y)) || self.level_row.resizing {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            self.hint("Drag: the height of the Mix row");
+        } else if response.hovered() {
+            self.hint("The level of the mix · click or drag: the play position");
         }
         let origin = response.ctx.input(|i| i.pointer.press_origin());
         if response.drag_started() && origin.is_some_and(|p| on_edge(p.y)) {

@@ -150,13 +150,13 @@ fn scrollbar_and_shift_wheel_pan() {
     save(&mut h, "after_shift_wheel");
 
     // Drag the scrollbar handle (the bar sits below the track and the new-track row) by 60 px to the left.
-    drag(&mut h, egui::pos2(500.0, 242.0), egui::pos2(440.0, 242.0));
+    drag(&mut h, egui::pos2(500.0, 258.0), egui::pos2(440.0, 258.0));
     let after_drag = h.state().scroll;
     assert!(
         after_drag < after_wheel,
         "{after_drag} should be less than {after_wheel}"
     );
-    drag(&mut h, egui::pos2(440.0, 242.0), egui::pos2(-500.0, 242.0));
+    drag(&mut h, egui::pos2(440.0, 258.0), egui::pos2(-500.0, 258.0));
     assert_eq!(h.state().scroll, 0.0);
     save(&mut h, "scrolled_back");
 }

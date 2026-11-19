@@ -103,6 +103,19 @@ impl Editor {
         {
             response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
+        if let Some(hover) = response.hover_pos()
+            && let Some((lane, _)) = Self::row_of(rect, project, hover.y)
+        {
+            let hint = match (hover.x >= lane_left)
+                .then(|| self.region_at(project, lane, lane_left, hover))
+                .flatten()
+            {
+                Some((_, DragKind::Start | DragKind::End)) => "Drag: resize the range",
+                Some(_) => "Export range · click: play from its start · drag: move · right-click: name, export",
+                None => "Export lane · drag: add a range, exported as a file of its own · right-click: folder, format",
+            };
+            self.hint(hint);
+        }
         let Some(pos) = response.interact_pointer_pos() else {
             return;
         };

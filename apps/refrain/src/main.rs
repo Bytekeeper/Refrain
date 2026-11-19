@@ -34,8 +34,8 @@ const HANDLE: f32 = 6.0;
 /// The working rates offered for a project and for an export.
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const AUDIO_FILES: &[&str] = &["wav", "flac", "mp3", "ogg", "opus", "aif", "aiff", "m4a"];
-const HINTS: &str = "Space: play · middle-drag or scrollbar: move along · Ctrl+wheel: zoom · S: split · Ctrl+D: duplicate · F: fit all · \
-    drag a clip over another: crossfade · double-click: volume point · right-click point: remove · drag top corners: fades · drag clip edges: trim · right-click: fade curves, channels";
+/// The status line over empty space; over a clip, lane or region it says what can be done with that.
+const HINTS: &str = "Space: play · Ctrl+wheel: zoom · middle-drag or scrollbar: move along · F: fit all · Ctrl+Z: undo";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -57,6 +57,9 @@ struct Editor {
     status: String,
     /// The status is an error message and is shown in red.
     status_error: bool,
+    /// What the mouse can do with the thing under it, shown in the status line while there is no message.
+    /// Made again each frame; the most specific part of the window sets it first.
+    hint: String,
     frames_per_px: f64,
     scroll: f64,
     drag: Option<Drag>,
@@ -152,6 +155,7 @@ impl Default for Editor {
             selected: None,
             status: "Import audio files to start.".into(),
             status_error: false,
+            hint: String::new(),
             frames_per_px: 400.0,
             scroll: 0.0,
             drag: None,
@@ -207,15 +211,21 @@ impl Editor {
         self.generate_panel(ui.ctx());
         self.take_dropped_files(ui.ctx());
         egui::Panel::top("toolbar").show(ui, |ui| ui.horizontal_wrapped(|ui| self.toolbar(ui)));
+        // One line, so the timeline does not jump when the mouse moves to a longer hint.
         egui::Panel::bottom("status").show(ui, |ui| {
-            if self.status.is_empty() {
-                ui.label(HINTS);
-            } else if self.status_error {
-                ui.colored_label(ui.visuals().error_fg_color, &self.status);
+            let text = if self.status_error {
+                egui::RichText::new(&self.status).color(ui.visuals().error_fg_color)
+            } else if !self.status.is_empty() {
+                egui::RichText::new(&self.status)
+            } else if !self.hint.is_empty() {
+                egui::RichText::new(&self.hint)
             } else {
-                ui.label(&self.status);
-            }
+                egui::RichText::new(HINTS)
+            };
+            ui.add(egui::Label::new(text).truncate());
         });
+        // The status line above was laid out before the timeline knows what is under the mouse.
+        let shown = std::mem::take(&mut self.hint);
         egui::CentralPanel::default().show(ui, |ui| {
             self.snap_guide = None;
             self.ruler(ui);
@@ -229,6 +239,9 @@ impl Editor {
             self.mix(ui.ctx());
             self.draw_level_row(ui, level_row);
         });
+        if self.hint != shown {
+            ui.ctx().request_repaint();
+        }
         if self.player.is_playing() {
             ui.ctx().request_repaint();
         }
@@ -513,6 +526,13 @@ impl Editor {
             frames as f64 / f64::from(rate)
         };
         format!("{}:{:06.3}", (secs / 60.0).floor(), secs % 60.0)
+    }
+
+    /// Sets the hover hint unless a more specific part of the window set one this frame.
+    fn hint(&mut self, text: impl Into<String>) {
+        if self.hint.is_empty() {
+            self.hint = text.into();
+        }
     }
 
     fn info(&mut self, text: String) {
