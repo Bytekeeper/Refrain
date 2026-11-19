@@ -6,12 +6,28 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use refrain_engine::{Frames, Project};
 
 /// What the audio thread reads. The window swaps in each new mixdown as soon as it is made.
-#[derive(Default)]
 struct Shared {
     sound: Arc<[Vec<f32>; 2]>,
     loop_end: Option<Frames>,
     pos: Frames,
+    /// How far past `pos` playback is, between 0 and 1: below speed 1 a frame plays for several output frames.
+    between: f64,
     playing: bool,
+    /// Like a tape: below 1 slower and lower, so a click stays a click and can be found by ear.
+    speed: f64,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            sound: Arc::default(),
+            loop_end: None,
+            pos: 0,
+            between: 0.0,
+            playing: false,
+            speed: 1.0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -31,7 +47,17 @@ impl Player {
     }
 
     pub fn seek(&self, pos: Frames) {
-        lock(&self.shared).pos = pos.max(0);
+        let mut s = lock(&self.shared);
+        s.pos = pos.max(0);
+        s.between = 0.0;
+    }
+
+    pub fn speed(&self) -> f64 {
+        lock(&self.shared).speed
+    }
+
+    pub fn set_speed(&self, speed: f64) {
+        lock(&self.shared).speed = speed.clamp(0.01, 1.0);
     }
 
     pub fn stop(&self) {
@@ -118,18 +144,24 @@ fn open(rate: u32, shared: Arc<Mutex<Shared>>) -> Result<cpal::Stream, String> {
 /// Runs on the audio thread. Copies without holding the lock so the window never waits on it.
 fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
     out.fill(0.0);
-    let (sound, loop_end, pos) = {
+    let (sound, loop_end, pos, between, speed) = {
         let s = lock(shared);
         if !s.playing || channels == 0 {
             return;
         }
-        (s.sound.clone(), s.loop_end, s.pos)
+        (s.sound.clone(), s.loop_end, s.pos, s.between, s.speed)
     };
     let [left, right] = &*sound;
-    for (frame, t) in out.chunks_mut(channels).zip(pos..) {
+    let get = |c: &Vec<f32>, t: Frames| {
         let at = loop_end.map_or(t, |l| t.rem_euclid(l));
-        let get = |c: &Vec<f32>| usize::try_from(at).ok().and_then(|i| c.get(i)).copied().unwrap_or(0.0);
-        let (l, r) = (get(left).clamp(-1.0, 1.0), get(right).clamp(-1.0, 1.0));
+        usize::try_from(at).ok().and_then(|i| c.get(i)).copied().unwrap_or(0.0)
+    };
+    for (frame, k) in out.chunks_mut(channels).zip(0u32..) {
+        let t = between + f64::from(k) * speed;
+        let (whole, part) = (t.floor(), (t - t.floor()) as f32);
+        let t = pos.saturating_add(whole as Frames);
+        let read = |c: &Vec<f32>| (get(c, t) * (1.0 - part) + get(c, t + 1) * part).clamp(-1.0, 1.0);
+        let (l, r) = (read(left), read(right));
         match frame {
             [mono] => *mono = (l + r) * 0.5,
             [a, b, ..] => {
@@ -139,11 +171,12 @@ fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
             [] => {}
         }
     }
-    let frames = Frames::try_from(out.len() / channels).unwrap_or(0);
+    let moved = between + (out.len() / channels) as f64 * speed;
     let mut s = lock(shared);
     // A seek from the window during copying wins over advancing.
-    if s.pos == pos {
-        s.pos = pos.saturating_add(frames);
+    if s.pos == pos && s.between == between {
+        s.pos = pos.saturating_add(moved.floor() as Frames);
+        s.between = moved - moved.floor();
         match loop_end {
             Some(l) => s.pos = s.pos.rem_euclid(l),
             None if s.pos >= left.len() as Frames => s.playing = false,
@@ -164,6 +197,7 @@ mod tests {
             loop_end: Some(4),
             pos: 3,
             playing: true,
+            ..Shared::default()
         });
         let mut out = [0.0; 6];
         fill(&mut out, 2, &shared);
@@ -175,5 +209,24 @@ mod tests {
         fill(&mut out, 2, &shared);
         assert_eq!(out, [0.4, 0.8, 0.0, 0.0, 0.0, 0.0]);
         assert!(!lock(&shared).playing);
+    }
+
+    #[test]
+    fn half_speed_plays_each_frame_twice_as_long_reading_between_them() {
+        let sound: Arc<[Vec<f32>; 2]> = Arc::new([vec![0.0, 0.4, 0.8, 0.4, 0.0], vec![0.0; 5]]);
+        let shared = Mutex::new(Shared {
+            sound,
+            playing: true,
+            speed: 0.5,
+            ..Shared::default()
+        });
+        let mut out = [0.0; 3];
+        fill(&mut out, 1, &shared);
+        assert_eq!(out, [0.0, 0.1, 0.2], "mono: half of the left");
+        let s = lock(&shared);
+        assert_eq!((s.pos, s.between), (1, 0.5));
+        drop(s);
+        fill(&mut out, 1, &shared);
+        assert_eq!(out, [0.3, 0.4, 0.3]);
     }
 }

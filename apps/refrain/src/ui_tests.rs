@@ -52,7 +52,8 @@ fn harness(editor: Editor) -> Harness<'static, Editor> {
 
 fn harness_sized(editor: Editor, height: f32) -> Harness<'static, Editor> {
     let mut h = Harness::builder()
-        .with_size([900.0, height])
+        // Wide enough for the toolbar in one row.
+        .with_size([1000.0, height])
         .wgpu()
         .build_ui_state(|ui, e: &mut Editor| e.show(ui), editor);
     h.run();
@@ -517,7 +518,7 @@ fn dragging_the_line_below_a_track_changes_its_height() {
 fn changing_the_sample_rate_keeps_the_view() {
     let mut h = harness(overlapping());
     // The sample rate choice at the end of the toolbar.
-    click(&mut h, 845.0, 20.0);
+    click(&mut h, 925.0, 20.0);
     h.get_by_label("48 kHz").click();
     h.run();
     let p = h.state().session.project();
@@ -972,7 +973,7 @@ fn a_filter_is_added_and_set_from_the_menus() {
 #[test]
 fn clicks_left_of_the_timeline_move_the_play_position_only_in_the_ruler() {
     let mut e = overlapping();
-    e.scroll = 20_000.0;
+    e.scroll = 15_000.0;
     let mut h = harness(e);
     h.state().player.seek(30_000);
     click(&mut h, 135.0, 110.0);
@@ -980,7 +981,7 @@ fn clicks_left_of_the_timeline_move_the_play_position_only_in_the_ruler() {
     click(&mut h, 60.0, 50.0);
     assert_eq!(
         h.state().player.position(),
-        20_000,
+        15_000,
         "left of the time labels: the left edge shown"
     );
 }
@@ -989,15 +990,15 @@ fn clicks_left_of_the_timeline_move_the_play_position_only_in_the_ruler() {
 #[test]
 fn a_click_in_the_mix_level_row_moves_the_play_position() {
     let mut e = overlapping();
-    e.scroll = 20_000.0;
+    e.scroll = 15_000.0;
     let mut h = harness(e);
     click(&mut h, 400.0, 80.0);
     let at = h.state().player.position();
-    assert!((30_000..40_000).contains(&at), "at {at}");
+    assert!((25_000..35_000).contains(&at), "at {at}");
     click(&mut h, 60.0, 80.0);
     assert_eq!(
         h.state().player.position(),
-        20_000,
+        15_000,
         "left of the bars: the left edge shown"
     );
 }

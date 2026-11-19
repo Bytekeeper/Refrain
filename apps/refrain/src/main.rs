@@ -313,6 +313,32 @@ impl Editor {
             self.toggle_play();
         }
         ui.label(self.time_text(self.player.position()));
+        // The wrapping toolbar cuts a combo box off at the window edge instead of moving it to the next row.
+        if room_left(ui) < 60.0 {
+            ui.end_row();
+        }
+        let speed = self.player.speed();
+        let name = |s: f64| match s {
+            0.5 => "½×",
+            0.25 => "¼×",
+            0.125 => "⅛×",
+            _ => "1×",
+        };
+        egui::ComboBox::from_id_salt("play speed")
+            .selected_text(name(speed))
+            .width(44.0)
+            .show_ui(ui, |ui| {
+                for s in [1.0, 0.5, 0.25, 0.125] {
+                    if ui.selectable_label(s == speed, name(s)).clicked() {
+                        self.player.set_speed(s);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "Playback speed, like a tape: slower is also lower, so a click stays sharp and is easy to find. \
+                 Only for listening; export is unchanged.",
+            );
         let looping = self.session.project().loop_end.is_some();
         if ui
             .selectable_label(looping, "Loop")
@@ -363,7 +389,11 @@ impl Editor {
         }
         // An empty project has no rate yet: the first audio file sets it.
         if self.session.project().sample_rate != 0 {
-            ui.separator();
+            if room_left(ui) < 110.0 {
+                ui.end_row();
+            } else {
+                ui.separator();
+            }
             self.rate_choice(ui);
         }
     }
@@ -598,6 +628,11 @@ impl Editor {
             }
         }
     }
+}
+
+/// The width left in the current toolbar row; in a wrapping row `available_width` is that of a whole row.
+fn room_left(ui: &Ui) -> f32 {
+    ui.max_rect().right() - ui.cursor().min.x
 }
 
 fn khz(rate: u32) -> String {
