@@ -8,7 +8,7 @@ use crate::{Editor, HANDLE, HEADER_W};
 
 pub(crate) const LANE_H: f32 = 24.0;
 /// Space after a track's lanes and after the mix's lanes, so a lane is seen to belong to the track above it.
-pub(crate) const GAP: f32 = 10.0;
+pub(crate) const GAP: f32 = 14.0;
 const EFFECT: Color32 = Color32::from_rgb(180, 130, 255);
 /// A range narrower than this on screen, such as a click repair, is drawn this wide so it can be seen and
 /// grabbed. It can only be moved; zooming in brings its edges back.

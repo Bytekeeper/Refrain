@@ -915,16 +915,16 @@ fn effect_ranges_are_edited_with_the_mouse() {
         lanes.flat_map(|l| l.ranges.iter().map(|r| (r.start, r.end))).collect()
     };
 
-    // The mix lane is at y 108, above the track; the track lane at y 252; x = 146 + frame / 50.
+    // The mix lane is at y 108, above the track; the track lane at y 258; x = 146 + frame / 50.
     drag(&mut h, egui::pos2(226.0, 108.0), egui::pos2(466.0, 108.0));
     assert_eq!(ranges(&h), [(8000, 32000), (4000, 16000)]);
-    drag(&mut h, egui::pos2(520.0, 252.0), egui::pos2(570.0, 252.0));
+    drag(&mut h, egui::pos2(520.0, 258.0), egui::pos2(570.0, 258.0));
     assert_eq!(ranges(&h), [(10_500, 34_500), (4000, 16000)]);
-    drag(&mut h, egui::pos2(836.0, 252.0), egui::pos2(806.0, 252.0));
+    drag(&mut h, egui::pos2(836.0, 258.0), egui::pos2(806.0, 258.0));
     assert_eq!(ranges(&h), [(10_500, 33_000), (4000, 16000)]);
     save(&mut h, "effect_lanes");
 
-    click(&mut h, 40.0, 252.0);
+    click(&mut h, 40.0, 258.0);
     assert!(!h.state().session.project().tracks[0].effects[0].enabled);
     click(&mut h, 320.0, 108.0);
     h.key_press(egui::Key::Delete);
