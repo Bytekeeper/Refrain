@@ -13,7 +13,7 @@ the project; the audio files are never changed. Refrain is not a DAW: no MIDI, n
   waveforms match and can move to the best match.
 - **Loops** that play round without a seam: audio past the loop end goes on at the start.
 - **Effect lanes** under a track or the mix: normalize, loudness, high-pass, low-pass, 10-band EQ, echo,
-  reverb, limiter and pitch. Each lane holds ranges with their own settings; echo and reverb can run reversed.
+  reverb, limiter, pitch and repair (fills a click or a short blip from the sound around it). Each lane holds ranges with their own settings; echo and reverb can run reversed.
 - **Clip speed**, like a tape (faster is higher) or keeping the pitch.
 - **Generated sound**: tones, noise and blips, stored as settings and made again for any length or loop.
 - **Export lanes**: named ranges of the mix, each exported as a file of its own, plus export of the whole mix

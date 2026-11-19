@@ -48,6 +48,8 @@ pub enum Effect {
     Limiter { ceiling_db: f32, release_ms: f32 },
     /// Moves the pitch up or down by `semitones`; the length and timing stay.
     Pitch { semitones: f32 },
+    /// Replaces the range with what the sound around it predicts: removes a click or a short blip.
+    Repair,
 }
 
 /// The centres of the EQ's bands, an octave apart, as on a classic graphic EQ.
@@ -90,6 +92,7 @@ impl Effect {
                 release_ms: 100.0,
             },
             Effect::Pitch { semitones: 2.0 },
+            Effect::Repair,
         ]
     }
 
@@ -112,6 +115,7 @@ impl Effect {
             Effect::Eq { .. } => "EQ",
             Effect::Limiter { .. } => "Limiter",
             Effect::Pitch { .. } => "Pitch",
+            Effect::Repair => "Repair",
         }
     }
 
@@ -124,7 +128,8 @@ impl Effect {
             | Effect::LowPass { .. }
             | Effect::Eq { .. }
             | Effect::Limiter { .. }
-            | Effect::Pitch { .. } => 0,
+            | Effect::Pitch { .. }
+            | Effect::Repair => 0,
             Effect::Echo {
                 delay_ms,
                 fade_db,
@@ -194,7 +199,7 @@ impl Effect {
     /// How much sound before a range a filter hears, so it is settled where the range starts: its memory of the
     /// past fades to -80 dB in this time. The other effects start from silence at the range start.
     pub(crate) fn warmup(&self, rate: u32) -> Frames {
-        if let Effect::Pitch { .. } = self {
+        if let Effect::Pitch { .. } | Effect::Repair = self {
             return self.lookahead(rate);
         }
         let stages = self.filter_stages(rate);
@@ -205,10 +210,11 @@ impl Effect {
     }
 
     /// How much sound after a range the effect hears. The pitch shift works on windows of sound, and the last
-    /// window of the range reaches past it.
+    /// window of the range reaches past it; a repair learns from the sound on both sides.
     pub(crate) fn lookahead(&self, rate: u32) -> Frames {
         match self {
             Effect::Pitch { .. } => Frames::try_from(crate::pitch::window_len(rate)).unwrap_or(0),
+            Effect::Repair => ms_frames(crate::repair::CONTEXT_MS, rate),
             _ => 0,
         }
     }
@@ -595,6 +601,7 @@ fn apply(effect: Effect, rate: u32, gain: f32, sound: &mut [Vec<f32>; 2], weight
             Reverb::new(seconds, rate).run(sound, weights, db_to_amp(level_db));
         }
         Effect::Pitch { semitones } => crate::pitch::shift(semitones, rate, sound, weights),
+        Effect::Repair => crate::repair::fill(sound, weights),
     }
 }
 
@@ -1497,5 +1504,73 @@ mod tests {
         let [left, _] = render(s.project(), 0, 600);
         let at = |i: usize, db: f32| (left[i] - db_to_amp(db)).abs() < 1e-4;
         assert!(at(40, -6.0) && at(580, -18.0) && at(520, -30.0));
+    }
+
+    /// A 10 ms burst of clicks in a chord, and in noise, repaired.
+    fn repaired(clean: &[f32]) -> Vec<f32> {
+        let mut dirty = clean.to_vec();
+        for (i, s) in dirty.iter_mut().skip(24_000).take(480).enumerate() {
+            *s = if i % 2 == 0 { 0.9 } else { -0.9 };
+        }
+        let mut s = Session::default();
+        s.execute(Command::AddTrack { name: "t".into() }).unwrap();
+        let track = s.project().tracks[0].id;
+        let source = Arc::new(Source {
+            path: None,
+            name: "clicks".into(),
+            sample_rate: 48_000,
+            channels: vec![dirty],
+            generated: None,
+        });
+        s.execute(Command::AddClip {
+            track,
+            source,
+            start: 0,
+        })
+        .unwrap();
+        s.execute(Command::AddEffectLane {
+            track: Some(track),
+            effect: Effect::Repair,
+        })
+        .unwrap();
+        let lane = s.project().tracks[0].effects[0].id;
+        s.execute(Command::AddEffectRange {
+            lane,
+            start: 24_000,
+            end: 24_480,
+        })
+        .unwrap();
+        render(s.project(), 0, 48_000)[0].clone()
+    }
+
+    #[test]
+    fn repair_fills_a_click_in_a_chord_and_keeps_the_level_of_noise() {
+        let chord: Vec<f32> = (0..48_000)
+            .map(|i| {
+                let t = i as f32 / 48_000.0;
+                [220.0f32, 330.0, 523.0]
+                    .iter()
+                    .map(|hz| 0.2 * (t * hz * std::f32::consts::TAU).sin())
+                    .sum()
+            })
+            .collect();
+        let out = repaired(&chord);
+        let worst = out
+            .iter()
+            .zip(&chord)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.02, "{worst}");
+
+        let mut state = 7;
+        let noise: Vec<f32> = (0..48_000)
+            .map(|_| 0.5 * crate::repair::random(&mut state) as f32)
+            .collect();
+        let out = repaired(&noise);
+        assert_eq!(out[..24_000], noise[..24_000]);
+        assert_eq!(out[24_480..], noise[24_480..]);
+        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        let db = 20.0 * (rms(&out[24_000..24_480]) / rms(&noise[24_000..24_480])).log10();
+        assert!((-3.0..1.0).contains(&db), "{db}");
     }
 }

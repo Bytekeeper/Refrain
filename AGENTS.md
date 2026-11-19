@@ -59,6 +59,8 @@ the clip, so speed 1 gives the clip back exactly. With "keep pitch" the speed ch
 Generated sound changes speed through its settings.
 The pitch effect keeps the length: a phase vocoder (`engine::pitch`) stretches the sound by the pitch ratio
 and resampling plays it back at the original length.
+Repair fills its range from the sound around it (`engine::repair`): a predictor learned on each side carries the
+sound across, with random sound as large as its errors so noise keeps its level. Its ranges have no fades.
 Sound the editor makes (tone, noise, blips) is stored as its settings, never as samples, and made again
 for a new length, loop length or sample rate.
 

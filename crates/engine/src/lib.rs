@@ -10,6 +10,7 @@ mod model;
 mod pitch;
 mod project_file;
 mod regions;
+mod repair;
 mod session;
 
 pub use effects::{EQ_BANDS_HZ, Effect, EffectLane, EffectRange, Gain, LaneId, RangeId};

@@ -162,7 +162,8 @@ impl Editor {
     /// How much of the effect a frame of the range gets, as the engine computes it: 0 at the edges, 1 past
     /// the fades.
     fn fade_weight(range: &ShownRange, (start, end): (Frames, Frames), frame: Frames) -> f32 {
-        let ramp = |done: Frames, fade: Frames| done as f32 / fade.max(1) as f32;
+        // Without a fade the effect is whole from the range's first frame to its last.
+        let ramp = |done: Frames, fade: Frames| if fade > 0 { done as f32 / fade as f32 } else { 1.0 };
         let (into, left) = (frame - start, end - frame);
         ramp(into, range.fade_in)
             .min(ramp(left, range.fade_out))
@@ -575,6 +576,7 @@ impl Editor {
                     (Effect::Eq { .. }, _) => String::new(),
                     (Effect::Limiter { ceiling_db, .. }, _) => format!("at most {ceiling_db:.1} dB"),
                     (Effect::Pitch { semitones }, _) => format!("{semitones:+.1} st"),
+                    (Effect::Repair, _) => String::new(),
                 };
                 for x in handles
                     .filter(|_| selected)

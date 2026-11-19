@@ -788,8 +788,13 @@ fn apply(p: &mut Project, command: Command) -> Result<()> {
         }
         Command::AddEffectRange { lane, start, end } => {
             let id = RangeId(p.new_id());
-            let fade = default_fade(p.sample_rate);
+            let rate = p.sample_rate;
             let lane = lane_mut(p, lane)?;
+            // A repair joins the sound around it by itself; a fade would let the click back in.
+            let fade = match lane.effect {
+                Effect::Repair => 0,
+                _ => default_fade(rate),
+            };
             lane.ranges.push(EffectRange {
                 id,
                 start,
