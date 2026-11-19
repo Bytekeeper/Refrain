@@ -161,7 +161,7 @@ impl Editor {
                     && self.row_at(rect, hover.y) < project.tracks.len()
                     && (self.row_rect(rect, self.row_at(rect, hover.y)).y_range()).contains(hover.y) =>
                 {
-                    self.hint("Track · double-click the name: rename · right-click: track menu")
+                    self.hint("Track · double-click the name: rename · right-click: channels, delete the track")
                 }
                 None => {}
             }
@@ -493,7 +493,14 @@ impl Editor {
                 ui.separator();
                 self.channels_menu_ui(ui, menu);
             }
-            Menu::Track(_) => self.channels_menu_ui(ui, menu),
+            Menu::Track(track) => {
+                self.channels_menu_ui(ui, menu);
+                ui.separator();
+                if ui.button("Delete track").clicked() {
+                    self.run(Command::RemoveTrack { track });
+                    ui.close();
+                }
+            }
             Menu::Lane(lane, range) => self.lane_menu_ui(ui, lane, range),
         }
     }

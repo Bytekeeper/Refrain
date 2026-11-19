@@ -238,7 +238,7 @@ fn clip_can_be_dragged_past_the_start() {
     save(&mut h, "dragged_past_start");
 }
 
-/// The header's mute button, volume (one drag is one undo step) and trash can.
+/// The header's mute button, volume (one drag is one undo step) and its menu's "Delete track".
 #[test]
 fn track_header_controls() {
     let mut h = harness(overlapping());
@@ -253,7 +253,9 @@ fn track_header_controls() {
     h.state_mut().undo();
     assert_eq!(track(&h), Some((true, 0.0)), "the whole drag is one undo step");
 
-    click(&mut h, 40.0, 190.0);
+    right_click(&mut h, 110.0, 165.0);
+    h.get_by_label("Delete track").click();
+    h.run();
     assert!(h.state().session.project().tracks.is_empty());
     assert_eq!(h.state().selected, None);
 }

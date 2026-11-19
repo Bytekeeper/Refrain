@@ -297,8 +297,7 @@ impl Editor {
             self.run(Command::SetTrackGain { track, db });
         }
 
-        let delete = Rect::from_min_size(pos2(row.left() + 6.0, row.bottom() - 28.0), vec2(24.0, 24.0));
-        let fx = Rect::from_min_size(delete.right_top() + vec2(4.0, 2.0), vec2(80.0, 20.0));
+        let fx = Rect::from_min_size(pos2(row.left() + 6.0, row.bottom() - 26.0), vec2(80.0, 20.0));
         // The lanes show what is there; only hidden ones need counting.
         let label = match track.effects.len() {
             n if n > 0 && self.folded.contains(&track.id) => format!("+ FX ({n})"),
@@ -309,15 +308,6 @@ impl Editor {
                 .response
                 .on_hover_text("Effects on this track: add one, or hide and show its lanes");
         });
-        let response = ui.put(delete, egui::Button::new("")).on_hover_text("Delete this track");
-        draw_trash_can(
-            ui.painter(),
-            delete.shrink(6.0),
-            Stroke::new(1.5, ui.visuals().text_color()),
-        );
-        if response.clicked() {
-            self.run(Command::RemoveTrack { track: track.id });
-        }
     }
 
     /// A track's clips as they look with the current drag applied, sorted by start.
