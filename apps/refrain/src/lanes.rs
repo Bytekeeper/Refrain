@@ -10,6 +10,18 @@ pub(crate) const LANE_H: f32 = 24.0;
 /// Space after a track's lanes and after the mix's lanes, so a lane is seen to belong to the track above it.
 pub(crate) const GAP: f32 = 10.0;
 const EFFECT: Color32 = Color32::from_rgb(180, 130, 255);
+/// A range narrower than this on screen, such as a click repair, is drawn this wide so it can be seen and
+/// grabbed. It can only be moved; zooming in brings its edges back.
+const MIN_RANGE_W: f32 = 10.0;
+
+/// The span a range takes on screen, and whether it was widened to `MIN_RANGE_W`.
+fn drawn_span(x0: f32, x1: f32) -> (f32, f32, bool) {
+    if x1 - x0 >= MIN_RANGE_W {
+        return (x0, x1, false);
+    }
+    let center = (x0 + x1) / 2.0;
+    (center - MIN_RANGE_W / 2.0, center + MIN_RANGE_W / 2.0, true)
+}
 
 /// A range being drawn, moved or resized. The project only changes on release, as one undo step.
 pub(crate) struct RangeDrag {
@@ -425,7 +437,10 @@ impl Editor {
             self.range_spans(lane_left, start, end)
                 .into_iter()
                 .find_map(|(x0, x1)| {
-                    if (pos.x - x0).abs() <= HANDLE {
+                    let (x0, x1, narrow) = drawn_span(x0, x1);
+                    if narrow {
+                        (pos.x >= x0 && pos.x <= x1).then_some((r.id, Edge::Inside))
+                    } else if (pos.x - x0).abs() <= HANDLE {
                         Some((r.id, Edge::Start))
                     } else if (pos.x - x1).abs() <= HANDLE {
                         Some((r.id, Edge::End))
@@ -529,29 +544,34 @@ impl Editor {
             let loop_end = self.session.project().loop_end.unwrap_or(0);
             // The second span is the same range one loop earlier.
             for ((x0, x1), shift) in self.range_spans(lane_left, start, end).into_iter().zip([0, loop_end]) {
+                let (x0, x1, narrow) = drawn_span(x0, x1);
                 let area = Rect::from_x_y_ranges(x0..=x1, body.y_range());
-                // Filled as high as the effect is in: the fades slope.
-                let (from, to) = hears;
-                let mut frames = [from, from + range.fade_in, to - range.fade_out, to];
-                frames.sort();
-                let mut outline = vec![area.left_bottom()];
-                outline.extend(frames.iter().map(|&frame| {
-                    let weight = if handles.is_some() {
-                        Self::fade_weight(range, hears, frame)
-                    } else {
-                        1.0
-                    };
-                    pos2(
-                        self.x_of(lane_left, frame - shift),
-                        area.bottom() - weight * area.height(),
-                    )
-                }));
-                outline.push(area.right_bottom());
-                painter.add(egui::Shape::convex_polygon(
-                    outline,
-                    color.gamma_multiply(0.35),
-                    Stroke::NONE,
-                ));
+                if narrow {
+                    painter.rect_filled(area, 2.0, color.gamma_multiply(0.8));
+                } else {
+                    // Filled as high as the effect is in: the fades slope.
+                    let (from, to) = hears;
+                    let mut frames = [from, from + range.fade_in, to - range.fade_out, to];
+                    frames.sort();
+                    let mut outline = vec![area.left_bottom()];
+                    outline.extend(frames.iter().map(|&frame| {
+                        let weight = if handles.is_some() {
+                            Self::fade_weight(range, hears, frame)
+                        } else {
+                            1.0
+                        };
+                        pos2(
+                            self.x_of(lane_left, frame - shift),
+                            area.bottom() - weight * area.height(),
+                        )
+                    }));
+                    outline.push(area.right_bottom());
+                    painter.add(egui::Shape::convex_polygon(
+                        outline,
+                        color.gamma_multiply(0.35),
+                        Stroke::NONE,
+                    ));
+                }
                 let stroke = if selected {
                     Stroke::new(2.0, Color32::WHITE)
                 } else {
