@@ -94,25 +94,25 @@ impl Editor {
             pos2(rect.left() + 8.0, rect.top() + 13.0),
             Align2::LEFT_CENTER,
             "Mix",
-            FontId::proportional(12.0),
-            ui.visuals().weak_text_color(),
+            FontId::proportional(13.0),
+            ui.visuals().text_color(),
         );
         // The mix's effects and export lanes sit right below and above this row, so they are added here.
         let buttons = Rect::from_min_max(
-            pos2(title.right() + 6.0, rect.top() + 4.0),
+            pos2(title.right() + 4.0, rect.top() + 4.0),
             pos2(lane_left, rect.top() + 22.0),
         );
         let layout = egui::Layout::left_to_right(egui::Align::Center);
         ui.scope_builder(egui::UiBuilder::new().max_rect(buttons).layout(layout), |ui| {
             // Both fit next to "Mix" only this tight.
             ui.spacing_mut().item_spacing.x = 3.0;
-            ui.spacing_mut().button_padding.x = 2.0;
+            ui.spacing_mut().button_padding.x = 3.0;
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            ui.menu_button(egui::RichText::new("+ FX").small(), |ui| self.effects_menu_ui(ui, None))
+            ui.menu_button("+ FX", |ui| self.effects_menu_ui(ui, None))
                 .response
                 .on_hover_text("Effects on all tracks together, such as normalizing the whole loop");
             let add = ui
-                .add(egui::Button::new(egui::RichText::new("+ Export lane").small()))
+                .button("+ Export")
                 .on_hover_text("Add an export lane: named ranges of the mix, each exported to a file of its own");
             if add.clicked() {
                 self.run(Command::AddRegionLane);

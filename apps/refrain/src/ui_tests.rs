@@ -1005,7 +1005,7 @@ fn a_click_in_the_mix_level_row_moves_the_play_position() {
 #[test]
 fn an_export_range_is_renamed_in_its_menu_and_the_panel_stays_reachable() {
     let mut h = harness_sized(overlapping(), 400.0);
-    h.get_by_label("+ Export lane").click();
+    h.get_by_label("+ Export").click();
     h.run();
     let lane = h.state().session.project().region_lanes[0].id;
     h.state_mut().run(Command::AddRegion {
@@ -1045,7 +1045,7 @@ fn an_export_range_is_renamed_in_its_menu_and_the_panel_stays_reachable() {
 #[test]
 fn the_format_of_an_export_lane_is_picked_in_its_menu() {
     let mut h = harness_sized(overlapping(), 500.0);
-    h.get_by_label("+ Export lane").click();
+    h.get_by_label("+ Export").click();
     h.run();
     let lane = h.state().session.project().region_lanes[0].id;
     h.state_mut().run(Command::AddRegion {
