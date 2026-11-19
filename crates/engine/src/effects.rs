@@ -375,6 +375,17 @@ pub(crate) fn tidy_lane(lane: &mut EffectLane, rate: u32, loop_end: Option<Frame
     if lane.ranges.iter().any(|r| r.end <= r.start) {
         return Err(Error::Invalid("an effect range must end after it starts".into()));
     }
+    let longest_repair = ms_frames(crate::repair::MAX_MS, rate);
+    if lane
+        .ranges
+        .iter()
+        .any(|r| matches!(r.effect, Effect::Repair) && r.end - r.start > longest_repair)
+    {
+        return Err(Error::Invalid(format!(
+            "a repair can be at most {} ms long: split the clip and crossfade over a longer problem",
+            crate::repair::MAX_MS
+        )));
+    }
     if lane.ranges.iter().any(|r| r.fade_in < 0 || r.fade_out < 0) {
         return Err(Error::Invalid("a fade cannot be shorter than nothing".into()));
     }
@@ -439,7 +450,13 @@ pub(crate) fn lane_into(
     }
     let mut made = vec![];
     for range in &lane.ranges {
-        let (range_sound, gain) = range_sound(range, project, sound);
+        let others: Vec<(Frames, Frames)> = lane
+            .ranges
+            .iter()
+            .filter(|r| r.id != range.id)
+            .map(|r| (r.start, r.end))
+            .collect();
+        let (range_sound, gain) = range_sound(range, &others, project, sound);
         if let Some(gain) = gain {
             gains.insert(range.id, gain);
         }
@@ -473,7 +490,12 @@ fn write(channel: &mut [f32], loop_end: Option<Frames>, from: Frames, mut made: 
 
 /// The sound of one range's span, from the range start, made from the sound that came into the lane; for
 /// normalize and loudness also what they measured.
-fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) -> ([Vec<f32>; 2], Option<Gain>) {
+fn range_sound(
+    range: &EffectRange,
+    others: &[(Frames, Frames)],
+    project: &Project,
+    sound: &[Vec<f32>; 2],
+) -> ([Vec<f32>; 2], Option<Gain>) {
     let rate = project.sample_rate;
     let loop_end = project.loop_end.filter(|l| *l > 0);
     let effect = range.effect;
@@ -519,7 +541,34 @@ fn range_sound(range: &EffectRange, project: &Project, sound: &[Vec<f32>; 2]) ->
             .chain([&mut weights])
             .for_each(|c| c.resize(c.len() + tail, 0.0));
     }
-    apply(effect, rate, gain.map_or(1.0, |g| g.0), &mut buffer, &weights);
+    if let Effect::Repair = effect {
+        // The sound under the lane's other repairs is what they replace: no use to learn from.
+        // Only the ranges inside what this one reads; with a loop also those one loop away.
+        let to = from.saturating_add(Frames::try_from(weights.len()).unwrap_or(Frames::MAX));
+        let shifts = loop_end.map_or(vec![0], |l| vec![-l, 0, l]);
+        let near: Vec<(Frames, Frames)> = others
+            .iter()
+            .copied()
+            .filter(|&(s, e)| {
+                let shorter_loop = loop_end.is_some_and(|l| to - from > l);
+                shorter_loop || shifts.iter().any(|d| s + d < to && e + d > from)
+            })
+            .collect();
+        let covered = |t: Frames| {
+            near.iter().any(|&(s, e)| {
+                let t = loop_end.map_or(t, |l| s + (t - s).rem_euclid(l));
+                (s..e).contains(&t)
+            })
+        };
+        let skip: Vec<bool> = if near.is_empty() {
+            vec![]
+        } else {
+            (from..to).map(covered).collect()
+        };
+        crate::repair::fill(&mut buffer, &weights, &skip);
+    } else {
+        apply(effect, rate, gain.map_or(1.0, |g| g.0), &mut buffer, &weights);
+    }
     if whole_loop.is_some() {
         seam_fade(&mut buffer, usize::try_from(before).unwrap_or(0), len, after / 4);
     }
@@ -601,7 +650,8 @@ fn apply(effect: Effect, rate: u32, gain: f32, sound: &mut [Vec<f32>; 2], weight
             Reverb::new(seconds, rate).run(sound, weights, db_to_amp(level_db));
         }
         Effect::Pitch { semitones } => crate::pitch::shift(semitones, rate, sound, weights),
-        Effect::Repair => crate::repair::fill(sound, weights),
+        // Needs the lane's other ranges: made in range_sound.
+        Effect::Repair => {}
     }
 }
 
@@ -1506,11 +1556,13 @@ mod tests {
         assert!(at(40, -6.0) && at(580, -18.0) && at(520, -30.0));
     }
 
-    /// A 10 ms burst of clicks in a chord, and in noise, repaired.
-    fn repaired(clean: &[f32]) -> Vec<f32> {
+    /// Bursts of clicks over `clicks` in `clean`, each repaired by a range of one Repair lane.
+    fn repaired(clean: &[f32], clicks: &[(Frames, Frames)]) -> Vec<f32> {
         let mut dirty = clean.to_vec();
-        for (i, s) in dirty.iter_mut().skip(24_000).take(480).enumerate() {
-            *s = if i % 2 == 0 { 0.9 } else { -0.9 };
+        for &(start, end) in clicks {
+            for (i, s) in dirty.iter_mut().enumerate().take(end as usize).skip(start as usize) {
+                *s = if i % 2 == 0 { 0.9 } else { -0.9 };
+            }
         }
         let mut s = Session::default();
         s.execute(Command::AddTrack { name: "t".into() }).unwrap();
@@ -1534,18 +1586,14 @@ mod tests {
         })
         .unwrap();
         let lane = s.project().tracks[0].effects[0].id;
-        s.execute(Command::AddEffectRange {
-            lane,
-            start: 24_000,
-            end: 24_480,
-        })
-        .unwrap();
+        for &(start, end) in clicks {
+            s.execute(Command::AddEffectRange { lane, start, end }).unwrap();
+        }
         render(s.project(), 0, 48_000)[0].clone()
     }
 
-    #[test]
-    fn repair_fills_a_click_in_a_chord_and_keeps_the_level_of_noise() {
-        let chord: Vec<f32> = (0..48_000)
+    fn chord() -> Vec<f32> {
+        (0..48_000)
             .map(|i| {
                 let t = i as f32 / 48_000.0;
                 [220.0f32, 330.0, 523.0]
@@ -1553,8 +1601,13 @@ mod tests {
                     .map(|hz| 0.2 * (t * hz * std::f32::consts::TAU).sin())
                     .sum()
             })
-            .collect();
-        let out = repaired(&chord);
+            .collect()
+    }
+
+    #[test]
+    fn repair_fills_a_click_in_a_chord_and_keeps_the_level_of_noise() {
+        let chord = chord();
+        let out = repaired(&chord, &[(24_000, 24_480)]);
         let worst = out
             .iter()
             .zip(&chord)
@@ -1566,11 +1619,30 @@ mod tests {
         let noise: Vec<f32> = (0..48_000)
             .map(|_| 0.5 * crate::repair::random(&mut state) as f32)
             .collect();
-        let out = repaired(&noise);
+        let out = repaired(&noise, &[(24_000, 24_480)]);
         assert_eq!(out[..24_000], noise[..24_000]);
         assert_eq!(out[24_480..], noise[24_480..]);
         let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
         let db = 20.0 * (rms(&out[24_000..24_480]) / rms(&noise[24_000..24_480])).log10();
         assert!((-3.0..1.0).contains(&db), "{db}");
+    }
+
+    /// A repair learned the other clicks near it as if they were the sound, and one 1 ms away rang louder
+    /// than the click.
+    #[test]
+    fn repairs_near_each_other_do_not_learn_from_the_other_clicks() {
+        let chord = chord();
+        for clicks in [
+            [(23_000, 23_096), (24_000, 24_096)],
+            [(23_904, 23_952), (24_000, 24_096)],
+        ] {
+            let out = repaired(&chord, &clicks);
+            let worst = out
+                .iter()
+                .zip(&chord)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst < 0.01, "{clicks:?}: {worst}");
+        }
     }
 }
