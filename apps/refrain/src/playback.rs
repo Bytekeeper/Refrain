@@ -15,7 +15,14 @@ struct Shared {
     playing: bool,
     /// Like a tape: below 1 slower and lower, so a click stays a click and can be found by ear.
     speed: f64,
+    /// Where playback was before a seek while playing; it fades out over `blend_left` more output frames.
+    leaving: Option<(Frames, f64)>,
+    blend_left: u32,
 }
+
+/// Output frames over which a seek while playing fades from the old place to the new one: a jump straight
+/// from one place in the wave to another is heard as a click. About 5 ms, so the seek still sounds at once.
+const BLEND: u32 = 256;
 
 impl Default for Shared {
     fn default() -> Self {
@@ -26,7 +33,20 @@ impl Default for Shared {
             between: 0.0,
             playing: false,
             speed: 1.0,
+            leaving: None,
+            blend_left: 0,
         }
+    }
+}
+
+impl Shared {
+    fn seek(&mut self, pos: Frames) {
+        if self.playing {
+            self.leaving = Some((self.pos, self.between));
+            self.blend_left = BLEND;
+        }
+        self.pos = pos.max(0);
+        self.between = 0.0;
     }
 }
 
@@ -47,9 +67,7 @@ impl Player {
     }
 
     pub fn seek(&self, pos: Frames) {
-        let mut s = lock(&self.shared);
-        s.pos = pos.max(0);
-        s.between = 0.0;
+        lock(&self.shared).seek(pos);
     }
 
     pub fn speed(&self) -> f64 {
@@ -144,24 +162,43 @@ fn open(rate: u32, shared: Arc<Mutex<Shared>>) -> Result<cpal::Stream, String> {
 /// Runs on the audio thread. Copies without holding the lock so the window never waits on it.
 fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
     out.fill(0.0);
-    let (sound, loop_end, pos, between, speed) = {
+    let (sound, loop_end, here, leaving, blend_left, speed) = {
         let s = lock(shared);
         if !s.playing || channels == 0 {
             return;
         }
-        (s.sound.clone(), s.loop_end, s.pos, s.between, s.speed)
+        (
+            s.sound.clone(),
+            s.loop_end,
+            (s.pos, s.between),
+            s.leaving,
+            s.blend_left,
+            s.speed,
+        )
     };
     let [left, right] = &*sound;
     let get = |c: &Vec<f32>, t: Frames| {
         let at = loop_end.map_or(t, |l| t.rem_euclid(l));
         usize::try_from(at).ok().and_then(|i| c.get(i)).copied().unwrap_or(0.0)
     };
-    for (frame, k) in out.chunks_mut(channels).zip(0u32..) {
+    // The k-th output frame played from a place, reading between frames below speed 1.
+    let at = |(pos, between): (Frames, f64), k: u32| {
         let t = between + f64::from(k) * speed;
         let (whole, part) = (t.floor(), (t - t.floor()) as f32);
         let t = pos.saturating_add(whole as Frames);
-        let read = |c: &Vec<f32>| (get(c, t) * (1.0 - part) + get(c, t + 1) * part).clamp(-1.0, 1.0);
-        let (l, r) = (read(left), read(right));
+        let read = |c: &Vec<f32>| get(c, t) * (1.0 - part) + get(c, t + 1) * part;
+        (read(left), read(right))
+    };
+    for (frame, k) in out.chunks_mut(channels).zip(0u32..) {
+        let (mut l, mut r) = at(here, k);
+        if let Some(old) = leaving
+            && k < blend_left
+        {
+            let w = (blend_left - k) as f32 / BLEND as f32;
+            let (old_l, old_r) = at(old, k);
+            (l, r) = (l + (old_l - l) * w, r + (old_r - r) * w);
+        }
+        let (l, r) = (l.clamp(-1.0, 1.0), r.clamp(-1.0, 1.0));
         match frame {
             [mono] => *mono = (l + r) * 0.5,
             [a, b, ..] => {
@@ -171,17 +208,22 @@ fn fill(out: &mut [f32], channels: usize, shared: &Mutex<Shared>) {
             [] => {}
         }
     }
-    let moved = between + (out.len() / channels) as f64 * speed;
+    let frames = out.len() / channels;
+    let advance = |(pos, between): (Frames, f64)| {
+        let moved = between + frames as f64 * speed;
+        let pos = pos.saturating_add(moved.floor() as Frames);
+        (loop_end.map_or(pos, |l| pos.rem_euclid(l)), moved - moved.floor())
+    };
     let mut s = lock(shared);
     // A seek from the window during copying wins over advancing.
-    if s.pos == pos && s.between == between {
-        s.pos = pos.saturating_add(moved.floor() as Frames);
-        s.between = moved - moved.floor();
-        match loop_end {
-            Some(l) => s.pos = s.pos.rem_euclid(l),
-            None if s.pos >= left.len() as Frames => s.playing = false,
-            None => {}
+    if (s.pos, s.between) == here {
+        (s.pos, s.between) = advance(here);
+        if loop_end.is_none() && s.pos >= left.len() as Frames {
+            s.playing = false;
         }
+        let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+        s.leaving = leaving.filter(|_| blend_left > frames).map(advance);
+        s.blend_left = blend_left.saturating_sub(frames);
     }
 }
 
@@ -209,6 +251,31 @@ mod tests {
         fill(&mut out, 2, &shared);
         assert_eq!(out, [0.4, 0.8, 0.0, 0.0, 0.0, 0.0]);
         assert!(!lock(&shared).playing);
+    }
+
+    /// Regression: a seek while playing jumped from one place in the wave to another and was heard as a click.
+    #[test]
+    fn a_seek_while_playing_does_not_jump() {
+        let tone: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.8).collect();
+        // The steepest the tone itself goes from one frame to the next.
+        let steepest = 0.05 * 0.8;
+        let shared = Mutex::new(Shared {
+            sound: Arc::new([tone.clone(), tone]),
+            playing: true,
+            ..Shared::default()
+        });
+        let mut before = [0.0; 128];
+        fill(&mut before, 2, &shared);
+        // The tone's peak, where the frames played last are near zero.
+        lock(&shared).seek(10_000 + 31);
+        // In small pieces, as a device may ask: the blend goes on from one to the next.
+        let mut after = [0.0; 1024];
+        for piece in after.chunks_mut(64) {
+            fill(piece, 2, &shared);
+        }
+        let heard: Vec<f32> = before.iter().chain(&after).step_by(2).copied().collect();
+        let jump = heard.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        assert!(jump < 2.0 * steepest, "jump {jump}, the tone alone {steepest}");
     }
 
     #[test]
